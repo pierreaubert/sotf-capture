@@ -1,0 +1,61 @@
+[workspace]
+
+[package]
+name = "sotf-capture"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+authors = ["Pierre F. Aubert pierre@spinorama.org"]
+description = "Acoustic measurement capture: swept-sine recording, clock correction, and session handoff"
+repository = "https://github.com/pierreaubert/sotf-capture"
+keywords = ["audio", "dsp", "measurement"]
+categories = ["multimedia::audio"]
+
+[dependencies]
+autoeq = { git = "https://github.com/pierreaubert/autoeq", version = ">=0.5.54" }
+math-dsp = { git = "https://github.com/pierreaubert/math-audio", version = "0.5" }
+# Private rubato 5.0.0 fork (exact variable-ratio sizing, prepared cutoff
+# tables), shared with sotf-daw so offline reference resampling matches the
+# engine's resampler parameters. Local sibling checkout; public builds use git sources.
+rubato = { path = "../sotf-daw/crates/3rdparties/rubato" }
+audioadapter-buffers = "5"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+sha2 = "0.10"
+hound = "3.5"
+log = "0.4.28"
+tempfile = "3.23"
+rustfft = "6.4"
+rtrb = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2.0.17"
+math-rir = { git = "https://github.com/pierreaubert/math-audio", version = "0.5" }
+clap = { version = "4.5", features = ["derive"] }
+ctrlc = { version = "3.5", features = ["termination"] }
+env_logger = "0.11"
+
+[[bin]]
+name = "sotf-capture"
+path = "src/bin/sotf_capture.rs"
+
+# Platform-specific: the full device/playback path is desktop-only (iOS uses
+# the devices stub and compiles no capture I/O), mirroring sotf-engine.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+cpal = "0.17"
+
+[features]
+# Windows ASIO device support (additive; off by default).
+asio = ["cpal/asio"]
+
+[lints.clippy]
+perf = { level = "warn", priority = -1 }
+
+# Local checkouts resolve through patches; public builds use git sources.
+[patch."https://github.com/pierreaubert/autoeq"]
+# Local sibling checkout.
+autoeq = { path = "../autoeq" }
+
+[patch."https://github.com/pierreaubert/math-audio"]
+# Local sibling checkout.
+math-dsp = { path = "../math-audio/crates/math-dsp" }
+math-iir-fir = { path = "../math-audio/crates/math-iir-fir" }
