@@ -5,9 +5,10 @@ recording, clock-drift correction, take quality gating, capture sessions,
 and the recording-wizard domain model. RoomEQ optimization stays in
 `autoeq`; the DAW engine stays in `sotf-daw`; both depend on this crate.
 
-Extracted from `sotf-player` (`recording_types`, `recording_helpers`,
-`capture_session`, `RecordingScreenModel`) and `sotf-engine`
-(`signal_recorder`, `devices`, `rate_limit`) so capture has one owner.
+Part of [SotF](https://github.com/pierreaubert/sotf): extracted from `sotf-player` 
+(`recording_types`, `recording_helpers`, `capture_session`, `RecordingScreenModel`)
+and `sotf-engine` (`signal_recorder`, `devices`, `rate_limit`) so capture 
+has one owner.
 
 ## Layout
 
@@ -30,5 +31,7 @@ frontends keep identical playback behavior. New callers use cpal.
 ```bash
 just check
 just clippy
-cargo test
+just test
+just dev
+just prod
 ```
