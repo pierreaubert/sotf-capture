@@ -39,6 +39,8 @@ fn invalid_plans_fail_before_hardware_access() {
         |p| p.sources.clear(),
         |p| p.sources[0].output_channel = 64,
         |p| p.sources.push(p.sources[0].clone()),
+        |p| p.repeat_count = 0,
+        |p| p.repeat_count = 17,
         |p| p.sweep.duration_secs = f64::INFINITY,
         |p| p.sweep.duration_secs = 1e100,
         |p| p.sweep.duration_secs = 1e-100,
@@ -53,6 +55,40 @@ fn invalid_plans_fail_before_hardware_access() {
         change(&mut value);
         assert!(value.validate().is_err(), "invalid case {index} accepted");
     }
+}
+
+#[test]
+fn legacy_plan_defaults_to_one_repeat_and_repeat_count_round_trips() {
+    let mut json = serde_json::to_value(plan()).unwrap();
+    json.as_object_mut().unwrap().remove("repeat_count");
+    let legacy: CaptureSessionPlan = serde_json::from_value(json).unwrap();
+    assert_eq!(legacy.repeat_count, 1);
+
+    let mut repeated = legacy;
+    repeated.repeat_count = 3;
+    let restored: CaptureSessionPlan =
+        serde_json::from_slice(&serde_json::to_vec(&repeated).unwrap()).unwrap();
+    assert_eq!(restored.validate().unwrap().plan().repeat_count, 3);
+}
+
+#[test]
+fn repeat_count_keeps_the_total_take_inventory_bounded() {
+    let mut value = plan();
+    while value.sources.len() < 64 {
+        let index = value.sources.len();
+        value.sources.push(CaptureSource {
+            id: format!("source-{index}"),
+            output_channel: index as u16,
+        });
+    }
+    value.repeat_count = 9;
+    assert!(
+        value
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("1024-take")
+    );
 }
 
 #[test]

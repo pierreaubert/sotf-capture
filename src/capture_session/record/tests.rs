@@ -193,3 +193,104 @@ fn existing_directory_is_never_overwritten() {
         "existing recording"
     );
 }
+
+#[test]
+fn cancelled_repeated_parent_processes_an_explicit_full_matrix_and_keeps_lineage() {
+    use crate::capture_session::clock::io::process_capture_session_with_selection;
+
+    let root = tempfile::tempdir().unwrap();
+    let mut plan: CaptureSessionPlan =
+        serde_json::from_str(include_str!("../../../tests/fixtures/capture-session.json")).unwrap();
+    plan.sweep.duration_secs = 0.05;
+    plan.sources.truncate(1);
+    plan.repeat_count = 2;
+    for mic in &plan.microphones {
+        std::fs::write(
+            root.path().join(&mic.calibration_file),
+            "20 0\n1000 1\n20000 0\n",
+        )
+        .unwrap();
+    }
+    let session = plan.validate().unwrap();
+    let raw = root.path().join("raw-session");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let error = record_with(
+        &session,
+        root.path(),
+        &raw,
+        &cancel,
+        |_| {},
+        |request, flag| {
+            let captured = fake_capture(request, flag)?;
+            flag.store(true, Ordering::Relaxed);
+            Ok(captured)
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error, "cancelled");
+    let parent_bytes = std::fs::read(raw.join("capture-raw.json")).unwrap();
+    let parent: RawCaptureManifest = serde_json::from_slice(&parent_bytes).unwrap();
+    assert_eq!(parent.status, RawCaptureStatus::Cancelled);
+    assert_eq!(parent.plan.repeat_count, 2);
+    assert_eq!(parent.takes.len(), parent.plan.microphones.len());
+    assert!(parent.takes.iter().all(|take| take.repeat_index == 0));
+
+    let selected = parent
+        .takes
+        .iter()
+        .map(|take| take.take_id.clone())
+        .collect::<Vec<_>>();
+    let output = root.path().join("processed-session");
+    let report = process_capture_session_with_selection(&raw, &output, &selected).unwrap();
+    assert_eq!(report.raw_status, Some(RawCaptureStatus::Cancelled));
+    assert_eq!(
+        report.selected_take_ids.as_deref(),
+        Some(selected.as_slice())
+    );
+    assert_eq!(
+        report.recording_manifest.as_deref(),
+        Some("recordings.json")
+    );
+    assert_eq!(
+        std::fs::read(output.join("capture-raw.json")).unwrap(),
+        parent_bytes
+    );
+
+    let handoff: autoeq::capture_handoff::CaptureHandoff = serde_json::from_slice(
+        &std::fs::read(output.join(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME)).unwrap(),
+    )
+    .unwrap();
+    handoff.validate().unwrap();
+    assert_eq!(
+        handoff.completion,
+        autoeq::capture_handoff::CaptureCompletion::Cancelled
+    );
+    assert_eq!(handoff.repeat_count, 2);
+    assert_eq!(
+        handoff.selected_take_ids.as_deref(),
+        Some(selected.as_slice())
+    );
+    assert_eq!(handoff.takes.len(), parent.takes.len());
+    let parent_identity = handoff
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.file == "capture-raw.json")
+        .unwrap();
+    assert_eq!(parent_identity.sha256, handoff.session_id);
+    for (processed, raw_take) in handoff.takes.iter().zip(&parent.takes) {
+        assert_eq!(processed.take_id, raw_take.take_id);
+        assert_eq!(processed.repeat_index, raw_take.repeat_index);
+        assert_eq!(
+            std::fs::read(output.join(&processed.raw_audio_file)).unwrap(),
+            std::fs::read(raw.join(&raw_take.wav_file)).unwrap()
+        );
+    }
+
+    // Exercise the strict public consumer with a cancelled but explicitly
+    // selected full source/microphone matrix.
+    autoeq::roomeq::load_config(&output.join("recordings.json"), None).unwrap();
+    let mut changed_parent = parent_bytes;
+    changed_parent[0] ^= 1;
+    std::fs::write(output.join("capture-raw.json"), changed_parent).unwrap();
+    assert!(autoeq::roomeq::load_config(&output.join("recordings.json"), None).is_err());
+}

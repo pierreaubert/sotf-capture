@@ -33,6 +33,16 @@ pub struct ClockProcessedManifest {
     pub version: u32,
     /// Original geometry, gains, routes, and timing-reference survey.
     pub plan: CaptureSessionPlan,
+    /// Acquisition lifecycle copied from the immutable raw parent journal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_status: Option<RawCaptureStatus>,
+    /// Exact take identities selected for the canonical source/microphone matrix.
+    /// Absent means no import-ready projection was requested or is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_take_ids: Option<Vec<String>>,
+    /// Filename of the byte-for-byte raw acquisition journal retained in this bundle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_inventory_file: Option<String>,
     /// Stimulus-clock sweep and chirp positions.
     pub stimulus: CaptureStimulusLayout,
     /// Calibration snapshots copied and verified against acquisition hashes.
@@ -50,6 +60,9 @@ pub struct ClockProcessedManifest {
 }
 
 fn artifact(root: &Path, name: &str) -> Result<std::path::PathBuf, String> {
+    if !autoeq::capture_handoff::portable_capture_filename(name) {
+        return Err("capture artifact paths must be portable relative filenames".into());
+    }
     let mut components = Path::new(name).components();
     if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
         return Err("capture artifact paths must be single relative filenames".into());
@@ -116,11 +129,26 @@ pub fn process_capture_session(
     raw_directory: &Path,
     output_directory: &Path,
 ) -> Result<ClockProcessedManifest, String> {
+    process_capture_session_with_selection(raw_directory, output_directory, &[])
+}
+
+/// Process saved captures and project exactly one explicit take per planned
+/// source/microphone pair when selection is required.
+///
+/// An empty selection keeps legacy behavior only for a complete one-repeat
+/// parent. Repeated or partial parents still receive diagnostic processing,
+/// but cannot produce an import-ready configuration without an explicit matrix.
+/// No audio devices are opened and no repeated responses are averaged.
+pub fn process_capture_session_with_selection(
+    raw_directory: &Path,
+    output_directory: &Path,
+    selected_take_ids: &[String],
+) -> Result<ClockProcessedManifest, String> {
     let root = raw_directory
         .canonicalize()
         .map_err(|e| format!("cannot open raw capture directory: {e}"))?;
     let raw_journal_bytes = bounded_read(&artifact(&root, "capture-raw.json")?, 2_097_152)?;
-    let manifest: RawCaptureManifest = serde_json::from_slice(&raw_journal_bytes)
+    let mut manifest: RawCaptureManifest = serde_json::from_slice(&raw_journal_bytes)
         .map_err(|e| format!("cannot parse raw capture journal: {e}"))?;
     if manifest.version != 1
         || manifest.status == RawCaptureStatus::Capturing
@@ -135,6 +163,7 @@ pub fn process_capture_session(
         .clone()
         .validate()
         .map_err(|e| e.to_string())?;
+    normalize_legacy_take_ids(&mut manifest)?;
     let expected = crate::capture_session::protocol::prepare_capture_stimulus(&session)?;
     if manifest.stimulus != expected.layout {
         return Err("stimulus layout disagrees with the capture plan".into());
@@ -145,6 +174,26 @@ pub fn process_capture_session(
         manifest.stimulus.chirp_samples,
     )?;
     let mut routes = HashSet::new();
+    let mut take_ids = HashSet::new();
+    let mut raw_files = HashSet::new();
+    let mut output_names = HashSet::from([
+        "capture-raw.json".to_owned(),
+        "capture-clock.json".to_owned(),
+        "capture-handoff.json".to_owned(),
+        "recordings.json".to_owned(),
+        "stimulus.wav".to_owned(),
+        "timing-chirp.wav".to_owned(),
+    ]);
+    for index in 0..manifest.takes.len() {
+        for name in [
+            format!("take-{index:03}.wav"),
+            format!("take-{index:03}-magnitude.csv"),
+            format!("take-{index:03}-phase.csv"),
+            format!("take-{index:03}-ir.json"),
+        ] {
+            output_names.insert(name);
+        }
+    }
     for take in &manifest.takes {
         if !manifest
             .plan
@@ -156,7 +205,12 @@ pub fn process_capture_session(
                 .sources
                 .iter()
                 .any(|source| source.id == take.source_id)
-            || !routes.insert((&take.source_id, &take.microphone_id))
+            || take.repeat_index >= manifest.plan.repeat_count
+            || take.take_id.trim().is_empty()
+            || !take_ids.insert(&take.take_id)
+            || !routes.insert((&take.source_id, &take.microphone_id, take.repeat_index))
+            || !raw_files.insert(take.wav_file.to_ascii_lowercase())
+            || !output_names.insert(take.wav_file.to_ascii_lowercase())
             || take.device_id.is_empty()
             || take.output_device_id.is_empty()
         {
@@ -164,11 +218,34 @@ pub fn process_capture_session(
         }
         artifact(&root, &take.wav_file)?;
     }
+    let expected_take_count = manifest
+        .plan
+        .microphones
+        .len()
+        .checked_mul(manifest.plan.sources.len())
+        .and_then(|count| count.checked_mul(manifest.plan.repeat_count as usize))
+        .ok_or("raw capture take count overflow")?;
     if manifest.status == RawCaptureStatus::RawComplete
-        && manifest.takes.len() != manifest.plan.microphones.len() * manifest.plan.sources.len()
+        && manifest.takes.len() != expected_take_count
     {
-        return Err("completed raw capture is missing source/microphone takes".into());
+        return Err("completed raw capture is missing source/microphone/repeat takes".into());
     }
+    let selected_take_ids = if selected_take_ids.is_empty() {
+        if manifest.status == RawCaptureStatus::RawComplete && manifest.plan.repeat_count == 1 {
+            Some(
+                manifest
+                    .takes
+                    .iter()
+                    .map(|take| take.take_id.clone())
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        }
+    } else {
+        validate_selected_take_ids(&manifest, selected_take_ids)?;
+        Some(selected_take_ids.to_vec())
+    };
     let mut calibration_ids = HashSet::new();
     let mut calibration_bytes = Vec::new();
     for calibration in &manifest.calibrations {
@@ -178,6 +255,7 @@ pub fn process_capture_session(
             .iter()
             .any(|mic| mic.id == calibration.microphone_id)
             || !calibration_ids.insert(&calibration.microphone_id)
+            || !output_names.insert(calibration.file.to_ascii_lowercase())
         {
             return Err("capture calibration identities are unknown or duplicated".into());
         }
@@ -195,6 +273,16 @@ pub fn process_capture_session(
     }
     std::fs::create_dir(output_directory)
         .map_err(|e| format!("cannot create new processed capture directory: {e}"))?;
+    std::fs::write(
+        output_directory.join("capture-raw.json"),
+        &raw_journal_bytes,
+    )
+    .map_err(|e| format!("cannot preserve raw acquisition journal: {e}"))?;
+    let preserved_journal = std::fs::read(output_directory.join("capture-raw.json"))
+        .map_err(|error| format!("cannot verify preserved raw acquisition journal: {error}"))?;
+    if preserved_journal != raw_journal_bytes {
+        return Err("preserved raw acquisition journal bytes changed during copy".into());
+    }
     for (file, bytes) in calibration_bytes {
         std::fs::write(output_directory.join(file), bytes).map_err(|e| e.to_string())?;
     }
@@ -205,6 +293,9 @@ pub fn process_capture_session(
     let mut result = ClockProcessedManifest {
         version: 1,
         plan: manifest.plan.clone(),
+        raw_status: Some(manifest.status),
+        selected_take_ids,
+        parent_inventory_file: Some("capture-raw.json".into()),
         stimulus: manifest.stimulus.clone(),
         calibrations: manifest.calibrations.clone(),
         takes: Vec::new(),
@@ -219,7 +310,7 @@ pub fn process_capture_session(
     for (index, take) in manifest.takes.iter().enumerate() {
         // Analyze the retained original-clock snapshot so the imported evidence
         // is bound to these exact samples after the raw directory is moved.
-        let raw_name = format!("raw-take-{index:03}.wav");
+        let raw_name = take.wav_file.clone();
         std::fs::copy(
             artifact(&root, &take.wav_file)?,
             output_directory.join(&raw_name),
@@ -330,4 +421,62 @@ pub fn process_capture_session(
         )?;
     }
     Ok(result)
+}
+
+fn normalize_legacy_take_ids(manifest: &mut RawCaptureManifest) -> Result<(), String> {
+    let missing = manifest
+        .takes
+        .iter()
+        .filter(|take| take.take_id.trim().is_empty())
+        .count();
+    if missing == 0 {
+        return Ok(());
+    }
+    if missing != manifest.takes.len() || manifest.plan.repeat_count != 1 {
+        return Err("raw capture mixes missing take IDs or omits repeated-take identities".into());
+    }
+    for take in &mut manifest.takes {
+        take.take_id = crate::capture_session::record::stable_take_id(
+            &take.source_id,
+            &take.microphone_id,
+            take.repeat_index,
+        );
+    }
+    Ok(())
+}
+
+fn validate_selected_take_ids(
+    manifest: &RawCaptureManifest,
+    selected_take_ids: &[String],
+) -> Result<(), String> {
+    let mut selected = HashSet::new();
+    let mut pairs = HashSet::new();
+    for id in selected_take_ids {
+        if !selected.insert(id.as_str()) {
+            return Err(format!("selected take ID is duplicated: {id}"));
+        }
+        let take = manifest
+            .takes
+            .iter()
+            .find(|take| take.take_id == *id)
+            .ok_or_else(|| format!("selected take ID is unknown: {id}"))?;
+        if !pairs.insert((take.source_id.as_str(), take.microphone_id.as_str())) {
+            return Err(format!(
+                "selection contains more than one take for {}/{}",
+                take.source_id, take.microphone_id
+            ));
+        }
+    }
+    let expected = manifest
+        .plan
+        .sources
+        .len()
+        .checked_mul(manifest.plan.microphones.len())
+        .ok_or("selected take count overflow")?;
+    if selected_take_ids.len() != expected {
+        return Err(
+            "selection must contain exactly one completed take per source/microphone pair".into(),
+        );
+    }
+    Ok(())
 }

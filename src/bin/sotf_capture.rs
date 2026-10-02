@@ -141,6 +141,18 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Clock-process a saved raw session without opening audio devices.
+    PlanProcess {
+        /// Path to the immutable capture-raw.json journal.
+        #[arg(long)]
+        raw: PathBuf,
+        /// New output directory for processed evidence and optional RoomEQ projection.
+        #[arg(long)]
+        output: PathBuf,
+        /// Explicit take ID to project; repeat once per source/microphone pair.
+        #[arg(long = "select-take")]
+        selected_take_ids: Vec<String>,
+    },
 }
 
 fn validated_amp(amp: Option<f32>, flag: &str) -> Result<f32, String> {
@@ -451,7 +463,9 @@ fn plan_record(plan_path: &std::path::Path, output: &std::path::Path) -> Result<
         .unwrap_or_else(|| std::path::Path::new("."));
     let manifest = record_capture_session(&session, plan_directory, output, &cancel, |event| {
         println!(
-            "Recording source {}/{}: {} (all microphones)",
+            "Recording repeat {}/{} — source {}/{}: {} (all microphones)",
+            event.repeat_index + 1,
+            event.repeat_count,
             event.source_index + 1,
             event.source_count,
             event.source_id
@@ -461,6 +475,36 @@ fn plan_record(plan_path: &std::path::Path, output: &std::path::Path) -> Result<
         "Saved {} raw takes. Clock correction, calibrated analysis and take QA remain pending.",
         manifest.takes.len()
     );
+    Ok(())
+}
+
+fn plan_process(
+    raw_manifest_path: &std::path::Path,
+    output: &std::path::Path,
+    selected_take_ids: &[String],
+) -> Result<(), String> {
+    use sotf_capture::capture_session::clock::io::process_capture_session_with_selection;
+
+    if raw_manifest_path.file_name().and_then(|name| name.to_str()) != Some("capture-raw.json") {
+        return Err("--raw must name a capture-raw.json journal".into());
+    }
+    let raw_directory = raw_manifest_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let report = process_capture_session_with_selection(raw_directory, output, selected_take_ids)?;
+    if let Some(configuration) = report.recording_manifest {
+        println!(
+            "Saved analyzed capture selection to {}/{}.",
+            output.display(),
+            configuration
+        );
+    } else {
+        println!(
+            "Saved diagnostics for {:?} parent; no complete selected source/microphone matrix was published.",
+            report.raw_status
+        );
+    }
     Ok(())
 }
 
@@ -580,6 +624,11 @@ fn run() -> Result<(), String> {
         ),
         Command::PlanValidate { plan } => plan_validate(&plan),
         Command::PlanRecord { plan, output } => plan_record(&plan, &output),
+        Command::PlanProcess {
+            raw,
+            output,
+            selected_take_ids,
+        } => plan_process(&raw, &output, &selected_take_ids),
     }
 }
 
@@ -650,6 +699,37 @@ mod tests {
                 ])
                 .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn plan_process_accepts_one_explicit_flag_per_selected_take() {
+        let cli = Cli::try_parse_from([
+            "sotf-capture",
+            "plan-process",
+            "--raw",
+            "session/capture-raw.json",
+            "--output",
+            "processed",
+            "--select-take",
+            "take-r000-0123456789abcdef",
+            "--select-take",
+            "take-r000-fedcba9876543210",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::PlanProcess {
+                raw,
+                output,
+                selected_take_ids,
+            } => {
+                assert_eq!(raw, PathBuf::from("session/capture-raw.json"));
+                assert_eq!(output, PathBuf::from("processed"));
+                assert_eq!(selected_take_ids.len(), 2);
+                assert_eq!(selected_take_ids[0], "take-r000-0123456789abcdef");
+                assert_eq!(selected_take_ids[1], "take-r000-fedcba9876543210");
+            }
+            _ => panic!("expected plan-process command"),
         }
     }
 

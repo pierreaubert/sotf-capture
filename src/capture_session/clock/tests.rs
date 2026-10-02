@@ -73,6 +73,12 @@ fn sample_clock(stimulus: &[f32], offset: f64, ppm: f64, propagation: f64) -> Ve
 
 fn take(manifest: &RawCaptureManifest, index: usize, samples: usize) -> RawCaptureTake {
     RawCaptureTake {
+        take_id: crate::capture_session::record::stable_take_id(
+            "left",
+            &manifest.plan.microphones[index].id,
+            0,
+        ),
+        repeat_index: 0,
         device_id: format!("usb-{index}"),
         output_device_id: "dac".into(),
         source_id: "left".into(),
@@ -434,6 +440,44 @@ fn canonical_phase_requires_complete_quality_and_retains_frequency_gate() {
 }
 
 #[test]
+fn legacy_clock_report_without_raw_status_requires_the_complete_single_repeat_matrix() {
+    let root = write_golden_directory();
+    let output = root.path().join("legacy-processed");
+    let report = io::process_capture_session(root.path(), &output).unwrap();
+    let mut value = serde_json::to_value(report).unwrap();
+    let report = value.as_object_mut().unwrap();
+    report.remove("raw_status");
+    report.remove("selected_take_ids");
+    report.remove("parent_inventory_file");
+    value["plan"]
+        .as_object_mut()
+        .unwrap()
+        .remove("repeat_count");
+
+    let legacy: io::ClockProcessedManifest = serde_json::from_value(value).unwrap();
+    let configuration = crate::capture_session::manifest::recording_configuration(&legacy)
+        .expect("legacy reports retain complete single-repeat compatibility");
+    assert_eq!(configuration.speakers.len(), legacy.plan.sources.len());
+
+    let mut incomplete = legacy.clone();
+    incomplete.takes.pop();
+    assert!(
+        crate::capture_session::manifest::recording_configuration(&incomplete).is_err(),
+        "legacy compatibility must still require every source/microphone pair"
+    );
+
+    for status in [RawCaptureStatus::Cancelled, RawCaptureStatus::Failed] {
+        let mut explicitly_incomplete = legacy.clone();
+        explicitly_incomplete.raw_status = Some(status);
+        assert!(
+            crate::capture_session::manifest::recording_configuration(&explicitly_incomplete)
+                .is_err(),
+            "explicit {status:?} status must not use the legacy projection"
+        );
+    }
+}
+
+#[test]
 fn altered_calibration_snapshot_is_rejected_before_output_creation() {
     let root = write_golden_directory();
     std::fs::write(root.path().join("calibration-1.txt"), "changed").unwrap();
@@ -456,4 +500,49 @@ fn raw_journal_cannot_read_artifacts_outside_its_directory() {
             .unwrap_err()
             .contains("relative filenames")
     );
+}
+
+#[test]
+fn selection_rejects_duplicate_unknown_and_incomplete_take_ids_before_writing() {
+    let root = write_golden_directory();
+    let raw: RawCaptureManifest =
+        serde_json::from_slice(&std::fs::read(root.path().join("capture-raw.json")).unwrap())
+            .unwrap();
+    let first = raw.takes[0].take_id.clone();
+    let second = raw.takes[1].take_id.clone();
+    let cases = [
+        (vec![first.clone(), first], "selected take ID is duplicated"),
+        (
+            vec![second.clone(), "unknown-take".into()],
+            "selected take ID is unknown",
+        ),
+        (
+            vec![second],
+            "exactly one completed take per source/microphone pair",
+        ),
+    ];
+    for (index, (selected, expected)) in cases.into_iter().enumerate() {
+        let output = root.path().join(format!("invalid-selection-{index}"));
+        let error = io::process_capture_session_with_selection(root.path(), &output, &selected)
+            .unwrap_err();
+        assert!(error.contains(expected), "{error}");
+        assert!(!output.exists());
+    }
+}
+
+#[test]
+fn raw_take_repeat_index_must_belong_to_the_plan() {
+    let root = write_golden_directory();
+    let path = root.path().join("capture-raw.json");
+    let mut manifest: RawCaptureManifest =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest.takes[0].repeat_index = manifest.plan.repeat_count;
+    std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let output = root.path().join("out-of-domain-repeat");
+    let error = io::process_capture_session(root.path(), &output).unwrap_err();
+    assert!(
+        error.contains("unknown, duplicate, or unidentified"),
+        "{error}"
+    );
+    assert!(!output.exists());
 }

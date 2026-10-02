@@ -6,7 +6,7 @@ use autoeq::capture_handoff::{
     CAPTURE_HANDOFF_FILENAME, CaptureArtifactIdentity, CaptureArtifactRole, CaptureCompletion,
     CaptureHandoff, CaptureTakeIdentity,
 };
-use autoeq::roomeq::{MeasurementSource, SpeakerConfig};
+use autoeq::roomeq::{MeasurementSource, RoomConfig, SpeakerConfig};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -48,6 +48,33 @@ fn file_identity(
     })
 }
 
+fn projected_response_file(
+    configuration: &RoomConfig,
+    source_id: &str,
+    microphone_id: &str,
+) -> Result<String, String> {
+    let Some(SpeakerConfig::Single(MeasurementSource::Multiple(source))) =
+        configuration.speakers.get(source_id)
+    else {
+        return Err("canonical capture source is unavailable".into());
+    };
+    let capture = source
+        .provenance
+        .capture
+        .as_ref()
+        .ok_or("canonical capture provenance is unavailable")?;
+    let index = capture
+        .takes
+        .iter()
+        .position(|take| take.microphone_id == microphone_id)
+        .ok_or("canonical microphone is unavailable")?;
+    source.measurements[index]
+        .path()
+        .and_then(|path| path.to_str())
+        .map(str::to_owned)
+        .ok_or_else(|| "canonical response filename is unavailable".into())
+}
+
 /// Publish exact artifact identities after a complete canonical projection exists.
 ///
 /// Raw audio snapshots are copied before analysis by the clock-processing stage.
@@ -72,39 +99,46 @@ pub fn publish_capture_handoff(
         configuration_file.clone(),
         CaptureArtifactRole::Configuration,
     )]);
-    for name in ["capture-clock.json", "stimulus.wav", "timing-chirp.wav"] {
+    for name in [
+        "capture-clock.json",
+        "capture-raw.json",
+        "stimulus.wav",
+        "timing-chirp.wav",
+    ] {
         roles.insert(name.into(), CaptureArtifactRole::SupportingEvidence);
     }
+    let selected_take_ids = report.selected_take_ids.as_ref().map(|ids| {
+        ids.iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>()
+    });
     let mut takes = Vec::new();
-    for (index, processed) in report.takes.iter().enumerate() {
+    for processed in &report.takes {
         let source_id = &processed.raw.source_id;
         let mic_id = &processed.raw.microphone_id;
-        let Some(SpeakerConfig::Single(MeasurementSource::Multiple(source))) =
-            configuration.speakers.get(source_id)
-        else {
-            return Err("canonical capture source is unavailable".into());
+        let is_selected = selected_take_ids
+            .as_ref()
+            .is_some_and(|ids| ids.contains(processed.raw.take_id.as_str()));
+        let response_file = if is_selected {
+            Some(projected_response_file(&configuration, source_id, mic_id)?)
+        } else {
+            processed.analysis.as_ref().and_then(|analysis| {
+                analysis.magnitude_file.clone().or_else(|| {
+                    analysis
+                        .common_reference
+                        .as_ref()
+                        .map(|phase| phase.response_file.clone())
+                })
+            })
         };
-        let capture = source
-            .provenance
-            .capture
-            .as_ref()
-            .ok_or("canonical capture provenance is unavailable")?;
-        let take_index = capture
-            .takes
-            .iter()
-            .position(|take| take.microphone_id == *mic_id)
-            .ok_or("canonical microphone is unavailable")?;
-        let response_file = source.measurements[take_index]
-            .path()
-            .and_then(|path| path.to_str())
-            .ok_or("canonical response filename is unavailable")?
-            .to_string();
-        let complex = processed
-            .analysis
-            .as_ref()
-            .and_then(|analysis| analysis.common_reference.as_ref())
-            .is_some_and(|phase| phase.response_file == response_file);
-        let raw_audio_file = format!("raw-take-{index:03}.wav");
+        let complex = response_file.as_ref().is_some_and(|response_file| {
+            processed
+                .analysis
+                .as_ref()
+                .and_then(|analysis| analysis.common_reference.as_ref())
+                .is_some_and(|phase| phase.response_file == *response_file)
+        });
+        let raw_audio_file = processed.raw.wav_file.clone();
         let calibration = report
             .calibrations
             .iter()
@@ -116,14 +150,16 @@ pub fn publish_capture_handoff(
             CaptureArtifactRole::ProcessedAudio,
         );
         roles.insert(calibration.file.clone(), CaptureArtifactRole::Calibration);
-        roles.insert(
-            response_file.clone(),
-            if complex {
-                CaptureArtifactRole::ComplexResponse
-            } else {
-                CaptureArtifactRole::MagnitudeResponse
-            },
-        );
+        if let Some(response_file) = &response_file {
+            roles.insert(
+                response_file.clone(),
+                if complex {
+                    CaptureArtifactRole::ComplexResponse
+                } else {
+                    CaptureArtifactRole::MagnitudeResponse
+                },
+            );
+        }
         if let Some(analysis) = &processed.analysis {
             if let Some(file) = &analysis.magnitude_file {
                 roles
@@ -139,15 +175,22 @@ pub fn publish_capture_handoff(
             }
         }
         takes.push(CaptureTakeIdentity {
-            take_id: format!("take-{index:03}"),
+            take_id: processed.raw.take_id.clone(),
             source_id: source_id.clone(),
-            repeat_index: 0,
+            repeat_index: processed.raw.repeat_index,
             raw_audio_file,
             processed_audio_file: processed.audio_file.clone(),
             response_file,
             calibration_file: calibration.file.clone(),
-            provenance: capture.takes[take_index].clone(),
+            provenance: super::manifest::take_provenance(report, processed)?,
         });
+    }
+    let parent_bytes = std::fs::read(output.join("capture-raw.json"))
+        .map_err(|error| format!("cannot verify preserved parent inventory: {error}"))?;
+    if parent_bytes != raw_journal_bytes {
+        return Err(
+            "preserved parent inventory differs from exact acquisition journal bytes".into(),
+        );
     }
     // Bind producer-owned evidence only. Finder metadata and unrelated notes
     // are not acquisition artifacts and must not invalidate a moved bundle.
@@ -181,7 +224,9 @@ pub fn publish_capture_handoff(
             .iter()
             .map(|mic| mic.id.clone())
             .collect(),
-        repeat_count: 1,
+        repeat_count: report.plan.repeat_count,
+        selected_take_ids: report.selected_take_ids.clone(),
+        parent_inventory_file: Some("capture-raw.json".into()),
         configuration_file,
         artifacts,
         takes,
