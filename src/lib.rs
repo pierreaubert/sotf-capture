@@ -17,6 +17,8 @@ pub mod capture_session;
 pub mod devices;
 #[cfg(target_os = "ios")]
 mod devices_stub;
+#[cfg(not(target_os = "ios"))]
+pub mod live_level;
 #[cfg(target_os = "ios")]
 pub use devices_stub as devices;
 pub mod rate_limit;
