@@ -91,3 +91,16 @@ These are amplitude bins rather than PSD or band-integrated noise levels.
 Absolute SPL is `null`; microphone response compensation and absolute calibration
 remain separate from this raw monitoring path. Digital silence has no finite
 RMS/peak dB value. Nonfinite input and gaps have empty spectra and explicit flags.
+
+## SPL calibration anchors
+
+The SPL calibration backend accepts an unclipped, nonzero finite RMS reference
+capture plus a finite contemporaneous external-meter reading. Silence, invalid
+levels, invalid rates and reference frequencies at or above Nyquist are refused.
+Starting a new calibration invalidates the previous capture and meter reading;
+only completed captures can supply an anchor in the recording configuration.
+
+The offset is `meter dBSPL - 20 log10(captured RMS)`. Reuse requires the same
+microphone, input channel and gain. It does not supply frequency-response
+compensation or calibration for a different machine, and the raw live monitor
+continues to report unknown absolute SPL.
