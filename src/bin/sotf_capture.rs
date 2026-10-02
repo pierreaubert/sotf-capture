@@ -34,6 +34,24 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Emit raw live level/RTA JSON frames from an explicitly selected input.
+    Live {
+        /// Input device ID or unique name; no default-device fallback.
+        #[arg(long)]
+        input_device: String,
+        /// Zero-based hardware input channel.
+        #[arg(long, default_value_t = 0)]
+        input_channel: u16,
+        /// Required hardware sample rate, without resampling.
+        #[arg(long, default_value_t = 48000)]
+        sample_rate: u32,
+        /// Power-of-two nonoverlapping FFT block size.
+        #[arg(long, default_value_t = 4096)]
+        fft_size: usize,
+        /// Maximum monitoring time in seconds; Ctrl-C stops early.
+        #[arg(long, default_value_t = 30.0)]
+        duration: f64,
+    },
     /// Capture stimulus takes for output/input channel pairs.
     Capture {
         /// Stimulus: sweep, tone, two-tone, white-noise, pink-noise,
@@ -61,9 +79,15 @@ enum Command {
         /// Output directory (created when missing).
         #[arg(long)]
         output_dir: Option<PathBuf>,
-        /// Audio device name (default devices when omitted).
-        #[arg(long)]
+        /// Shared input/output device selector (legacy convenience).
+        #[arg(long, conflicts_with_all = ["input_device", "output_device"])]
         device: Option<String>,
+        /// Independent input device ID or unique name, e.g. a USB microphone.
+        #[arg(long)]
+        input_device: Option<String>,
+        /// Independent output device ID or unique name, e.g. an audio interface.
+        #[arg(long)]
+        output_device: Option<String>,
         /// Tone frequency in Hz.
         #[arg(long)]
         freq: Option<f32>,
@@ -136,7 +160,10 @@ fn list_audio_devices(json: bool) -> Result<(), String> {
     let devices = get_audio_devices()
         .map_err(|e| actionable_capture_error("Failed to enumerate audio devices", &e))?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&devices).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&devices).unwrap_or_default()
+        );
         return Ok(());
     }
     println!("{}", "=".repeat(80));
@@ -182,6 +209,8 @@ fn record_signal(
     name: Option<String>,
     output_dir: Option<PathBuf>,
     device: Option<String>,
+    input_device: Option<String>,
+    output_device: Option<String>,
     freq: Option<f32>,
     freq1: Option<f32>,
     freq2: Option<f32>,
@@ -195,12 +224,13 @@ fn record_signal(
     mic_calibration_map: HashMap<usize, String>,
     json: bool,
 ) -> Result<(), String> {
-    use sotf_capture::recording_helpers::{capture_signal_params, summarize_take_quality};
     use sotf_capture::recording_helpers::take_verdict_text;
+    use sotf_capture::recording_helpers::{capture_signal_params, summarize_take_quality};
     use sotf_capture::signal_recorder::{
-        CpalPlayback, DEFAULT_MLS_ORDER, SignalParams, SignalType, generate_output_filenames_stereo,
-        generate_signal, parse_channel_list, prepare_measurement_signal, prepare_signal,
-        record_and_analyze_with, validate_signal_params, write_temp_wav,
+        CpalPlayback, DEFAULT_MLS_ORDER, SignalParams, SignalType,
+        generate_output_filenames_stereo, generate_signal, parse_channel_list,
+        prepare_measurement_signal, prepare_signal, record_and_analyze_with,
+        validate_signal_params, write_temp_wav,
     };
     use std::str::FromStr;
 
@@ -221,6 +251,24 @@ fn record_signal(
     let record_from_channels = parse_channel_list(&hwaudio_record_from)?;
     if send_to_channels.is_empty() {
         return Err("hwaudio-send-to must specify at least 1 channel".to_string());
+    }
+    for selector in [&device, &input_device, &output_device]
+        .into_iter()
+        .flatten()
+    {
+        if selector.trim().is_empty() {
+            return Err("device selectors must be nonempty when supplied".into());
+        }
+    }
+    for channel in mic_calibration_map.keys() {
+        if !record_from_channels
+            .iter()
+            .any(|input| usize::from(*input) == *channel)
+        {
+            return Err(format!(
+                "microphone calibration channel {channel} is not a requested input"
+            ));
+        }
     }
     if send_to_channels.len() != record_from_channels.len() && record_from_channels.len() != 1 {
         return Err(format!(
@@ -257,9 +305,11 @@ fn record_signal(
             None,
             None,
         ),
-        SignalType::WhiteNoise | SignalType::PinkNoise | SignalType::MNoise => SignalParams::Noise {
-            amp: validated_amp(amp, "--amp")?,
-        },
+        SignalType::WhiteNoise | SignalType::PinkNoise | SignalType::MNoise => {
+            SignalParams::Noise {
+                amp: validated_amp(amp, "--amp")?,
+            }
+        }
         SignalType::Mls => SignalParams::Mls {
             order: mls_order.unwrap_or(DEFAULT_MLS_ORDER),
             amp: validated_amp(amp, "--amp")?,
@@ -274,9 +324,8 @@ fn record_signal(
     let pre_compensation = match microphone_compensation {
         Some(ref path) => {
             use std::path::Path;
-            let compensation = math_audio_dsp::analysis::MicrophoneCompensation::from_file(
-                Path::new(path),
-            )?;
+            let compensation =
+                math_audio_dsp::analysis::MicrophoneCompensation::from_file(Path::new(path))?;
             if signal_type == SignalType::Sweep {
                 Some(compensation)
             } else {
@@ -326,8 +375,8 @@ fn record_signal(
             &csv_path,
             send_ch,
             record_ch,
-            device.as_deref(),
-            device.as_deref(),
+            output_device.as_deref().or(device.as_deref()),
+            input_device.as_deref().or(device.as_deref()),
             effective_mic_comp,
             None,
             1,
@@ -339,8 +388,12 @@ fn record_signal(
             println!(
                 "{}",
                 serde_json::json!({
+                    "version": 1,
                     "send_channel": send_ch,
                     "record_channel": record_ch,
+                    "requested_output_device": output_device.as_deref().or(device.as_deref()),
+                    "requested_input_device": input_device.as_deref().or(device.as_deref()),
+                    "microphone_calibration": effective_mic_comp,
                     "wav": wav_path.display().to_string(),
                     "csv": csv_path.display().to_string(),
                     "trustworthy": quality.trustworthy,
@@ -420,7 +473,12 @@ fn parse_mic_calibrations(values: &[String]) -> Result<HashMap<usize, String>, S
         let channel: usize = channel
             .parse()
             .map_err(|_| format!("invalid --mic-calibration channel: {channel:?}"))?;
-        map.insert(channel, path.to_string());
+        if channel >= 64 || path.trim().is_empty() {
+            return Err("--mic-calibration requires a channel below 64 and a nonempty path".into());
+        }
+        if map.insert(channel, path.to_string()).is_some() {
+            return Err(format!("duplicate --mic-calibration for channel {channel}"));
+        }
     }
     Ok(map)
 }
@@ -429,6 +487,48 @@ fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.command {
         Command::Devices { json } => list_audio_devices(json),
+        Command::Live {
+            input_device,
+            input_channel,
+            sample_rate,
+            fft_size,
+            duration,
+        } => {
+            use sotf_capture::live_level::{LiveLevelConfig, stream_live_levels};
+            use std::io::Write;
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let config = LiveLevelConfig {
+                input_device,
+                input_channel,
+                sample_rate_hz: sample_rate,
+                fft_size,
+                duration_secs: duration,
+            };
+            config.validate()?;
+            let cancel = Arc::new(AtomicBool::new(false));
+            let handler_cancel = Arc::clone(&cancel);
+            ctrlc::set_handler(move || handler_cancel.store(true, Ordering::Relaxed)).map_err(
+                |error| format!("cannot install monitoring cancellation handler: {error}"),
+            )?;
+            let mut output = std::io::stdout().lock();
+            let summary = stream_live_levels(&config, &cancel, |frame| {
+                serde_json::to_writer(
+                    &mut output,
+                    &serde_json::json!({"event":"live_frame", "frame": frame}),
+                )
+                .map_err(|error| error.to_string())?;
+                writeln!(output)
+                    .and_then(|_| output.flush())
+                    .map_err(|error| error.to_string())
+            })?;
+            serde_json::to_writer(
+                &mut output,
+                &serde_json::json!({"event":"live_stopped", "summary":summary}),
+            )
+            .map_err(|error| error.to_string())?;
+            writeln!(output).map_err(|error| error.to_string())
+        }
         Command::Capture {
             signal,
             duration,
@@ -439,6 +539,8 @@ fn run() -> Result<(), String> {
             name,
             output_dir,
             device,
+            input_device,
+            output_device,
             freq,
             freq1,
             freq2,
@@ -461,6 +563,8 @@ fn run() -> Result<(), String> {
             name,
             output_dir,
             device,
+            input_device,
+            output_device,
             freq,
             freq1,
             freq2,
@@ -484,5 +588,82 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("sotf-capture: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_accepts_independent_machine_device_selectors() {
+        let cli = Cli::try_parse_from([
+            "sotf-capture",
+            "capture",
+            "--hwaudio-send-to",
+            "2",
+            "--hwaudio-record-from",
+            "0",
+            "--input-device",
+            "mic-id",
+            "--output-device",
+            "interface-id",
+            "--mic-calibration",
+            "0=calibration.txt",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Capture {
+                input_device,
+                output_device,
+                device,
+                mic_calibrations,
+                ..
+            } => {
+                assert_eq!(input_device.as_deref(), Some("mic-id"));
+                assert_eq!(output_device.as_deref(), Some("interface-id"));
+                assert!(device.is_none());
+                assert_eq!(
+                    parse_mic_calibrations(&mic_calibrations).unwrap()[&0],
+                    "calibration.txt"
+                );
+            }
+            _ => panic!("expected capture command"),
+        }
+    }
+
+    #[test]
+    fn shared_device_selector_refuses_conflicting_independent_selector() {
+        for flag in ["--input-device", "--output-device"] {
+            assert!(
+                Cli::try_parse_from([
+                    "sotf-capture",
+                    "capture",
+                    "--hwaudio-send-to",
+                    "0",
+                    "--hwaudio-record-from",
+                    "0",
+                    "--device",
+                    "shared",
+                    flag,
+                    "other",
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn calibration_channel_assignments_refuse_ambiguity() {
+        for values in [
+            vec!["0=a", "0=b"],
+            vec!["64=a"],
+            vec!["0="],
+            vec!["0=  "],
+            vec!["bad=a"],
+        ] {
+            let values: Vec<_> = values.into_iter().map(str::to_owned).collect();
+            assert!(parse_mic_calibrations(&values).is_err(), "{values:?}");
+        }
     }
 }
