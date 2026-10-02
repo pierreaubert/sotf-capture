@@ -8,14 +8,14 @@ pub use autoeq::roomeq::SplCalibration;
 /// 1. Engine plays a reference tone and returns a `SplCalibrationResult`
 ///    (peak + RMS sample levels on the mic).
 /// 2. User types the dBSPL their external meter reads while the tone
-///    plays; that becomes `reported_db_spl`. `spl_offset_db` is
-///    derived via
-///    `reported_db_spl − 20 · log10(rms_sample_level)` so that a later
-///    capture at the same digital gain predicts its own dBSPL without
-///    needing the meter.
+///    plays; that becomes `reported_db_spl`. `spl_offset_db` is derived
+///    as `reported_db_spl − 20 · log10(peak_sample_level)`, matching
+///    [`SplCalibration::dbspl_for_peak_level`].
 ///
 /// On save, this state is converted to the `SplCalibration` struct
 /// the autoeq `RecordingConfiguration` carries.
+/// Persisted offsets have no basis marker, so old RMS-derived values cannot be
+/// identified or migrated safely and require explicit recalibration.
 #[derive(Debug, Clone)]
 pub struct SplCalibrationCaptureState {
     /// Reference tone frequency (Hz). Default 1000.
@@ -38,7 +38,7 @@ pub struct SplCalibrationCaptureState {
     pub engine_result: Option<SplCalibrationResult>,
     /// dBSPL the user read from their external meter. `None` until
     /// the user has entered a value. Combines with
-    /// `engine_result.rms_sample_level` to compute `spl_offset_db`.
+    /// `engine_result.peak_sample_level` to compute `spl_offset_db`.
     pub reported_db_spl: Option<f32>,
     /// Monotonic generation for stale-completion protection in both UIs.
     pub capture_generation: u64,
@@ -105,10 +105,9 @@ impl SplCalibrationCaptureState {
         let er = self.engine_result.as_ref()?;
         er.validate().ok()?;
         let reported = self.reported_db_spl.filter(|reading| reading.is_finite())?;
-        // Use RMS for the cal anchor because peak is noise-sensitive;
-        // the `peak_sample_level` field on SplCalibration still gets
-        // filled from the engine result for future SPL-level targeting.
-        let spl_offset_db = reported - 20.0 * er.rms_sample_level.log10();
+        // SplCalibration maps peak sample values to SPL; keep the stored
+        // anchor consistent with that shared peak-based conversion.
+        let spl_offset_db = reported - 20.0 * er.peak_sample_level.log10();
         if !spl_offset_db.is_finite() {
             return None;
         }
@@ -135,6 +134,42 @@ mod tests {
         }
     }
 
+    fn state_from_samples(samples: &[f32]) -> SplCalibrationCaptureState {
+        let peak_sample_level = samples
+            .iter()
+            .map(|sample| sample.abs())
+            .fold(0.0, f32::max);
+        let rms_sample_level = (samples
+            .iter()
+            .map(|sample| f64::from(*sample) * f64::from(*sample))
+            .sum::<f64>()
+            / samples.len() as f64)
+            .sqrt() as f32;
+        let mut state = SplCalibrationCaptureState {
+            reported_db_spl: Some(75.0),
+            ..SplCalibrationCaptureState::default()
+        };
+        state.apply_engine_result(SplCalibrationResult {
+            sample_rate: 48_000,
+            peak_sample_level,
+            rms_sample_level,
+            reference_freq_hz: 1_000.0,
+            output_channel: 0,
+        });
+        state
+    }
+
+    fn assert_reference_peak_roundtrips(state: &SplCalibrationCaptureState) {
+        let reference = state.engine_result.as_ref().unwrap();
+        let anchor = state.to_spl_calibration().unwrap();
+        assert!((anchor.dbspl_for_peak_level(reference.peak_sample_level) - 75.0).abs() < 1e-4);
+        assert!((anchor.peak_level_for_dbspl(75.0) - reference.peak_sample_level).abs() < 1e-5);
+        assert!(
+            (anchor.spl_offset_db - (75.0 - 20.0 * reference.peak_sample_level.log10())).abs()
+                < 1e-4
+        );
+    }
+
     #[test]
     fn calibration_requires_completed_capture_and_finite_meter_reading() {
         let mut state = SplCalibrationCaptureState::default();
@@ -147,9 +182,10 @@ mod tests {
         }
         state.reported_db_spl = Some(75.0);
         let anchor = state.to_spl_calibration().unwrap();
-        assert!((anchor.spl_offset_db - 87.0412).abs() < 1e-4);
-        // A later recording at twice the RMS has a 6.0206 dB higher level.
-        assert!((20.0 * 0.5_f32.log10() + anchor.spl_offset_db - 81.0206).abs() < 1e-4);
+        assert!((anchor.spl_offset_db - 81.0206).abs() < 1e-4);
+        assert!((anchor.dbspl_for_peak_level(anchor.peak_sample_level) - 75.0).abs() < 1e-4);
+        // A later recording at twice the reference peak has a 6.0206 dB higher level.
+        assert!((anchor.dbspl_for_peak_level(1.0) - 81.0206).abs() < 1e-4);
         state.status = SplCalibrationCaptureStatus::Running { started_at_ms: 0 };
         assert!(state.to_spl_calibration().is_none());
         state.next_capture_generation();
@@ -160,6 +196,42 @@ mod tests {
             !state.is_ready(),
             "a new capture requires its own meter reading"
         );
+    }
+
+    #[test]
+    fn sine_reference_peak_roundtrips_reported_spl() {
+        let samples: Vec<f32> = (0..48 * 8)
+            .map(|sample| {
+                let phase = std::f64::consts::TAU * 1_000.0 * sample as f64 / 48_000.0;
+                (0.5 * phase.sin()) as f32
+            })
+            .collect();
+        let state = state_from_samples(&samples);
+        let result = state.engine_result.as_ref().unwrap();
+        assert!(
+            (result.rms_sample_level / result.peak_sample_level - 1.0 / 2.0_f32.sqrt()).abs()
+                < 1e-4
+        );
+        assert_reference_peak_roundtrips(&state);
+    }
+
+    #[test]
+    fn nonsinusoidal_reference_peak_roundtrips_its_distinct_crest_factor() {
+        // A zero-mean 1 kHz pulse train with a 1/6 nonzero duty cycle.
+        let samples: Vec<f32> = (0..48 * 8)
+            .map(|sample| match sample % 48 {
+                0..4 => 0.8,
+                4..8 => -0.8,
+                _ => 0.0,
+            })
+            .collect();
+        let state = state_from_samples(&samples);
+        let result = state.engine_result.as_ref().unwrap();
+        assert!(
+            (result.rms_sample_level / result.peak_sample_level - 1.0 / 6.0_f32.sqrt()).abs()
+                < 1e-4
+        );
+        assert_reference_peak_roundtrips(&state);
     }
 
     #[test]

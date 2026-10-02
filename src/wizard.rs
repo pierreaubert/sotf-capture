@@ -1186,6 +1186,9 @@ mod tests {
         let spl = config.spl_calibration.expect("spl calibration persisted");
         assert_eq!(spl.reported_db_spl, 75.0);
         assert_eq!(spl.reference_freq_hz, 1000.0);
+        assert!(
+            (spl.dbspl_for_peak_level(spl.peak_sample_level) - spl.reported_db_spl).abs() < 1e-4
+        );
     }
 
     #[test]

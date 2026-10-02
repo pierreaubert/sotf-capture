@@ -780,8 +780,8 @@ pub struct SplCalibrationResult {
     /// Peak absolute sample value observed on the mic during the tone
     /// (the stable window — excludes attack/release).
     pub peak_sample_level: f32,
-    /// RMS sample value over the stable window. More noise-robust
-    /// than the peak and preferred when authoring SplCalibration.
+    /// RMS sample value over the stable window, retained separately from peak.
+    /// `SplCalibration` uses the peak value for its persisted SPL anchor.
     pub rms_sample_level: f32,
     /// Frequency of the tone that was played, echoed back for audit.
     pub reference_freq_hz: f32,

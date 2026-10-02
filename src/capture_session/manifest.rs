@@ -150,9 +150,9 @@ pub fn recording_configuration(report: &ClockProcessedManifest) -> Result<RoomCo
     })
 }
 
-fn selected_takes<'a>(
-    report: &'a ClockProcessedManifest,
-) -> Result<HashMap<(&'a str, &'a str), &'a super::clock::io::ClockProcessedTake>, String> {
+fn selected_takes(
+    report: &ClockProcessedManifest,
+) -> Result<HashMap<(&str, &str), &super::clock::io::ClockProcessedTake>, String> {
     let selected_ids = if let Some(selected_ids) = &report.selected_take_ids {
         selected_ids
     } else if report.plan.repeat_count == 1
