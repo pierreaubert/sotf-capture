@@ -1168,6 +1168,8 @@ mod tests {
             output_channel: 0,
         });
         model.spl_calibration_capture.reported_db_spl = Some(75.0);
+        model.spl_calibration_capture.status =
+            crate::recording_types::SplCalibrationCaptureStatus::Complete;
 
         let config = model.build_recording_configuration(None);
 

@@ -789,6 +789,36 @@ pub struct SplCalibrationResult {
     pub output_channel: u16,
 }
 
+impl SplCalibrationResult {
+    /// Validate the captured reference tone before deriving an SPL anchor.
+    ///
+    /// # Errors
+    /// Rejects invalid rates/frequencies, silence, clipping and nonfinite or inconsistent levels.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(8_000..=384_000).contains(&self.sample_rate)
+            || !self.reference_freq_hz.is_finite()
+            || self.reference_freq_hz <= 0.0
+            || self.reference_freq_hz >= self.sample_rate as f32 / 2.0
+        {
+            return Err(
+                "SPL calibration requires a valid capture rate and reference below Nyquist".into(),
+            );
+        }
+        if !self.peak_sample_level.is_finite()
+            || !self.rms_sample_level.is_finite()
+            || self.rms_sample_level <= 0.0
+            || self.peak_sample_level >= 1.0
+            || self.rms_sample_level > self.peak_sample_level
+        {
+            return Err(
+                "SPL calibration requires finite, nonzero RMS no greater than an unclipped peak"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Device information for recording metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceInfo {
