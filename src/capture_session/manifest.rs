@@ -8,7 +8,19 @@ use autoeq::read::{MeasurementMultiple, MeasurementRef};
 use autoeq::roomeq::{MeasurementSource, RecordingConfiguration, RoomConfig, SpeakerConfig};
 use autoeq::{MeasurementProvenance, ProvenanceCaptureKind};
 use std::collections::HashMap;
-use std::path::{Component, Path};
+
+fn measurement_quality_passed(analysis: &super::analysis::CaptureAnalysisReport) -> bool {
+    analysis.magnitude_file.is_some()
+        && analysis.clipped_samples == 0
+        && analysis
+            .broadband_snr_db
+            .is_some_and(|value| value.is_finite() && value >= 30.0)
+        && !analysis.frequency_snr.is_empty()
+        && analysis.frequency_snr.iter().all(|band| {
+            band.snr_db
+                .is_some_and(|value| value.is_finite() && value >= 30.0)
+        })
+}
 
 /// Build the canonical configuration from a complete set of analyzed capture takes.
 ///
@@ -80,10 +92,7 @@ pub fn recording_configuration(report: &ClockProcessedManifest) -> Result<RoomCo
                         source.id, mic.id
                     )
                 })?;
-            let mut components = Path::new(file).components();
-            if !matches!(components.next(), Some(Component::Normal(_)))
-                || components.next().is_some()
-            {
+            if !autoeq::capture_handoff::portable_capture_filename(file) {
                 return Err("measurement artifact must be a local filename".into());
             }
             let calibration = report
@@ -118,7 +127,10 @@ pub fn recording_configuration(report: &ClockProcessedManifest) -> Result<RoomCo
                 position_uncertainty_mm: mic.position_uncertainty_mm,
                 preserves_acoustic_delay: take.clock.basis
                     == CaptureClockBasis::FixedAcousticReference,
-                quality_passed: phase_complete,
+                quality_passed: take
+                    .analysis
+                    .as_ref()
+                    .is_some_and(measurement_quality_passed),
             });
         }
         let timing_reference_id = takes
@@ -159,6 +171,7 @@ pub fn recording_configuration(report: &ClockProcessedManifest) -> Result<RoomCo
     Ok(RoomConfig {
         speakers,
         recording_config: Some(RecordingConfiguration {
+            capture_handoff_file: Some(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME.into()),
             recording_sample_rate: Some(report.plan.sample_rate_hz),
             recording_channels: Some(report.plan.microphones.len()),
             signal_type: Some("Sweep".into()),

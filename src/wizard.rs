@@ -735,6 +735,8 @@ impl RecordingScreenModel {
     ) -> autoeq::roomeq::RecordingConfiguration {
         let is_sweep = self.signal_type == RecordingSignalType::Sweep;
         autoeq::roomeq::RecordingConfiguration {
+            // This legacy builder has no versioned acquisition inventory.
+            capture_handoff_file: None,
             playback_device_name: Some(self.playback_config.device_name.clone()),
             playback_device_id: Some(self.playback_config.device_id.clone()),
             playback_sample_rate: Some(self.playback_config.sample_rate),
