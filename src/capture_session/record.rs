@@ -8,7 +8,6 @@ use super::protocol::{CaptureStimulusLayout, prepare_capture_stimulus};
 use super::{CaptureSessionPlan, ValidatedCaptureSession};
 use crate::recording_helpers::save_recording_session_json;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use crate::signal_recorder::multi_capture::{
     CaptureInput, CaptureOutputSegment, MultiCaptureRequest, MultiCaptureResult,
     capture_multidevice,
@@ -180,7 +179,7 @@ fn record_with(
         calibrations.push(CaptureCalibration {
             microphone_id: mic.id.clone(),
             file,
-            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            sha256: super::calibration_sha256(&bytes),
         });
     }
     std::fs::create_dir(output_directory)

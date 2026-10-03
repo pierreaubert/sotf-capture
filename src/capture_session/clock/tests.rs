@@ -178,7 +178,6 @@ fn absent_survey_never_turns_arrival_alignment_into_coherent_evidence() {
 
 fn write_golden_directory() -> tempfile::TempDir {
     use crate::capture_session::record::CaptureCalibration;
-    use sha2::{Digest, Sha256};
     use crate::signal_recorder::write_wav_file;
     let root = tempfile::tempdir().unwrap();
     let (golden, mut manifest, stimulus, chirp) = fixture();
@@ -227,7 +226,7 @@ fn write_golden_directory() -> tempfile::TempDir {
         manifest.calibrations.push(CaptureCalibration {
             microphone_id: manifest.plan.microphones[index].id.clone(),
             file,
-            sha256: format!("{:x}", Sha256::digest(bytes)),
+            sha256: crate::capture_session::calibration_sha256(bytes),
         });
     }
     std::fs::write(

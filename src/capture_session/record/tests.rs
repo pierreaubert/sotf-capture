@@ -88,7 +88,7 @@ fn all_mics_record_each_source_and_calibration_snapshots_are_frozen() {
     }
     for calibration in &manifest.calibrations {
         let bytes = std::fs::read(output.join(&calibration.file)).unwrap();
-        assert_eq!(calibration.sha256, format!("{:x}", Sha256::digest(&bytes)));
+        assert_eq!(calibration.sha256, super::super::calibration_sha256(&bytes));
         assert_ne!(bytes, b"changed");
     }
     assert_eq!(journal(&output).takes.len(), 4);

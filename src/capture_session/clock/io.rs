@@ -7,7 +7,6 @@ use crate::capture_session::record::{
 use crate::capture_session::{CaptureSessionPlan, protocol::CaptureStimulusLayout};
 use crate::recording_helpers::save_recording_session_json;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Component, Path};
@@ -184,7 +183,7 @@ pub fn process_capture_session(
             return Err("capture calibration identities are unknown or duplicated".into());
         }
         let bytes = bounded_read(&artifact(&root, &calibration.file)?, 1_048_576)?;
-        if format!("{:x}", Sha256::digest(&bytes)) != calibration.sha256 {
+        if crate::capture_session::calibration_sha256(&bytes) != calibration.sha256 {
             return Err(format!(
                 "calibration snapshot for {} has changed",
                 calibration.microphone_id

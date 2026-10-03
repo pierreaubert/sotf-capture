@@ -5,6 +5,8 @@
 //! of a synchronized recording or permission to render coherent measurements.
 
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_os = "ios"))]
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -21,6 +23,30 @@ pub mod protocol;
 pub mod record;
 #[cfg(not(target_os = "ios"))]
 pub mod reflections;
+
+#[cfg(not(target_os = "ios"))]
+pub(super) fn calibration_sha256(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut hex = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
+}
+
+#[cfg(all(test, not(target_os = "ios")))]
+mod hash_tests {
+    use super::calibration_sha256;
+
+    #[test]
+    fn calibration_hash_is_lowercase_sha256() {
+        assert_eq!(
+            calibration_sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+}
 
 /// Spatial interpretation fixed for every take in a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
