@@ -7,8 +7,8 @@ use super::types::SplCalibrationResult;
 use super::types::analyze_bass_anchor_recording;
 #[cfg(not(target_os = "ios"))]
 use super::types::play_per_channel_and_record_mono;
-use math_audio_dsp::signals::*;
 use hound::{SampleFormat, WavSpec, WavWriter};
+use math_audio_dsp::signals::*;
 
 /// Run the bass-anchor capture across all output channels with
 /// steady-state lock-in detection. See `run_bass_anchor_with_recording`
@@ -298,7 +298,11 @@ pub fn run_spl_calibration(
     input_channel: u16,
     cancel: Option<CancelFlag>,
 ) -> Result<SplCalibrationResult, String> {
-    if !reference_freq_hz.is_finite() || reference_freq_hz <= 0.0 {
+    if !(8_000..=384_000).contains(&sample_rate)
+        || !reference_freq_hz.is_finite()
+        || reference_freq_hz <= 0.0
+        || reference_freq_hz >= sample_rate as f32 / 2.0
+    {
         return Err(format!(
             "Invalid SPL cal reference frequency: {reference_freq_hz}"
         ));
@@ -308,7 +312,7 @@ pub fn run_spl_calibration(
             "SPL cal duration must be > 0.3 s, got {duration_s}"
         ));
     }
-    if !amp.is_finite() || !(0.0..=1.0).contains(&amp) {
+    if !amp.is_finite() || amp <= 0.0 || amp > 1.0 {
         return Err(format!("SPL cal amplitude must be in (0, 1], got {amp}"));
     }
 
@@ -386,11 +390,45 @@ pub fn run_spl_calibration(
         "[run_spl_calibration] Stable window [{start}..{end}) → peak={peak:.4}, rms={rms:.4}"
     );
 
-    Ok(SplCalibrationResult {
+    let result = SplCalibrationResult {
         sample_rate: capture.input_sr,
         peak_sample_level: peak,
         rms_sample_level: rms,
         reference_freq_hz,
         output_channel,
-    })
+    };
+    result.validate()?;
+    Ok(result)
+}
+
+#[cfg(all(test, not(target_os = "ios")))]
+mod spl_tests {
+    use super::run_spl_calibration;
+
+    #[test]
+    fn invalid_reference_is_refused_before_opening_devices() {
+        for (rate, frequency, amplitude) in [
+            (0, 1_000.0, 0.25),
+            (48_000, 24_000.0, 0.25),
+            (48_000, f32::NAN, 0.25),
+            (48_000, 1_000.0, 0.0),
+        ] {
+            let error = run_spl_calibration(
+                0,
+                rate,
+                frequency,
+                amplitude,
+                3.0,
+                Some("invalid test output"),
+                Some("invalid test input"),
+                0,
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("Invalid SPL cal") || error.contains("amplitude"),
+                "{error}"
+            );
+        }
+    }
 }

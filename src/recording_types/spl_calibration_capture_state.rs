@@ -1,6 +1,6 @@
 use super::spl_calibration_capture_status::SplCalibrationCaptureStatus;
-pub use autoeq::roomeq::SplCalibration;
 pub use crate::signal_recorder::SplCalibrationResult;
+pub use autoeq::roomeq::SplCalibration;
 
 /// Shared business state for the SplCalibration step.
 ///
@@ -65,6 +65,9 @@ impl SplCalibrationCaptureState {
     /// Invalidate prior SPL completions and return the new task generation.
     pub fn next_capture_generation(&mut self) -> u64 {
         self.capture_generation += 1;
+        self.engine_result = None;
+        self.reported_db_spl = None;
+        self.status = SplCalibrationCaptureStatus::Idle;
         self.capture_generation
     }
 
@@ -74,34 +77,152 @@ impl SplCalibrationCaptureState {
     }
 
     pub fn apply_engine_result(&mut self, result: SplCalibrationResult) {
-        self.engine_result = Some(result);
-        self.status = SplCalibrationCaptureStatus::Complete;
+        match result.validate() {
+            Ok(()) => {
+                self.engine_result = Some(result);
+                self.status = SplCalibrationCaptureStatus::Complete;
+            }
+            Err(error) => {
+                self.engine_result = None;
+                self.status = SplCalibrationCaptureStatus::Failed(error);
+            }
+        }
     }
 
     /// `true` once the engine has captured a tone AND the user has
     /// typed the dBSPL their meter read. Consumers gate the Save /
     /// Continue action on this.
     pub fn is_ready(&self) -> bool {
-        matches!(self.status, SplCalibrationCaptureStatus::Complete)
-            && self.engine_result.is_some()
-            && self.reported_db_spl.is_some()
+        self.to_spl_calibration().is_some()
     }
 
     /// Derive the final `SplCalibration` once both the engine capture
     /// and the user-entered meter reading are present.
     pub fn to_spl_calibration(&self) -> Option<SplCalibration> {
+        if !matches!(self.status, SplCalibrationCaptureStatus::Complete) {
+            return None;
+        }
         let er = self.engine_result.as_ref()?;
-        let reported = self.reported_db_spl?;
+        er.validate().ok()?;
+        let reported = self.reported_db_spl.filter(|reading| reading.is_finite())?;
         // Use RMS for the cal anchor because peak is noise-sensitive;
         // the `peak_sample_level` field on SplCalibration still gets
         // filled from the engine result for future SPL-level targeting.
-        let level = er.rms_sample_level.max(f32::EPSILON);
-        let spl_offset_db = reported - 20.0 * level.log10();
+        let spl_offset_db = reported - 20.0 * er.rms_sample_level.log10();
+        if !spl_offset_db.is_finite() {
+            return None;
+        }
         Some(SplCalibration {
             reported_db_spl: reported,
             reference_freq_hz: er.reference_freq_hz,
             peak_sample_level: er.peak_sample_level,
             spl_offset_db,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn captured() -> SplCalibrationResult {
+        SplCalibrationResult {
+            sample_rate: 48_000,
+            peak_sample_level: 0.5,
+            rms_sample_level: 0.25,
+            reference_freq_hz: 1_000.0,
+            output_channel: 0,
+        }
+    }
+
+    #[test]
+    fn calibration_requires_completed_capture_and_finite_meter_reading() {
+        let mut state = SplCalibrationCaptureState::default();
+        state.apply_engine_result(captured());
+        assert!(!state.is_ready());
+        for reading in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            state.reported_db_spl = Some(reading);
+            assert!(!state.is_ready());
+            assert!(state.to_spl_calibration().is_none());
+        }
+        state.reported_db_spl = Some(75.0);
+        let anchor = state.to_spl_calibration().unwrap();
+        assert!((anchor.spl_offset_db - 87.0412).abs() < 1e-4);
+        // A later recording at twice the RMS has a 6.0206 dB higher level.
+        assert!((20.0 * 0.5_f32.log10() + anchor.spl_offset_db - 81.0206).abs() < 1e-4);
+        state.status = SplCalibrationCaptureStatus::Running { started_at_ms: 0 };
+        assert!(state.to_spl_calibration().is_none());
+        state.next_capture_generation();
+        assert!(state.engine_result.is_none());
+        assert!(state.reported_db_spl.is_none());
+        state.apply_engine_result(captured());
+        assert!(
+            !state.is_ready(),
+            "a new capture requires its own meter reading"
+        );
+    }
+
+    #[test]
+    fn invalid_capture_cannot_be_saved_or_marked_complete() {
+        let valid = captured();
+        let invalid = [
+            SplCalibrationResult {
+                rms_sample_level: 0.0,
+                ..valid.clone()
+            },
+            SplCalibrationResult {
+                rms_sample_level: -0.25,
+                ..valid.clone()
+            },
+            SplCalibrationResult {
+                rms_sample_level: f32::NAN,
+                ..valid.clone()
+            },
+            SplCalibrationResult {
+                peak_sample_level: f32::NAN,
+                ..valid.clone()
+            },
+            SplCalibrationResult {
+                peak_sample_level: f32::INFINITY,
+                ..valid.clone()
+            },
+            SplCalibrationResult {
+                peak_sample_level: 1.0,
+                ..valid.clone()
+            },
+            SplCalibrationResult {
+                rms_sample_level: 0.6,
+                ..valid.clone()
+            },
+            SplCalibrationResult {
+                sample_rate: 0,
+                ..valid.clone()
+            },
+            SplCalibrationResult {
+                reference_freq_hz: 24_000.0,
+                ..valid.clone()
+            },
+            SplCalibrationResult {
+                reference_freq_hz: f32::INFINITY,
+                ..valid
+            },
+        ];
+        for result in invalid {
+            let mut state = SplCalibrationCaptureState {
+                reported_db_spl: Some(75.0),
+                ..SplCalibrationCaptureState::default()
+            };
+            state.apply_engine_result(result.clone());
+            assert!(matches!(
+                state.status,
+                SplCalibrationCaptureStatus::Failed(_)
+            ));
+            assert!(state.engine_result.is_none());
+            assert!(!state.is_ready());
+            // Directly imported state must pass the same gate as engine completion.
+            state.engine_result = Some(result);
+            state.status = SplCalibrationCaptureStatus::Complete;
+            assert!(state.to_spl_calibration().is_none());
+        }
     }
 }

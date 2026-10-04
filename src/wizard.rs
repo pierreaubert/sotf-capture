@@ -869,6 +869,7 @@ impl RecordingScreenModel {
                 let n = self.recording_config.num_positions.max(1);
                 if n > 1 { Some(n) } else { None }
             },
+            capture_handoff_file: None,
         }
     }
 
@@ -1167,6 +1168,8 @@ mod tests {
             output_channel: 0,
         });
         model.spl_calibration_capture.reported_db_spl = Some(75.0);
+        model.spl_calibration_capture.status =
+            crate::recording_types::SplCalibrationCaptureStatus::Complete;
 
         let config = model.build_recording_configuration(None);
 
