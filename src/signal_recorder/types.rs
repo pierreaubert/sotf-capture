@@ -780,13 +780,43 @@ pub struct SplCalibrationResult {
     /// Peak absolute sample value observed on the mic during the tone
     /// (the stable window — excludes attack/release).
     pub peak_sample_level: f32,
-    /// RMS sample value over the stable window. More noise-robust
-    /// than the peak and preferred when authoring SplCalibration.
+    /// RMS sample value over the stable window, retained separately from peak.
+    /// `SplCalibration` uses the peak value for its persisted SPL anchor.
     pub rms_sample_level: f32,
     /// Frequency of the tone that was played, echoed back for audit.
     pub reference_freq_hz: f32,
     /// Playback output channel index used during the capture.
     pub output_channel: u16,
+}
+
+impl SplCalibrationResult {
+    /// Validate the captured reference tone before deriving an SPL anchor.
+    ///
+    /// # Errors
+    /// Rejects invalid rates/frequencies, silence, clipping and nonfinite or inconsistent levels.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(8_000..=384_000).contains(&self.sample_rate)
+            || !self.reference_freq_hz.is_finite()
+            || self.reference_freq_hz <= 0.0
+            || self.reference_freq_hz >= self.sample_rate as f32 / 2.0
+        {
+            return Err(
+                "SPL calibration requires a valid capture rate and reference below Nyquist".into(),
+            );
+        }
+        if !self.peak_sample_level.is_finite()
+            || !self.rms_sample_level.is_finite()
+            || self.rms_sample_level <= 0.0
+            || self.peak_sample_level >= 1.0
+            || self.rms_sample_level > self.peak_sample_level
+        {
+            return Err(
+                "SPL calibration requires finite, nonzero RMS no greater than an unclipped peak"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Device information for recording metadata

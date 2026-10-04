@@ -13,6 +13,8 @@ pub mod analysis;
 #[cfg(not(target_os = "ios"))]
 pub mod clock;
 #[cfg(not(target_os = "ios"))]
+pub mod handoff;
+#[cfg(not(target_os = "ios"))]
 pub mod manifest;
 #[cfg(not(target_os = "ios"))]
 mod phase;
@@ -120,12 +122,20 @@ pub struct CaptureSessionPlan {
     pub microphones: Vec<CaptureMicrophone>,
     /// Sources played sequentially in this order.
     pub sources: Vec<CaptureSource>,
+    /// Number of independent acquisitions for every source/microphone pair.
+    /// Every repeat remains a separate take; measurements are never averaged.
+    #[serde(default = "default_repeat_count")]
+    pub repeat_count: u32,
     /// Sweep parameters fixed throughout the session.
     pub sweep: CaptureSweep,
     /// Fixed timing emitter and geometry; absent geometry disables coherent use.
     /// Without this declaration the first source channel emits timing chirps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing_reference: Option<CaptureTimingReference>,
+}
+
+fn default_repeat_count() -> u32 {
+    1
 }
 
 /// Validated settings that cannot be changed during capture.
@@ -160,6 +170,9 @@ impl CaptureSessionPlan {
         }
         if self.output_device.trim().is_empty() {
             return Err(reject("an explicit output device is required"));
+        }
+        if !(1..=16).contains(&self.repeat_count) {
+            return Err(reject("repeat count must be in 1..=16"));
         }
         if !(2..=4).contains(&self.microphones.len()) {
             return Err(reject("a session requires two to four microphones"));
@@ -221,6 +234,17 @@ impl CaptureSessionPlan {
                     "source identities must be nonempty and unique, with unique output channels below 64",
                 ));
             }
+        }
+        let take_count = self
+            .sources
+            .len()
+            .checked_mul(self.microphones.len())
+            .and_then(|count| count.checked_mul(self.repeat_count as usize))
+            .ok_or_else(|| reject("capture take count overflow"))?;
+        if take_count > 1024 {
+            return Err(reject(
+                "capture session exceeds the 1024-take metadata limit",
+            ));
         }
         let sweep = &self.sweep;
         if let Some(reference) = &self.timing_reference {

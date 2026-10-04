@@ -735,6 +735,8 @@ impl RecordingScreenModel {
     ) -> autoeq::roomeq::RecordingConfiguration {
         let is_sweep = self.signal_type == RecordingSignalType::Sweep;
         autoeq::roomeq::RecordingConfiguration {
+            // This legacy builder has no versioned acquisition inventory.
+            capture_handoff_file: None,
             playback_device_name: Some(self.playback_config.device_name.clone()),
             playback_device_id: Some(self.playback_config.device_id.clone()),
             playback_sample_rate: Some(self.playback_config.sample_rate),
@@ -1165,6 +1167,8 @@ mod tests {
             output_channel: 0,
         });
         model.spl_calibration_capture.reported_db_spl = Some(75.0);
+        model.spl_calibration_capture.status =
+            crate::recording_types::SplCalibrationCaptureStatus::Complete;
 
         let config = model.build_recording_configuration(None);
 
@@ -1183,6 +1187,9 @@ mod tests {
         let spl = config.spl_calibration.expect("spl calibration persisted");
         assert_eq!(spl.reported_db_spl, 75.0);
         assert_eq!(spl.reference_freq_hz, 1000.0);
+        assert!(
+            (spl.dbspl_for_peak_level(spl.peak_sample_level) - spl.reported_db_spl).abs() < 1e-4
+        );
     }
 
     #[test]

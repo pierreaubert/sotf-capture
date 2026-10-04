@@ -7,13 +7,13 @@
 use super::protocol::{CaptureStimulusLayout, prepare_capture_stimulus};
 use super::{CaptureSessionPlan, ValidatedCaptureSession};
 use crate::recording_helpers::save_recording_session_json;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use crate::signal_recorder::multi_capture::{
     CaptureInput, CaptureOutputSegment, MultiCaptureRequest, MultiCaptureResult,
     capture_multidevice,
 };
 use crate::signal_recorder::{CancelFlag, write_wav_file};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
@@ -45,6 +45,12 @@ pub struct CaptureCalibration {
 /// One source/microphone pair captured on its original device clock.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawCaptureTake {
+    /// Stable identity within the immutable raw journal.
+    #[serde(default)]
+    pub take_id: String,
+    /// Zero-based acquisition repeat declared by the session plan.
+    #[serde(default)]
+    pub repeat_index: u32,
     /// Actual device ID returned by the audio backend.
     pub device_id: String,
     /// Actual output device ID returned by the audio backend.
@@ -100,6 +106,20 @@ pub struct CaptureProgress {
     pub source_count: usize,
     /// Source label for frontend display.
     pub source_id: String,
+    /// Zero-based independent repeat currently being recorded.
+    pub repeat_index: u32,
+    /// Total repeats declared by the session plan.
+    pub repeat_count: u32,
+}
+
+pub(crate) fn stable_take_id(source_id: &str, microphone_id: &str, repeat_index: u32) -> String {
+    let mut identity = Sha256::new();
+    identity.update(repeat_index.to_be_bytes());
+    for label in [source_id, microphone_id] {
+        identity.update((label.len() as u64).to_be_bytes());
+        identity.update(label.as_bytes());
+    }
+    format!("take-r{repeat_index:03}-{:x}", identity.finalize())
 }
 
 fn save_manifest(directory: &Path, manifest: &RawCaptureManifest) -> Result<(), String> {
@@ -229,89 +249,99 @@ fn record_with(
             session.plan().sample_rate_hz,
             1,
         )?;
-        for (source_index, source) in session.plan().sources.iter().enumerate() {
-            if cancel.load(Ordering::Relaxed) {
-                return Err("cancelled".into());
-            }
-            progress(CaptureProgress {
-                source_index,
-                source_count: session.plan().sources.len(),
-                source_id: source.id.clone(),
-            });
-            let captured = capture(
-                MultiCaptureRequest {
-                    inputs: session
-                        .plan()
-                        .microphones
-                        .iter()
-                        .map(|mic| CaptureInput {
-                            device: mic.device.clone(),
-                            channel: mic.input_channel,
+        for repeat_index in 0..session.plan().repeat_count {
+            for (source_index, source) in session.plan().sources.iter().enumerate() {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("cancelled".into());
+                }
+                progress(CaptureProgress {
+                    source_index,
+                    source_count: session.plan().sources.len(),
+                    source_id: source.id.clone(),
+                    repeat_index,
+                    repeat_count: session.plan().repeat_count,
+                });
+                let captured = capture(
+                    MultiCaptureRequest {
+                        inputs: session
+                            .plan()
+                            .microphones
+                            .iter()
+                            .map(|mic| CaptureInput {
+                                device: mic.device.clone(),
+                                channel: mic.input_channel,
+                            })
+                            .collect(),
+                        output_device: session.plan().output_device.clone(),
+                        output_channel: source.output_channel,
+                        output_overrides: [
+                            manifest.stimulus.start_chirp_offset,
+                            manifest.stimulus.end_chirp_offset,
+                        ]
+                        .into_iter()
+                        .map(|start_frame| CaptureOutputSegment {
+                            start_frame,
+                            end_frame: start_frame + manifest.stimulus.chirp_samples,
+                            channel: manifest
+                                .timing_reference_output_channel
+                                .unwrap_or(source.output_channel),
                         })
                         .collect(),
-                    output_device: session.plan().output_device.clone(),
-                    output_channel: source.output_channel,
-                    output_overrides: [
-                        manifest.stimulus.start_chirp_offset,
-                        manifest.stimulus.end_chirp_offset,
-                    ]
-                    .into_iter()
-                    .map(|start_frame| CaptureOutputSegment {
-                        start_frame,
-                        end_frame: start_frame + manifest.stimulus.chirp_samples,
-                        channel: manifest
-                            .timing_reference_output_channel
-                            .unwrap_or(source.output_channel),
-                    })
-                    .collect(),
-                    sample_rate_hz: session.plan().sample_rate_hz,
-                    stimulus: stimulus.samples.clone(),
-                },
-                cancel,
-            )?;
-            if captured.sample_rate_hz != session.plan().sample_rate_hz
-                || captured.recordings.len() != session.plan().microphones.len()
-                || captured.input_sample_formats.len() != captured.recordings.len()
-                || captured.input_device_ids.len() != captured.recordings.len()
-                || captured.input_device_ids.iter().any(String::is_empty)
-                || captured.output_device_id.is_empty()
-                || captured.recordings.iter().any(|samples| {
-                    samples.len() < stimulus.samples.len() || samples.iter().any(|s| !s.is_finite())
-                })
-            {
-                return Err(
-                    "capture backend returned mismatched rate, channels, or invalid samples".into(),
-                );
-            }
-            for (mic_index, (mic, samples)) in session
-                .plan()
-                .microphones
-                .iter()
-                .zip(&captured.recordings)
-                .enumerate()
-            {
-                // Numeric names avoid collisions and path traversal in user labels.
-                let wav_file = format!("source-{source_index:02}-mic-{mic_index:02}-raw.wav");
-                write_wav_file(
-                    &output_directory.join(&wav_file),
-                    samples,
-                    captured.sample_rate_hz,
-                    1,
+                        sample_rate_hz: session.plan().sample_rate_hz,
+                        stimulus: stimulus.samples.clone(),
+                    },
+                    cancel,
                 )?;
-                manifest.takes.push(RawCaptureTake {
-                    device_id: captured.input_device_ids[mic_index].clone(),
-                    output_device_id: captured.output_device_id.clone(),
-                    source_id: source.id.clone(),
-                    microphone_id: mic.id.clone(),
-                    wav_file,
-                    samples: samples.len(),
-                    input_sample_format: captured.input_sample_formats[mic_index].clone(),
-                    output_sample_format: captured.output_sample_format.clone(),
-                    peak_amplitude: samples.iter().fold(0.0_f32, |peak, s| peak.max(s.abs())),
-                    clipped_samples: samples.iter().filter(|s| s.abs() >= 1.0).count(),
-                });
+                if captured.sample_rate_hz != session.plan().sample_rate_hz
+                    || captured.recordings.len() != session.plan().microphones.len()
+                    || captured.input_sample_formats.len() != captured.recordings.len()
+                    || captured.input_device_ids.len() != captured.recordings.len()
+                    || captured.input_device_ids.iter().any(String::is_empty)
+                    || captured.output_device_id.is_empty()
+                    || captured.recordings.iter().any(|samples| {
+                        samples.len() < stimulus.samples.len()
+                            || samples.iter().any(|s| !s.is_finite())
+                    })
+                {
+                    return Err(
+                        "capture backend returned mismatched rate, channels, or invalid samples"
+                            .into(),
+                    );
+                }
+                for (mic_index, (mic, samples)) in session
+                    .plan()
+                    .microphones
+                    .iter()
+                    .zip(&captured.recordings)
+                    .enumerate()
+                {
+                    // Numeric names avoid collisions and path traversal in user labels.
+                    let wav_file = format!(
+                        "repeat-{repeat_index:02}-source-{source_index:02}-mic-{mic_index:02}-raw.wav"
+                    );
+                    write_wav_file(
+                        &output_directory.join(&wav_file),
+                        samples,
+                        captured.sample_rate_hz,
+                        1,
+                    )?;
+                    manifest.takes.push(RawCaptureTake {
+                        take_id: stable_take_id(&source.id, &mic.id, repeat_index),
+                        repeat_index,
+                        device_id: captured.input_device_ids[mic_index].clone(),
+                        output_device_id: captured.output_device_id.clone(),
+                        source_id: source.id.clone(),
+                        microphone_id: mic.id.clone(),
+                        wav_file,
+                        samples: samples.len(),
+                        input_sample_format: captured.input_sample_formats[mic_index].clone(),
+                        output_sample_format: captured.output_sample_format.clone(),
+                        peak_amplitude: samples.iter().fold(0.0_f32, |peak, s| peak.max(s.abs())),
+                        clipped_samples: samples.iter().filter(|s| s.abs() >= 1.0).count(),
+                    });
+                }
+                save_manifest(output_directory, &manifest)?;
             }
-            save_manifest(output_directory, &manifest)?;
         }
         Ok(())
     })();
