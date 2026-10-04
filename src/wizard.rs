@@ -735,6 +735,8 @@ impl RecordingScreenModel {
     ) -> autoeq::roomeq::RecordingConfiguration {
         let is_sweep = self.signal_type == RecordingSignalType::Sweep;
         autoeq::roomeq::RecordingConfiguration {
+            // This capture flow does not emit a verified handoff sidecar.
+            capture_handoff_file: None,
             playback_device_name: Some(self.playback_config.device_name.clone()),
             playback_device_id: Some(self.playback_config.device_id.clone()),
             playback_sample_rate: Some(self.playback_config.sample_rate),
@@ -1092,6 +1094,7 @@ mod tests {
         model.mic_calibration_paths = vec![Some("mic0.txt".to_string()), None];
 
         let config = model.build_recording_configuration(Some("/tmp/session"));
+        assert_eq!(config.capture_handoff_file, None);
 
         assert_eq!(config.playback_device_name.as_deref(), Some("DAC"));
         assert_eq!(config.recording_device_name.as_deref(), Some("Mic"));
