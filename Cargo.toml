@@ -47,5 +47,13 @@ cpal = "0.17"
 # Windows ASIO device support (additive; off by default).
 asio = ["cpal/asio"]
 
+[patch.crates-io]
+block = { path = "../gpui-toolkit/crates/3rdparties/block" }
+objc = { path = "../gpui-toolkit/crates/3rdparties/objc" }
+async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
+
+[patch."https://github.com/zed-industries/font-kit"]
+zed-font-kit = { path = "../gpui-toolkit/crates/3rdparties/zed-font-kit" }
+
 [lints.clippy]
 perf = { level = "warn", priority = -1 }
