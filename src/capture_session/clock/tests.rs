@@ -287,7 +287,11 @@ fn saved_golden_session_round_trips_clock_provenance_and_magnitude_fallback() {
             .iter()
             .find(|asset| asset.file == take.raw_audio_file)
             .unwrap();
-        assert_eq!(identity.sha256, format!("{:x}", Sha256::digest(&retained)));
+        let expected_hash: String = Sha256::digest(&retained)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(identity.sha256, expected_hash);
     }
     // Exercise the actual producer-to-consumer handoff.
     autoeq::roomeq::load_config(&output.join("recordings.json"), None).unwrap();

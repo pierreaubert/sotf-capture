@@ -12,6 +12,16 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
 
+fn sha256_hex(digest: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for &byte in digest {
+        write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
+}
+
 fn file_identity(
     root: &Path,
     name: &str,
@@ -44,7 +54,7 @@ fn file_identity(
         file: name.into(),
         role,
         bytes: count,
-        sha256: format!("{:x}", hash.finalize()),
+        sha256: sha256_hex(&hash.finalize()),
     })
 }
 
@@ -202,7 +212,7 @@ pub fn publish_capture_handoff(
         version: 1,
         producer: "sotf-capture".into(),
         producer_version: env!("CARGO_PKG_VERSION").into(),
-        session_id: format!("{:x}", Sha256::digest(raw_journal_bytes)),
+        session_id: sha256_hex(&Sha256::digest(raw_journal_bytes)),
         completion: match status {
             RawCaptureStatus::RawComplete => CaptureCompletion::Complete,
             RawCaptureStatus::Cancelled => CaptureCompletion::Cancelled,
@@ -239,4 +249,19 @@ pub fn publish_capture_handoff(
     )
     .map_err(|error| error.to_string())?;
     Ok(handoff)
+}
+
+#[cfg(test)]
+mod hash_tests {
+    use super::{Sha256, sha256_hex};
+    use sha2::Digest;
+
+    #[test]
+    fn sha256_hex_matches_the_known_lowercase_digest() {
+        let digest = Sha256::digest(b"abc");
+        assert_eq!(
+            sha256_hex(&digest),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 }
