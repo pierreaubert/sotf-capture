@@ -113,13 +113,20 @@ pub struct CaptureProgress {
 }
 
 pub(crate) fn stable_take_id(source_id: &str, microphone_id: &str, repeat_index: u32) -> String {
+    use std::fmt::Write as _;
+
     let mut identity = Sha256::new();
     identity.update(repeat_index.to_be_bytes());
     for label in [source_id, microphone_id] {
         identity.update((label.len() as u64).to_be_bytes());
         identity.update(label.as_bytes());
     }
-    format!("take-r{repeat_index:03}-{:x}", identity.finalize())
+    let digest = identity.finalize();
+    let mut digest_hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut digest_hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    format!("take-r{repeat_index:03}-{digest_hex}")
 }
 
 fn save_manifest(directory: &Path, manifest: &RawCaptureManifest) -> Result<(), String> {
