@@ -1066,8 +1066,7 @@ dependencies = [
 [[package]]
 name = "coreaudio-rs"
 version = "0.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5d7dca3ebcf65a035582c9ad4385371a9d9ee6537474d2a278f4e1e475bb58"
+source = "git+https://github.com/pierreaubert/coreaudio-rs.git?rev=2d57f0f827d67162ccdce8f34b453fbd70d7750b#2d57f0f827d67162ccdce8f34b453fbd70d7750b"
 dependencies = [
  "bitflags 2.13.2",
  "libc",
