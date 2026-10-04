@@ -35,3 +35,18 @@ just test
 just dev
 just prod
 ```
+
+## Saved acquisition handoff
+
+Clock processing retains original device-clock WAV snapshots with processed
+audio, responses and calibration snapshots. When a canonical `recordings.json`
+projection is available, the final `capture-handoff.json` inventory binds all
+files by SHA-256 and records source/microphone/take identity, rate, acquisition
+status, device, gain, position and clock declarations.
+
+New configurations require this inventory when loaded by RoomEQ. Move the whole
+processed directory together. Changed or missing files are refused, and parsed
+responses are frozen before optimization. Calibration is applied during capture
+analysis and is not reapplied by the handoff loader. Hashes do not authenticate
+hardware calibration or establish listening benefit. Repeated/partial capture
+selection remains an explicit review step; missing clocks remain unknown.

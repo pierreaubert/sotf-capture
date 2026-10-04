@@ -15,6 +15,8 @@ pub mod analysis;
 #[cfg(not(target_os = "ios"))]
 pub mod clock;
 #[cfg(not(target_os = "ios"))]
+pub mod handoff;
+#[cfg(not(target_os = "ios"))]
 pub mod manifest;
 #[cfg(not(target_os = "ios"))]
 mod phase;

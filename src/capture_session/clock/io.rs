@@ -118,11 +118,9 @@ pub fn process_capture_session(
     let root = raw_directory
         .canonicalize()
         .map_err(|e| format!("cannot open raw capture directory: {e}"))?;
-    let manifest: RawCaptureManifest = serde_json::from_slice(&bounded_read(
-        &artifact(&root, "capture-raw.json")?,
-        2_097_152,
-    )?)
-    .map_err(|e| format!("cannot parse raw capture journal: {e}"))?;
+    let raw_journal_bytes = bounded_read(&artifact(&root, "capture-raw.json")?, 2_097_152)?;
+    let manifest: RawCaptureManifest = serde_json::from_slice(&raw_journal_bytes)
+        .map_err(|e| format!("cannot parse raw capture journal: {e}"))?;
     if manifest.version != 1
         || manifest.status == RawCaptureStatus::Capturing
         || manifest.takes.is_empty()
@@ -218,8 +216,16 @@ pub fn process_capture_session(
         ],
     };
     for (index, take) in manifest.takes.iter().enumerate() {
+        // Analyze the retained original-clock snapshot so the imported evidence
+        // is bound to these exact samples after the raw directory is moved.
+        let raw_name = format!("raw-take-{index:03}.wav");
+        std::fs::copy(
+            artifact(&root, &take.wav_file)?,
+            output_directory.join(&raw_name),
+        )
+        .map_err(|error| error.to_string())?;
         let samples = read_wave(
-            &artifact(&root, &take.wav_file)?,
+            &output_directory.join(&raw_name),
             manifest.plan.sample_rate_hz,
             take.samples,
         )?;
@@ -314,5 +320,13 @@ pub fn process_capture_session(
     let json = serde_json::to_vec_pretty(&result).map_err(|e| e.to_string())?;
     save_recording_session_json(&output_directory.join("capture-clock.json"), &json)
         .map_err(|e| e.to_string())?;
+    if result.recording_manifest.is_some() {
+        crate::capture_session::handoff::publish_capture_handoff(
+            &result,
+            manifest.status,
+            &raw_journal_bytes,
+            output_directory,
+        )?;
+    }
     Ok(result)
 }

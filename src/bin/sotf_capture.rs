@@ -23,6 +23,10 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Clap parses this command once; inline fields keep its argument definitions together"
+)]
 enum Command {
     /// List input and output audio devices.
     Devices {

@@ -2,6 +2,7 @@ use super::*;
 use crate::capture_session::protocol::prepare_capture_stimulus;
 use crate::capture_session::record::RawCaptureStatus;
 use crate::capture_session::{CaptureGeometry, CaptureSessionPlan, CaptureTimingReference};
+use sha2::{Digest, Sha256};
 
 #[derive(Deserialize)]
 struct Golden {
@@ -179,6 +180,7 @@ fn absent_survey_never_turns_arrival_alignment_into_coherent_evidence() {
 fn write_golden_directory() -> tempfile::TempDir {
     use crate::capture_session::record::CaptureCalibration;
     use crate::signal_recorder::write_wav_file;
+    use sha2::{Digest, Sha256};
     let root = tempfile::tempdir().unwrap();
     let (golden, mut manifest, stimulus, chirp) = fixture();
     manifest.plan.sources.truncate(1);
@@ -260,6 +262,29 @@ fn saved_golden_session_round_trips_clock_provenance_and_magnitude_fallback() {
         "{:?}",
         report.pending_processing
     );
+    let handoff: autoeq::capture_handoff::CaptureHandoff = serde_json::from_slice(
+        &std::fs::read(output.join(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME)).unwrap(),
+    )
+    .unwrap();
+    handoff.validate().unwrap();
+    assert_eq!(
+        handoff.completion,
+        autoeq::capture_handoff::CaptureCompletion::Complete
+    );
+    assert_eq!(handoff.takes.len(), 2);
+    for (index, take) in handoff.takes.iter().enumerate() {
+        let retained = std::fs::read(output.join(&take.raw_audio_file)).unwrap();
+        let original = std::fs::read(root.path().join(&report.takes[index].raw.wav_file)).unwrap();
+        assert_eq!(retained, original);
+        let identity = handoff
+            .artifacts
+            .iter()
+            .find(|asset| asset.file == take.raw_audio_file)
+            .unwrap();
+        assert_eq!(identity.sha256, format!("{:x}", Sha256::digest(&retained)));
+    }
+    // Exercise the actual producer-to-consumer handoff.
+    autoeq::roomeq::load_config(&output.join("recordings.json"), None).unwrap();
     let configuration: autoeq::roomeq::RoomConfig =
         serde_json::from_slice(&std::fs::read(output.join("recordings.json")).unwrap()).unwrap();
     let autoeq::roomeq::SpeakerConfig::Single(source) = &configuration.speakers["left"] else {
@@ -372,6 +397,26 @@ fn canonical_phase_requires_complete_quality_and_retains_frequency_gate() {
     assert!(capture.coherent_reference_at_frequency(2, 20000.0).is_err());
     let json = serde_json::to_string(&config).unwrap();
     assert!(json.contains("take-000-phase.csv"));
+    report.takes[1].analysis.as_mut().unwrap().common_reference = None;
+    let magnitude_only =
+        crate::capture_session::manifest::recording_configuration(&report).unwrap();
+    let autoeq::roomeq::SpeakerConfig::Single(source) = &magnitude_only.speakers["left"] else {
+        panic!("captured source");
+    };
+    let provenance = source.provenance();
+    assert_eq!(
+        provenance.capture_kind,
+        autoeq::ProvenanceCaptureKind::SpatialMagnitude
+    );
+    assert!(
+        provenance
+            .capture
+            .unwrap()
+            .takes
+            .iter()
+            .all(|take| take.quality_passed),
+        "missing shared phase must not erase separately accepted magnitude quality"
+    );
     report.takes[1].analysis.as_mut().unwrap().frequency_snr[0].snr_db = None;
     let fallback = crate::capture_session::manifest::recording_configuration(&report).unwrap();
     let autoeq::roomeq::SpeakerConfig::Single(source) = &fallback.speakers["left"] else {
