@@ -44,7 +44,7 @@ fn file_identity(
         file: name.into(),
         role,
         bytes: count,
-        sha256: format!("{:x}", hash.finalize()),
+        sha256: super::digest_lower_hex(hash.finalize().as_ref()),
     })
 }
 
@@ -202,7 +202,7 @@ pub fn publish_capture_handoff(
         version: 1,
         producer: "sotf-capture".into(),
         producer_version: env!("CARGO_PKG_VERSION").into(),
-        session_id: format!("{:x}", Sha256::digest(raw_journal_bytes)),
+        session_id: super::digest_lower_hex(Sha256::digest(raw_journal_bytes).as_ref()),
         completion: match status {
             RawCaptureStatus::RawComplete => CaptureCompletion::Complete,
             RawCaptureStatus::Cancelled => CaptureCompletion::Cancelled,

@@ -287,7 +287,20 @@ fn saved_golden_session_round_trips_clock_provenance_and_magnitude_fallback() {
             .iter()
             .find(|asset| asset.file == take.raw_audio_file)
             .unwrap();
-        assert_eq!(identity.sha256, format!("{:x}", Sha256::digest(&retained)));
+        assert_eq!(identity.sha256.len(), 64);
+        assert!(identity
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        let decoded = identity
+            .sha256
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect::<Vec<_>>();
+        let expected = Sha256::digest(&retained);
+        let expected_bytes: &[u8] = expected.as_ref();
+        assert_eq!(decoded.as_slice(), expected_bytes);
     }
     // Exercise the actual producer-to-consumer handoff.
     autoeq::roomeq::load_config(&output.join("recordings.json"), None).unwrap();

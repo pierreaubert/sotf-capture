@@ -119,7 +119,10 @@ pub(crate) fn stable_take_id(source_id: &str, microphone_id: &str, repeat_index:
         identity.update((label.len() as u64).to_be_bytes());
         identity.update(label.as_bytes());
     }
-    format!("take-r{repeat_index:03}-{:x}", identity.finalize())
+    format!(
+        "take-r{repeat_index:03}-{}",
+        super::digest_lower_hex(identity.finalize().as_ref())
+    )
 }
 
 fn save_manifest(directory: &Path, manifest: &RawCaptureManifest) -> Result<(), String> {

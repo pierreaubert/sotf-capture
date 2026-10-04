@@ -27,14 +27,19 @@ pub mod record;
 pub mod reflections;
 
 #[cfg(not(target_os = "ios"))]
-pub(super) fn calibration_sha256(bytes: &[u8]) -> String {
+pub(super) fn digest_lower_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
 
-    let mut hex = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
     }
     hex
+}
+
+#[cfg(not(target_os = "ios"))]
+pub(super) fn calibration_sha256(bytes: &[u8]) -> String {
+    digest_lower_hex(Sha256::digest(bytes).as_ref())
 }
 
 #[cfg(all(test, not(target_os = "ios")))]

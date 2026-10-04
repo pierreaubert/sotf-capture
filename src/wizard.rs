@@ -869,7 +869,6 @@ impl RecordingScreenModel {
                 let n = self.recording_config.num_positions.max(1);
                 if n > 1 { Some(n) } else { None }
             },
-            capture_handoff_file: None,
         }
     }
 
