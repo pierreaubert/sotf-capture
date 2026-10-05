@@ -15,11 +15,11 @@ use super::misc::analyze_clipping;
 use super::misc::check_capture_clipping;
 use super::misc::parse_channel_list;
 use super::misc::prepare_signal;
+#[cfg(not(target_os = "ios"))]
+use super::playback::CpalPlayback;
 use super::probe::gen_schroeder_narrowband_probe;
 #[cfg(not(target_os = "ios"))]
 use super::quality::{DriftAction, build_capture_quality, check_lag_lock, drift_action};
-#[cfg(not(target_os = "ios"))]
-use super::playback::CpalPlayback;
 #[cfg(not(target_os = "ios"))]
 use super::record::record_and_analyze_with;
 #[cfg(not(target_os = "ios"))]
@@ -38,10 +38,10 @@ use super::types::analyze_bass_anchor_recording;
 use super::types::pick_direct_arrival_from_envelope;
 use super::write::write_temp_wav;
 use super::write::write_wav_file;
-#[cfg(not(target_os = "ios"))]
-use math_audio_dsp::analysis::{ClockDriftEstimate, LagEstimate, MeasurementQualityConfig};
 use hound::SampleFormat;
 use hound::WavReader;
+#[cfg(not(target_os = "ios"))]
+use math_audio_dsp::analysis::{ClockDriftEstimate, LagEstimate, MeasurementQualityConfig};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 #[cfg(not(target_os = "ios"))]
@@ -722,19 +722,19 @@ fn test_record_and_analyze_signature() {
         if false {
             let outcome = record_and_analyze_with(
                 &mut CpalPlayback::new(), // playback backend
-                temp_path,   // temp_wav_path (for playback)
-                output_path, // recorded_wav_path (for recording output)
-                &reference,  // reference_signal
-                48000_u32,   // sample_rate
-                csv_path,    // output_csv_path
-                1_u16,       // output_channel
-                1_u16,       // input_channel
-                None,        // output_device_name
-                None,        // input_device_name
-                None,        // microphone_compensation_path
-                None,        // sweep_range
-                1_u16,       // num_sweeps (1 = legacy single-sweep capture)
-                None,        // cancel flag
+                temp_path,                // temp_wav_path (for playback)
+                output_path,              // recorded_wav_path (for recording output)
+                &reference,               // reference_signal
+                48000_u32,                // sample_rate
+                csv_path,                 // output_csv_path
+                1_u16,                    // output_channel
+                1_u16,                    // input_channel
+                None,                     // output_device_name
+                None,                     // input_device_name
+                None,                     // microphone_compensation_path
+                None,                     // sweep_range
+                1_u16,                    // num_sweeps (1 = legacy single-sweep capture)
+                None,                     // cancel flag
             );
             // Task 7: the return value is a CaptureAnalysis wrapper carrying
             // the math-dsp analysis plus the per-take quality report, drift
@@ -995,8 +995,8 @@ fn test_clock_drift_estimate_and_correct_roundtrip() {
     );
     assert_eq!(drift_action(Some(&estimate)), DriftAction::CorrectAndAdvise);
 
-    let corrected =
-        math_audio_dsp::analysis::correct_clock_drift(&drifted, &estimate).expect("drift correction");
+    let corrected = math_audio_dsp::analysis::correct_clock_drift(&drifted, &estimate)
+        .expect("drift correction");
     assert_eq!(corrected.len(), drifted.len());
     let residual = math_audio_dsp::analysis::estimate_clock_drift(&sweep, &corrected, sample_rate)
         .expect("drift re-estimation after correction");
@@ -1153,7 +1153,8 @@ fn simulate_sweep_take(reference: &[f32], ir: &[f32], noise_amp: f32, seed: u64)
 /// Task-7 ledger note on the lag-estimator edge fragility).
 #[cfg(not(target_os = "ios"))]
 fn padded_sweep_reference(sample_rate: u32) -> Vec<f32> {
-    let mut reference = math_audio_dsp::signals::gen_log_sweep(20.0, 20_000.0, 0.5, sample_rate, 1.0);
+    let mut reference =
+        math_audio_dsp::signals::gen_log_sweep(20.0, 20_000.0, 0.5, sample_rate, 1.0);
     reference.extend(std::iter::repeat_n(0.0, sample_rate as usize / 4));
     reference
 }
@@ -1293,8 +1294,8 @@ fn test_repeat_sweep_averaging_rejects_outlier_and_extends_csv() {
 
     // math-dsp's reader parses columns >= 8 POSITIONALLY: the extended file
     // must still round-trip with the SPL column intact.
-    let roundtrip =
-        math_audio_dsp::analysis::read_analysis_csv(&csv).expect("read_analysis_csv on extended CSV");
+    let roundtrip = math_audio_dsp::analysis::read_analysis_csv(&csv)
+        .expect("read_analysis_csv on extended CSV");
     assert_eq!(
         roundtrip.frequencies.len(),
         capture.result.frequencies.len()

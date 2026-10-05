@@ -1388,10 +1388,7 @@ mod tests {
     #[test]
     fn num_sweeps_defaults_to_engine_default() {
         let model = RecordingScreenModel::default();
-        assert_eq!(
-            model.num_sweeps,
-            crate::signal_recorder::DEFAULT_NUM_SWEEPS
-        );
+        assert_eq!(model.num_sweeps, crate::signal_recorder::DEFAULT_NUM_SWEEPS);
     }
 
     #[test]

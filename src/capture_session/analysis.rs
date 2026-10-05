@@ -3,11 +3,11 @@
 use super::CaptureSessionPlan;
 pub use super::phase::CapturePhaseArtifacts;
 use super::protocol::{CaptureStimulus, CaptureStimulusLayout};
-use serde::{Deserialize, Serialize};
 use math_audio_dsp::analysis::{
     MeasurementQualityConfig, MicrophoneCompensation, analyze_recording,
     estimate_lag_with_confidence,
 };
+use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::Path;
 

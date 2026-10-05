@@ -1,10 +1,10 @@
 //! Shared recording domain types used by both GPUI and TUI apps.
 
-pub use autoeq::roomeq::SplCalibration;
 pub use crate::signal_recorder::{
     BassAnchorChannelResult, BassAnchorResults, ProbeDelayChannelResult as DelayProbeChannelResult,
     ProbeDelayResults as DelayProbeResults, SplCalibrationResult,
 };
+pub use autoeq::roomeq::SplCalibration;
 
 mod bass_anchor_capture_state;
 mod bass_anchor_capture_status;
@@ -18,10 +18,10 @@ mod plot_smoothing;
 mod probe_capture_state;
 mod probe_capture_status;
 mod recording_device_config;
-mod source_identity;
 mod recording_signal_type;
 mod recording_step;
 mod room_dimension_unit;
+mod source_identity;
 mod speaker_configuration;
 mod spl_calibration_capture_state;
 mod spl_calibration_capture_status;
@@ -40,10 +40,10 @@ pub use plot_smoothing::*;
 pub use probe_capture_state::*;
 pub use probe_capture_status::*;
 pub use recording_device_config::*;
-pub use source_identity::RecordingSourceIdentity;
 pub use recording_signal_type::*;
 pub use recording_step::*;
 pub use room_dimension_unit::*;
+pub use source_identity::RecordingSourceIdentity;
 pub use speaker_configuration::*;
 pub use spl_calibration_capture_state::*;
 pub use spl_calibration_capture_status::*;

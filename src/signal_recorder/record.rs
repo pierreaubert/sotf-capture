@@ -405,7 +405,12 @@ fn capture_sweep_take(
     // Start routed playback on the output device through the caller-chosen
     // backend (engine-backed in sotf frontends, cpal-native in sotf-capture).
     playback
-        .start(temp_wav_path, output_device_name, output_channel, sample_rate)
+        .start(
+            temp_wav_path,
+            output_device_name,
+            output_channel,
+            sample_rate,
+        )
         .map_err(|e| {
             actionable_capture_error("[record_and_analyze] Failed to start playback", &e)
         })?;
@@ -725,7 +730,12 @@ fn capture_sweep_take_multi(
 
     // --- Start playback (caller-chosen backend) ---
     playback
-        .start(temp_wav_path, output_device_name, output_channel, sample_rate)
+        .start(
+            temp_wav_path,
+            output_device_name,
+            output_channel,
+            sample_rate,
+        )
         .map_err(|e| {
             actionable_capture_error("[record_and_analyze_multi] Failed to start playback", &e)
         })?;
@@ -968,7 +978,8 @@ pub(super) fn correction_keeps_lock(
 
     // If the raw take never locked there is no good lock to destroy — leave
     // the verdict to the downstream gates (single-take lag gate, MAD).
-    let Ok(raw_lock) = math_audio_dsp::analysis::estimate_lag_with_confidence(reference, raw) else {
+    let Ok(raw_lock) = math_audio_dsp::analysis::estimate_lag_with_confidence(reference, raw)
+    else {
         return true;
     };
     let corrected_lock =
