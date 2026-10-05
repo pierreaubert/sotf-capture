@@ -101,7 +101,10 @@ impl std::fmt::Debug for CpalPlayback {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CpalPlayback")
             .field("active", &self.stream.is_some())
-            .field("rendered_frames", &self.rendered_frames.load(Ordering::Relaxed))
+            .field(
+                "rendered_frames",
+                &self.rendered_frames.load(Ordering::Relaxed),
+            )
             .field("total_frames", &self.total_frames)
             .finish()
     }
@@ -222,8 +225,7 @@ impl SweepPlayback for CpalPlayback {
                             rendered.fetch_add(data.len() / hardware_channels, Ordering::Relaxed);
                         for (i, frame) in data.chunks_mut(hardware_channels).enumerate() {
                             frame.fill(0.0);
-                            frame[channel_index] =
-                                stimulus.get(start + i).copied().unwrap_or(0.0);
+                            frame[channel_index] = stimulus.get(start + i).copied().unwrap_or(0.0);
                         }
                     },
                     |e| log::error!("[sotf-capture] output stream error: {e}"),
@@ -240,8 +242,13 @@ impl SweepPlayback for CpalPlayback {
                             rendered.fetch_add(data.len() / hardware_channels, Ordering::Relaxed);
                         for (i, frame) in data.chunks_mut(hardware_channels).enumerate() {
                             frame.fill(0);
-                            let sample = (stimulus.get(start + i).copied().unwrap_or(0.0).clamp(-1.0, 1.0)
-                                * f32::from(i16::MAX)) as i16;
+                            let sample = (stimulus
+                                .get(start + i)
+                                .copied()
+                                .unwrap_or(0.0)
+                                .clamp(-1.0, 1.0)
+                                * f32::from(i16::MAX))
+                                as i16;
                             frame[channel_index] = sample;
                         }
                     },

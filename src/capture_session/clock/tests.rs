@@ -288,10 +288,12 @@ fn saved_golden_session_round_trips_clock_provenance_and_magnitude_fallback() {
             .find(|asset| asset.file == take.raw_audio_file)
             .unwrap();
         assert_eq!(identity.sha256.len(), 64);
-        assert!(identity
-            .sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        assert!(
+            identity
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
         let decoded = identity
             .sha256
             .as_bytes()

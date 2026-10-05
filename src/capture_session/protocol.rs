@@ -1,8 +1,8 @@
 //! Start/end acoustic timing chirps around a source's logarithmic sweep.
 
 use super::ValidatedCaptureSession;
-use serde::{Deserialize, Serialize};
 use math_audio_dsp::signals::{apply_fade_in, apply_fade_out, try_gen_log_sweep};
+use serde::{Deserialize, Serialize};
 
 /// Exact stimulus-clock positions used for subsequent drift estimation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
