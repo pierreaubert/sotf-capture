@@ -48,6 +48,10 @@ cpal = "0.17"
 asio = ["cpal/asio"]
 
 [patch.crates-io]
+# SOTF owned maintenance forks; upstream 2.1.1, local version 2.1.2.
+derive_more = { path = "../math-audio/crates/3rdparties/derive_more" }
+derive_more-impl = { path = "../math-audio/crates/3rdparties/derive_more-impl" }
+
 # Match GPUI compatibility forks: workspace patches are not inherited.
 fontconfig-parser = { git = "https://github.com/pierreaubert/fontconfig-parser.git", rev = "d247c91f5a57edd6ba6eb26e884d4904dbfbc87e" }
 psm = { git = "https://github.com/pierreaubert/stacker.git", rev = "48bf8e3abfb350de9387a675275a629e4daf9717" }
