@@ -260,6 +260,7 @@ pub(crate) fn take_provenance(
         .find(|entry| entry.microphone_id == mic.id)
         .ok_or_else(|| format!("{}: calibration identity is unavailable", mic.id))?;
     Ok(CaptureTakeProvenance {
+        seat_id: None,
         microphone_id: mic.id.clone(),
         device_id: take.raw.device_id.clone(),
         offset_samples: take.clock.offset_samples,
