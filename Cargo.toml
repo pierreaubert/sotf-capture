@@ -17,7 +17,7 @@ math-dsp = { version = "0.5", path = "../math-audio/crates/math-dsp" }
 # Private rubato 5.0.0 fork (exact variable-ratio sizing, prepared cutoff
 # tables), shared from math-audio so offline reference resampling matches the
 # engine's resampler parameters. A sibling math-audio checkout is required.
-rubato = { path = "../math-audio/crates/3rdparties/rubato" }
+rubato = { path = "../sotf-3rdparties/rubato" }
 audioadapter-buffers = "5"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
@@ -49,20 +49,20 @@ asio = ["cpal/asio"]
 
 [patch.crates-io]
 # SOTF owned maintenance forks; upstream 2.1.1, local version 2.1.2.
-derive_more = { path = "../math-audio/crates/3rdparties/derive_more" }
-derive_more-impl = { path = "../math-audio/crates/3rdparties/derive_more-impl" }
+derive_more = { path = "../sotf-3rdparties/derive_more" }
+derive_more-impl = { path = "../sotf-3rdparties/derive_more-impl" }
 
 # Match GPUI compatibility forks: workspace patches are not inherited.
-fontconfig-parser = { git = "https://github.com/pierreaubert/fontconfig-parser.git", rev = "d247c91f5a57edd6ba6eb26e884d4904dbfbc87e" }
-psm = { git = "https://github.com/pierreaubert/stacker.git", rev = "48bf8e3abfb350de9387a675275a629e4daf9717" }
-nalgebra = { git = "https://github.com/pierreaubert/nalgebra.git", rev = "a42573dbc9649af62fb07b469c98c852e62720fd" }
-block = { path = "../gpui-toolkit/crates/3rdparties/block" }
-objc = { path = "../gpui-toolkit/crates/3rdparties/objc" }
-async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
-coreaudio-rs = { git = "https://github.com/pierreaubert/coreaudio-rs.git", rev = "29b0407363c479be0b7de681ba6ba050725a5174" }
+fontconfig-parser = { path = "../sotf-3rdparties/fontconfig-parser" }
+psm = { path = "../sotf-3rdparties/stacker/psm" }
+nalgebra = { path = "../sotf-3rdparties/nalgebra" }
+block = { path = "../sotf-3rdparties/block" }
+objc = { path = "../sotf-3rdparties/objc" }
+async-task = { path = "../sotf-3rdparties/async-task" }
+coreaudio-rs = { path = "../sotf-3rdparties/coreaudio-rs" }
 
 [patch."https://github.com/zed-industries/font-kit"]
-zed-font-kit = { path = "../gpui-toolkit/crates/3rdparties/zed-font-kit" }
+zed-font-kit = { path = "../sotf-3rdparties/zed-font-kit" }
 
 [lints.clippy]
 perf = { level = "warn", priority = -1 }

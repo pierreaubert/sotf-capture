@@ -300,7 +300,6 @@ dependencies = [
 [[package]]
 name = "async-task"
 version = "4.7.1"
-source = "git+https://github.com/smol-rs/async-task.git?rev=b4486cd71e4e94fbda54ce6302444de14f4d190e#b4486cd71e4e94fbda54ce6302444de14f4d190e"
 
 [[package]]
 name = "async-trait"
@@ -889,7 +888,6 @@ dependencies = [
 [[package]]
 name = "collections"
 version = "0.1.0"
-source = "git+https://github.com/pierreaubert/zed.git?rev=3a0ea890ddf8e6247e38c795a960eb18f5182113#3a0ea890ddf8e6247e38c795a960eb18f5182113"
 dependencies = [
  "gpui_util",
  "indexmap",
@@ -1067,7 +1065,6 @@ dependencies = [
 [[package]]
 name = "coreaudio-rs"
 version = "0.14.2"
-source = "git+https://github.com/pierreaubert/coreaudio-rs.git?rev=29b0407363c479be0b7de681ba6ba050725a5174#29b0407363c479be0b7de681ba6ba050725a5174"
 dependencies = [
  "bitflags 2.13.2",
  "libc",
@@ -1261,7 +1258,6 @@ dependencies = [
 [[package]]
 name = "derive_refineable"
 version = "0.1.0"
-source = "git+https://github.com/pierreaubert/zed.git?rev=3a0ea890ddf8e6247e38c795a960eb18f5182113#3a0ea890ddf8e6247e38c795a960eb18f5182113"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1542,7 +1538,6 @@ dependencies = [
 [[package]]
 name = "fontconfig-parser"
 version = "0.5.8"
-source = "git+https://github.com/pierreaubert/fontconfig-parser.git?rev=d247c91f5a57edd6ba6eb26e884d4904dbfbc87e#d247c91f5a57edd6ba6eb26e884d4904dbfbc87e"
 dependencies = [
  "roxmltree",
 ]
@@ -1975,7 +1970,6 @@ dependencies = [
 [[package]]
 name = "gpui_shared_string"
 version = "0.1.0"
-source = "git+https://github.com/pierreaubert/zed.git?rev=3a0ea890ddf8e6247e38c795a960eb18f5182113#3a0ea890ddf8e6247e38c795a960eb18f5182113"
 dependencies = [
  "schemars",
  "serde",
@@ -1985,7 +1979,6 @@ dependencies = [
 [[package]]
 name = "gpui_util"
 version = "0.1.0"
-source = "git+https://github.com/pierreaubert/zed.git?rev=3a0ea890ddf8e6247e38c795a960eb18f5182113#3a0ea890ddf8e6247e38c795a960eb18f5182113"
 dependencies = [
  "anyhow",
  "log",
@@ -2870,7 +2863,6 @@ dependencies = [
 [[package]]
 name = "media"
 version = "0.1.0"
-source = "git+https://github.com/pierreaubert/zed.git?rev=3a0ea890ddf8e6247e38c795a960eb18f5182113#3a0ea890ddf8e6247e38c795a960eb18f5182113"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -2900,7 +2892,6 @@ dependencies = [
 [[package]]
 name = "metaheuristics-nature"
 version = "10.1.0"
-source = "git+https://github.com/pierreaubert/metaheuristics-nature-rs.git?rev=4f0b603c521e0b4e20239c827f1a0975442bb740#4f0b603c521e0b4e20239c827f1a0975442bb740"
 dependencies = [
  "getrandom 0.4.3",
  "num-traits",
@@ -2987,7 +2978,6 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 [[package]]
 name = "nalgebra"
 version = "0.35.0"
-source = "git+https://github.com/pierreaubert/nalgebra.git?rev=a42573dbc9649af62fb07b469c98c852e62720fd#a42573dbc9649af62fb07b469c98c852e62720fd"
 dependencies = [
  "approx",
  "glam",
@@ -3617,7 +3607,6 @@ dependencies = [
 [[package]]
 name = "psm"
 version = "0.1.32"
-source = "git+https://github.com/pierreaubert/stacker.git?rev=48bf8e3abfb350de9387a675275a629e4daf9717#48bf8e3abfb350de9387a675275a629e4daf9717"
 dependencies = [
  "ar_archive_writer",
  "cc",
@@ -3882,7 +3871,6 @@ dependencies = [
 [[package]]
 name = "refineable"
 version = "0.1.0"
-source = "git+https://github.com/pierreaubert/zed.git?rev=3a0ea890ddf8e6247e38c795a960eb18f5182113#3a0ea890ddf8e6247e38c795a960eb18f5182113"
 dependencies = [
  "derive_refineable",
 ]
