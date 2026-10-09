@@ -15,3 +15,9 @@ prod:
 
 fmt:
     {{cargo}} fmt --all -- --check
+
+test:
+    {{cargo}} test --all --workspace --all-targets -- --check
+
+ntest:
+    {{cargo}} nextest run 

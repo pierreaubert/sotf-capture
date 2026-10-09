@@ -186,7 +186,6 @@ fn absent_survey_never_turns_arrival_alignment_into_coherent_evidence() {
 fn write_golden_directory() -> tempfile::TempDir {
     use crate::capture_session::record::CaptureCalibration;
     use crate::signal_recorder::write_wav_file;
-    use sha2::{Digest, Sha256};
     let root = tempfile::tempdir().unwrap();
     let (golden, mut manifest, stimulus, chirp) = fixture();
     manifest.plan.sources.truncate(1);

@@ -17,7 +17,7 @@ math-dsp = { version = "0.5", path = "../math-audio/crates/math-dsp" }
 # Private rubato 5.0.0 fork (exact variable-ratio sizing, prepared cutoff
 # tables), shared from math-audio so offline reference resampling matches the
 # engine's resampler parameters. A sibling math-audio checkout is required.
-rubato = { path = "../sotf-3rdparties/rubato" }
+rubato = { version = "5.0.0",  package = "sotf-rubato",  git = "https://github.com/pierreaubert/sotf-3rdparties" }
 audioadapter-buffers = "5"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
@@ -47,22 +47,10 @@ cpal = "0.17"
 # Windows ASIO device support (additive; off by default).
 asio = ["cpal/asio"]
 
-[patch.crates-io]
 # SOTF owned maintenance forks; upstream 2.1.1, local version 2.1.2.
-derive_more = { path = "../sotf-3rdparties/derive_more" }
-derive_more-impl = { path = "../sotf-3rdparties/derive_more-impl" }
 
 # Match GPUI compatibility forks: workspace patches are not inherited.
-fontconfig-parser = { path = "../sotf-3rdparties/fontconfig-parser" }
-psm = { path = "../sotf-3rdparties/stacker/psm" }
-nalgebra = { path = "../sotf-3rdparties/nalgebra" }
-block = { path = "../sotf-3rdparties/block" }
-objc = { path = "../sotf-3rdparties/objc" }
-async-task = { path = "../sotf-3rdparties/async-task" }
-coreaudio-rs = { path = "../sotf-3rdparties/coreaudio-rs" }
 
-[patch."https://github.com/zed-industries/font-kit"]
-zed-font-kit = { path = "../sotf-3rdparties/zed-font-kit" }
 
 [lints.clippy]
 perf = { level = "warn", priority = -1 }
