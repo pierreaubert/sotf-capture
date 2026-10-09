@@ -72,15 +72,23 @@ pub fn find_device(
     if let Some(idx) = match_device_priority(&device_info, identifier) {
         Ok(devices[idx].clone())
     } else {
-        // Device not found - provide helpful error message with available devices
-        let device_type = if is_input { "input" } else { "output" };
-        let available_summary = summarize_available_device_names(&device_info, 12);
-        Err(format!(
-            "Audio device '{}' not found. Available {} devices ({} total): {}",
-            identifier,
-            device_type,
-            device_info.len(),
-            available_summary
-        ))
+        Err(device_not_found_message(identifier, is_input, &device_info))
     }
+}
+
+/// Helpful not-found message listing available devices (shared with fakes).
+pub(crate) fn device_not_found_message(
+    identifier: &str,
+    is_input: bool,
+    device_info: &[(String, String)],
+) -> String {
+    let device_type = if is_input { "input" } else { "output" };
+    let available_summary = summarize_available_device_names(device_info, 12);
+    format!(
+        "Audio device '{}' not found. Available {} devices ({} total): {}",
+        identifier,
+        device_type,
+        device_info.len(),
+        available_summary
+    )
 }

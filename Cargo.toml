@@ -38,6 +38,11 @@ env_logger = "0.11"
 name = "sotf-capture"
 path = "src/bin/sotf_capture.rs"
 
+[[test]]
+name = "emulated_capture"
+path = "tests/emulated_capture.rs"
+required-features = ["test-util"]
+
 # Platform-specific: the full device/playback path is desktop-only (iOS uses
 # the devices stub and compiles no capture I/O), mirroring sotf-engine.
 [target.'cfg(not(target_os = "ios"))'.dependencies]
@@ -46,6 +51,8 @@ cpal = "0.17"
 [features]
 # Windows ASIO device support (additive; off by default).
 asio = ["cpal/asio"]
+# Emulated audio backends for hardware-free tests (never enable in production).
+test-util = []
 
 # SOTF owned maintenance forks; upstream 2.1.1, local version 2.1.2.
 

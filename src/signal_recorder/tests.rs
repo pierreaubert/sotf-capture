@@ -161,9 +161,17 @@ fn reference_resampling_preserves_late_signal_content() {
     );
 }
 
+/// cpal callback sources guarded by the input-callback tests below.
+const CALLBACK_SOURCES: &str = concat!(
+    include_str!("recorder.rs"),
+    include_str!("record.rs"),
+    include_str!("types.rs"),
+    include_str!("build.rs"),
+);
+
 #[test]
 fn cpal_input_callbacks_stay_lock_free() {
-    let source = include_str!("../signal_recorder.rs");
+    let source = CALLBACK_SOURCES;
 
     assert!(
         !source.contains(concat!("try", "_", "lock")),
@@ -177,7 +185,7 @@ fn cpal_input_callbacks_stay_lock_free() {
 
 #[test]
 fn cpal_input_callbacks_use_chunked_ring_buffer_writes() {
-    let source = include_str!("../signal_recorder.rs");
+    let source = CALLBACK_SOURCES;
 
     assert!(
         !source.contains(concat!("recorded_producer.", "push(")),
@@ -198,7 +206,7 @@ fn cpal_input_callbacks_use_chunked_ring_buffer_writes() {
 
 #[test]
 fn cpal_input_stream_errors_are_warn_rate_limited() {
-    let source = include_str!("../signal_recorder.rs");
+    let source = CALLBACK_SOURCES;
 
     assert!(
         !source.contains(concat!(

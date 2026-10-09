@@ -118,7 +118,7 @@ impl CpalPlayback {
 }
 
 /// Read a stimulus WAV as mono f32, taking the first channel.
-fn read_stimulus_mono(wav: &Path) -> Result<Vec<f32>, String> {
+pub(crate) fn read_stimulus_mono(wav: &Path) -> Result<Vec<f32>, String> {
     let mut reader =
         hound::WavReader::open(wav).map_err(|e| format!("Failed to load file: {e}"))?;
     let spec = reader.spec();

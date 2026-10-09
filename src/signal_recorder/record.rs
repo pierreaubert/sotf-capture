@@ -5,11 +5,7 @@ use super::consts::MIN_REPEAT_SWEEPS;
 #[cfg(not(target_os = "ios"))]
 use super::misc::actionable_capture_error;
 #[cfg(not(target_os = "ios"))]
-use super::misc::capture_capacity;
-#[cfg(not(target_os = "ios"))]
 use super::misc::check_capture_clipping;
-#[cfg(not(target_os = "ios"))]
-use super::misc::drain_capture;
 #[cfg(not(target_os = "ios"))]
 use super::quality::CaptureAnalysis;
 #[cfg(not(target_os = "ios"))]
@@ -18,8 +14,6 @@ use super::quality::{
 };
 #[cfg(not(target_os = "ios"))]
 use super::types::{CancelFlag, cancel_requested};
-#[cfg(not(target_os = "ios"))]
-use super::write::write_selected_channel_to_ring;
 use super::write::write_wav_file;
 #[cfg(not(target_os = "ios"))]
 use super::write::{interpolate_log_frequency_grid, write_analysis_csv_extended};
@@ -28,8 +22,6 @@ use math_audio_dsp::analysis::{
     ClockDriftEstimate, LagEstimate, MicrophoneCompensation, analyze_recording,
 };
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Pause between repeat-sweep takes, letting the room decay and the device
 /// streams settle between play/record cycles.
@@ -178,7 +170,7 @@ pub(super) fn cancel_aware_stop(
 }
 
 /// Perform one play/record capture cycle using the given playback
-/// backend for output and cpal for recording.
+/// backend for output and the given recorder backend for input.
 ///
 /// Plays back a signal to a specific output channel while simultaneously
 /// recording from a specific input channel, and returns the raw captured
@@ -192,6 +184,7 @@ pub(super) fn cancel_aware_stop(
 #[allow(clippy::too_many_arguments)]
 fn capture_sweep_take(
     playback: &mut impl super::playback::SweepPlayback,
+    recorder: &mut impl super::recorder::SweepRecorder,
     temp_wav_path: &Path,
     reference_signal: &[f32],
     sample_rate: u32,
@@ -201,7 +194,6 @@ fn capture_sweep_take(
     input_device_name: Option<&str>,
     cancel: Option<&CancelFlag>,
 ) -> Result<RawSweepTake, String> {
-    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use std::thread::sleep;
     use std::time::Duration;
 
@@ -222,198 +214,39 @@ fn capture_sweep_take(
         expected_duration
     );
 
-    // Set up recording stream
-    let host = cpal::default_host();
-
-    // Get input device (either by name or default)
-    let input_device = if let Some(dev_name) = input_device_name {
-        log::info!(
-            "[record_and_analyze] Looking for input device: {}",
-            dev_name
-        );
-        crate::devices::find_device(&host, dev_name, true).map_err(|e| {
-            actionable_capture_error("[record_and_analyze] Input device not usable", &e)
-        })?
-    } else {
-        log::debug!("[record_and_analyze] Using default input device");
-        host.default_input_device().ok_or_else(|| {
-            actionable_capture_error("[record_and_analyze]", &"No default input device available")
-        })?
-    };
-
-    log::info!(
-        "[record_and_analyze] Input device: {}",
-        input_device
-            .description()
-            .map(|d| d.name().to_string())
-            .unwrap_or_else(|_| "Unknown Device".to_string())
-    );
-
-    // Find a supported input config that has enough channels for our input_channel
-    // and supports the requested sample rate. Use default config as primary choice
-    // since it's known to work with the device.
-    let default_input_config = input_device.default_input_config().map_err(|e| {
-        actionable_capture_error(
-            "[record_and_analyze] Failed to get default input config",
-            &e,
-        )
-    })?;
-
-    let default_input_channels = default_input_config.channels() as usize;
-    let default_input_sample_rate = default_input_config.sample_rate();
-
-    log::info!(
-        "[record_and_analyze] Input device default config: {}ch, {}Hz",
-        default_input_channels,
-        default_input_sample_rate,
-    );
-
-    // Find the best supported config: prefer one that matches our requested sample rate
-    // and has enough channels, falling back to default
-    let min_channels_needed = (input_channel as usize) + 1;
-
-    let best_config = input_device
-        .supported_input_configs()
-        .ok()
-        .and_then(|configs| {
-            configs
-                .filter(|c| {
-                    let ch = c.channels() as usize;
-                    ch >= min_channels_needed
-                        && c.min_sample_rate() <= sample_rate
-                        && c.max_sample_rate() >= sample_rate
-                })
-                // Prefer fewer channels (less data to process)
-                .min_by_key(|c| c.channels())
-        });
-
-    let (hardware_input_channels, input_sample_rate) = if let Some(config) = best_config {
-        let ch = config.channels() as usize;
-        log::info!(
-            "[record_and_analyze] Using supported config: {}ch, {}Hz (requested {}Hz)",
-            ch,
-            sample_rate,
-            sample_rate,
-        );
-        (ch, sample_rate)
-    } else {
-        // Fall back to default config
-        log::warn!(
-            "[record_and_analyze] No supported config for {}ch at {}Hz, using default ({}ch, {}Hz)",
-            min_channels_needed,
-            sample_rate,
-            default_input_channels,
-            default_input_sample_rate,
-        );
-        (default_input_channels, default_input_sample_rate)
-    };
-
-    if input_sample_rate != sample_rate {
-        log::warn!(
-            "[record_and_analyze] INPUT SAMPLE RATE MISMATCH: recording at {}Hz but sweep/reference at {}Hz",
-            input_sample_rate,
-            sample_rate,
-        );
-    }
-
-    // Validate that input_channel is within hardware capabilities
-    if (input_channel as usize) >= hardware_input_channels {
-        return Err(format!(
-            "Input channel {} exceeds hardware channel count {} (channels are 0-indexed)",
-            input_channel, hardware_input_channels
-        ));
-    }
-
-    // Configure input stream
-    let input_config = cpal::StreamConfig {
-        channels: hardware_input_channels as u16,
-        sample_rate: input_sample_rate,
-        buffer_size: cpal::BufferSize::Default,
-    };
-
-    log::info!(
-        "[record_and_analyze] Recording from input channel {} (0-indexed) out of {} total channels at {}Hz",
-        input_channel,
-        hardware_input_channels,
-        input_sample_rate,
-    );
-
-    let capture_capacity = capture_capacity(input_sample_rate, expected_duration, 4.5);
-    let (mut recorded_producer, mut recorded_consumer) =
-        rtrb::RingBuffer::<f32>::new(capture_capacity);
-    let recorded_count = Arc::new(AtomicUsize::new(0));
-    let recorded_count_callback = Arc::clone(&recorded_count);
-    let recorded_overruns = Arc::new(AtomicUsize::new(0));
-    let recorded_overruns_callback = Arc::clone(&recorded_overruns);
-
-    // Create input stream
-    let input_channel_idx = input_channel as usize;
-    let input_stream = input_device
-        .build_input_stream(
-            &input_config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                // Extract only the specified input channel
-                // Data is interleaved: [ch0, ch1, ..., chN, ch0, ch1, ..., chN, ...]
-                let frames = data.len() / hardware_input_channels;
-                let written = write_selected_channel_to_ring(
-                    &mut recorded_producer,
-                    data,
-                    hardware_input_channels,
-                    input_channel_idx,
-                );
-                recorded_count_callback.fetch_add(written, Ordering::Relaxed);
-                if written < frames {
-                    // Count the actual dropped samples, not just the
-                    // number of callbacks that saw a shortfall.
-                    recorded_overruns_callback.fetch_add(frames - written, Ordering::Relaxed);
-                    crate::rate_limited_log!(
-                        warn,
-                        5,
-                        "[record_and_analyze] Input capture ring buffer overrun"
-                    );
-                }
-            },
-            |err| {
-                crate::rate_limited_log!(
-                    warn,
-                    5,
-                    "[record_and_analyze] Input stream error: {}",
-                    err
-                )
-            },
-            None,
-        )
-        .map_err(|e| {
-            actionable_capture_error("[record_and_analyze] Failed to build input stream", &e)
-        })?;
-
-    // Start recording
-    input_stream.play().map_err(|e| {
-        actionable_capture_error("[record_and_analyze] Failed to start input stream", &e)
-    })?;
-    log::debug!("[record_and_analyze] Recording started");
+    // Open the input side first so a missing or unusable mic fails fast,
+    // before playback starts through the caller-chosen backend.
+    let negotiated = recorder.start(
+        input_device_name,
+        &[input_channel],
+        sample_rate,
+        expected_duration,
+    )?;
 
     // Small delay to let recording buffer fill
     sleep(Duration::from_millis(100));
 
     // Honor cancellation before starting playback (mirrors the aux path).
     if cancel_requested(cancel) {
-        std::mem::drop(input_stream);
+        let _ = recorder.stop();
         return Err(CANCELLED_ERR.to_string());
     }
 
     // Start routed playback on the output device through the caller-chosen
     // backend (engine-backed in sotf frontends, cpal-native in sotf-capture).
-    playback
-        .start(
-            temp_wav_path,
-            output_device_name,
-            output_channel,
-            sample_rate,
-        )
-        .map_err(|e| {
-            actionable_capture_error("[record_and_analyze] Failed to start playback", &e)
-        })?;
+    // A playback failure halts the already-running capture before returning.
+    if let Err(e) = playback.start(
+        temp_wav_path,
+        output_device_name,
+        output_channel,
+        sample_rate,
+    ) {
+        let _ = recorder.stop();
+        return Err(actionable_capture_error(
+            "[record_and_analyze] Failed to start playback",
+            &e,
+        ));
+    }
 
     log::debug!("[record_and_analyze] Playback started, waiting for completion...");
 
@@ -436,11 +269,11 @@ fn capture_sweep_take(
         }
 
         // Check recording progress
-        let current_sample_count = recorded_count.load(Ordering::Relaxed);
+        let current_sample_count = recorder.captured_samples();
 
         // Print progress every second
         if elapsed.as_millis() % 1000 < check_interval.as_millis() {
-            let recorded_duration = current_sample_count as f64 / input_sample_rate as f64;
+            let recorded_duration = current_sample_count as f64 / negotiated.sample_rate as f64;
             log::info!(
                 "[record_and_analyze] Recording progress: {:.2}s / {:.2}s ({} samples)",
                 recorded_duration,
@@ -463,35 +296,38 @@ fn capture_sweep_take(
         sleep(Duration::from_millis(1000));
     }
 
-    // Stop playback. On cancel, a stop failure must not mask the
-    // cancellation: log-and-ignore so `CANCELLED_ERR` below always wins.
-    cancel_aware_stop(playback.stop(), cancelled)?;
-
-    // Stop recording
-    std::mem::drop(input_stream);
+    // Stop both sides. Capture must halt even when playback.stop fails
+    // (the old local input stream was scope-dropped on every return path),
+    // and on cancel a stop failure must not mask the cancellation.
+    let playback_stop = playback.stop();
+    let take_result = recorder.stop();
+    cancel_aware_stop(playback_stop, cancelled)?;
     log::debug!("[record_and_analyze] Recording stopped");
 
     // Small delay to ensure all buffers are flushed
     sleep(Duration::from_millis(100));
 
     if cancelled {
+        if let Err(e) = take_result {
+            log::warn!(
+                "[record_and_analyze] Ignoring capture-stop failure after cancellation: {e}"
+            );
+        }
         return Err(CANCELLED_ERR.to_string());
     }
-
-    // Get recorded samples
-    let recorded = drain_capture(
-        &mut recorded_consumer,
-        recorded_count.load(Ordering::Relaxed),
-    );
-    let dropped_samples = recorded_overruns.load(Ordering::Relaxed);
-    if dropped_samples > 0 {
-        log::warn!(
-            "[record_and_analyze] Dropped {} input samples because the capture ring buffer filled",
-            dropped_samples
-        );
+    let take =
+        take_result.map_err(|e| format!("[record_and_analyze] Failed to stop capture: {e}"))?;
+    if take.recorded_per_channel.len() != 1 {
+        return Err(format!(
+            "[record_and_analyze] Recorder returned {} channels for 1 requested — capture corrupted",
+            take.recorded_per_channel.len()
+        ));
     }
+    let mut per_channel = take.recorded_per_channel;
+    let recorded = per_channel.swap_remove(0);
     // Use the actual input sample rate for duration/WAV/analysis calculations
-    let analysis_sample_rate = input_sample_rate;
+    let analysis_sample_rate = take.analysis_sample_rate;
+    let dropped_samples = take.dropped_samples;
     let recorded_duration = recorded.len() as f64 / analysis_sample_rate as f64;
     log::info!(
         "[record_and_analyze] Total recorded: {} samples ({:.2}s at {}Hz)",
@@ -538,7 +374,7 @@ fn capture_sweep_take(
     Ok(RawSweepTake {
         recorded,
         analysis_sample_rate,
-        dropped_samples: dropped_samples as u64,
+        dropped_samples,
     })
 }
 
@@ -550,6 +386,7 @@ fn capture_sweep_take(
 #[allow(clippy::too_many_arguments)]
 fn capture_sweep_take_multi(
     playback: &mut impl super::playback::SweepPlayback,
+    recorder: &mut impl super::recorder::SweepRecorder,
     temp_wav_path: &Path,
     reference_signal: &[f32],
     sample_rate: u32,
@@ -559,7 +396,6 @@ fn capture_sweep_take_multi(
     input_device_name: Option<&str>,
     cancel: Option<&CancelFlag>,
 ) -> Result<RawSweepTakeMulti, String> {
-    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use std::thread::sleep;
     use std::time::Duration;
 
@@ -581,164 +417,37 @@ fn capture_sweep_take_multi(
         expected_duration,
     );
 
-    // --- Set up input device ---
-    let host = cpal::default_host();
-
-    let input_device = if let Some(dev_name) = input_device_name {
-        crate::devices::find_device(&host, dev_name, true).map_err(|e| {
-            actionable_capture_error("[record_and_analyze_multi] Input device not usable", &e)
-        })?
-    } else {
-        host.default_input_device().ok_or_else(|| {
-            actionable_capture_error(
-                "[record_and_analyze_multi]",
-                &"No default input device available",
-            )
-        })?
-    };
-
-    let default_input_config = input_device.default_input_config().map_err(|e| {
-        actionable_capture_error(
-            "[record_and_analyze_multi] Failed to get default input config",
-            &e,
-        )
-    })?;
-
-    let max_input_ch = input_channels.iter().copied().max().unwrap_or(0) as usize;
-    let min_channels_needed = max_input_ch + 1;
-
-    let best_config = input_device
-        .supported_input_configs()
-        .ok()
-        .and_then(|configs| {
-            configs
-                .filter(|c| {
-                    let ch = c.channels() as usize;
-                    ch >= min_channels_needed
-                        && c.min_sample_rate() <= sample_rate
-                        && c.max_sample_rate() >= sample_rate
-                })
-                .min_by_key(|c| c.channels())
-        });
-
-    let (hardware_input_channels, input_sample_rate) = if let Some(config) = best_config {
-        (config.channels() as usize, sample_rate)
-    } else {
-        (
-            default_input_config.channels() as usize,
-            default_input_config.sample_rate(),
-        )
-    };
-
-    if input_sample_rate != sample_rate {
-        log::warn!(
-            "[record_and_analyze_multi] INPUT SAMPLE RATE MISMATCH: {}Hz vs {}Hz",
-            input_sample_rate,
-            sample_rate,
-        );
-    }
-
-    for &ch in input_channels {
-        if (ch as usize) >= hardware_input_channels {
-            return Err(format!(
-                "Input channel {} exceeds hardware channel count {}",
-                ch, hardware_input_channels,
-            ));
-        }
-    }
-
-    let input_config = cpal::StreamConfig {
-        channels: hardware_input_channels as u16,
-        sample_rate: input_sample_rate,
-        buffer_size: cpal::BufferSize::Default,
-    };
-
-    // --- Lock-free recording buffers (one SPSC ring per mic) ---
-    let capture_capacity = capture_capacity(input_sample_rate, expected_duration, 4.5);
-    let mut recorded_producers = Vec::with_capacity(num_mics);
-    let mut recorded_consumers = Vec::with_capacity(num_mics);
-    for _ in 0..num_mics {
-        let (producer, consumer) = rtrb::RingBuffer::<f32>::new(capture_capacity);
-        recorded_producers.push(producer);
-        recorded_consumers.push(consumer);
-    }
-    let recorded_counts: Vec<Arc<AtomicUsize>> = (0..num_mics)
-        .map(|_| Arc::new(AtomicUsize::new(0)))
-        .collect();
-    let counts_callback: Vec<Arc<AtomicUsize>> = recorded_counts.iter().map(Arc::clone).collect();
-    let recorded_overruns = Arc::new(AtomicUsize::new(0));
-    let recorded_overruns_callback = Arc::clone(&recorded_overruns);
-
-    let input_channels_vec: Vec<usize> = input_channels.iter().map(|&c| c as usize).collect();
-
-    let input_stream = input_device
-        .build_input_stream(
-            &input_config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                let frames = data.len() / hardware_input_channels;
-                for (mic_i, &ch_idx) in input_channels_vec.iter().enumerate() {
-                    let written = write_selected_channel_to_ring(
-                        &mut recorded_producers[mic_i],
-                        data,
-                        hardware_input_channels,
-                        ch_idx,
-                    );
-                    counts_callback[mic_i].fetch_add(written, Ordering::Relaxed);
-                    if ch_idx < hardware_input_channels && written < frames {
-                        // Count the actual dropped samples, not just the
-                        // number of callbacks that saw a shortfall.
-                        recorded_overruns_callback.fetch_add(frames - written, Ordering::Relaxed);
-                        crate::rate_limited_log!(
-                            warn,
-                            5,
-                            "[record_and_analyze_multi] Input capture ring buffer overrun"
-                        );
-                    }
-                }
-            },
-            |err| {
-                crate::rate_limited_log!(
-                    warn,
-                    5,
-                    "[record_and_analyze_multi] Input stream error: {}",
-                    err
-                )
-            },
-            None,
-        )
-        .map_err(|e| {
-            actionable_capture_error(
-                "[record_and_analyze_multi] Failed to build input stream",
-                &e,
-            )
-        })?;
-
-    input_stream.play().map_err(|e| {
-        actionable_capture_error(
-            "[record_and_analyze_multi] Failed to start input stream",
-            &e,
-        )
-    })?;
+    // Open the input side first so a missing or unusable mic fails fast,
+    // before playback starts through the caller-chosen backend.
+    let negotiated = recorder.start(
+        input_device_name,
+        input_channels,
+        sample_rate,
+        expected_duration,
+    )?;
 
     sleep(Duration::from_millis(100));
 
     // Honor cancellation before starting playback (mirrors the aux path).
     if cancel_requested(cancel) {
-        std::mem::drop(input_stream);
+        let _ = recorder.stop();
         return Err(CANCELLED_ERR.to_string());
     }
 
     // --- Start playback (caller-chosen backend) ---
-    playback
-        .start(
-            temp_wav_path,
-            output_device_name,
-            output_channel,
-            sample_rate,
-        )
-        .map_err(|e| {
-            actionable_capture_error("[record_and_analyze_multi] Failed to start playback", &e)
-        })?;
+    // A playback failure halts the already-running capture before returning.
+    if let Err(e) = playback.start(
+        temp_wav_path,
+        output_device_name,
+        output_channel,
+        sample_rate,
+    ) {
+        let _ = recorder.stop();
+        return Err(actionable_capture_error(
+            "[record_and_analyze_multi] Failed to start playback",
+            &e,
+        ));
+    }
 
     // --- Wait for playback to complete ---
     let total_wait = Duration::from_secs_f64(expected_duration + 3.0);
@@ -757,10 +466,10 @@ fn capture_sweep_take_multi(
             break;
         }
 
-        let current_sample_count = recorded_counts[0].load(Ordering::Relaxed);
+        let current_sample_count = recorder.captured_samples();
 
         if elapsed.as_millis() % 1000 < check_interval.as_millis() {
-            let recorded_duration = current_sample_count as f64 / input_sample_rate as f64;
+            let recorded_duration = current_sample_count as f64 / negotiated.sample_rate as f64;
             log::info!(
                 "[record_and_analyze_multi] Progress: {:.2}s / {:.2}s",
                 recorded_duration,
@@ -777,32 +486,37 @@ fn capture_sweep_take_multi(
     if !cancelled {
         sleep(Duration::from_millis(1000));
     }
-    // On cancel, a stop failure must not mask the cancellation:
-    // log-and-ignore so `CANCELLED_ERR` below always wins.
-    cancel_aware_stop(playback.stop(), cancelled)?;
-    std::mem::drop(input_stream);
+    // Stop both sides. Capture must halt even when playback.stop fails
+    // (the old local input stream was scope-dropped on every return path),
+    // and on cancel a stop failure must not mask the cancellation.
+    let playback_stop = playback.stop();
+    let take_result = recorder.stop();
+    cancel_aware_stop(playback_stop, cancelled)?;
     sleep(Duration::from_millis(100));
 
     if cancelled {
+        if let Err(e) = take_result {
+            log::warn!(
+                "[record_and_analyze_multi] Ignoring capture-stop failure after cancellation: {e}"
+            );
+        }
         return Err(CANCELLED_ERR.to_string());
     }
-
-    // --- Drain and gate each mic channel ---
-    let analysis_sample_rate = input_sample_rate;
-    let dropped_samples = recorded_overruns.load(Ordering::Relaxed);
-    if dropped_samples > 0 {
-        log::warn!(
-            "[record_and_analyze_multi] Dropped {} input samples because capture ring buffers filled",
-            dropped_samples
-        );
+    let take = take_result
+        .map_err(|e| format!("[record_and_analyze_multi] Failed to stop capture: {e}"))?;
+    if take.recorded_per_channel.len() != num_mics {
+        return Err(format!(
+            "[record_and_analyze_multi] Recorder returned {} channels for {num_mics} requested — capture corrupted",
+            take.recorded_per_channel.len()
+        ));
     }
 
+    // --- Gate each mic channel ---
+    let analysis_sample_rate = take.analysis_sample_rate;
+    let dropped_samples = take.dropped_samples;
+
     let mut recorded_per_mic = Vec::with_capacity(num_mics);
-    for mic_i in 0..num_mics {
-        let recorded = drain_capture(
-            &mut recorded_consumers[mic_i],
-            recorded_counts[mic_i].load(Ordering::Relaxed),
-        );
+    for (mic_i, recorded) in take.recorded_per_channel.into_iter().enumerate() {
         let recorded_duration = recorded.len() as f64 / analysis_sample_rate as f64;
         log::info!(
             "[record_and_analyze_multi] Mic {}: {} samples ({:.2}s)",
@@ -833,7 +547,7 @@ fn capture_sweep_take_multi(
     Ok(RawSweepTakeMulti {
         recorded_per_mic,
         analysis_sample_rate,
-        dropped_samples: dropped_samples as u64,
+        dropped_samples,
     })
 }
 
@@ -1470,10 +1184,12 @@ pub(super) fn analyze_sweep_takes(
 }
 
 /// Perform recording and analysis using the given playback backend
-/// for output and cpal for recording.
+/// for output and the given recorder backend for input.
 ///
 /// Plays back a signal to a specific output channel while simultaneously
 /// recording from a specific input channel, then analyzes the result.
+/// Pass [`super::recorder::CpalRecorder`] for hardware capture or an
+/// emulated [`super::recorder::SweepRecorder`] for hardware-free tests.
 ///
 /// `num_sweeps` selects the repeat-sweep path (Task 8): N sequential
 /// play/record takes are captured (see [`super::consts::DEFAULT_NUM_SWEEPS`]
@@ -1497,8 +1213,9 @@ pub(super) fn analyze_sweep_takes(
 /// `Err(CANCELLED_ERR)` ("cancelled") instead of analyzing.
 #[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
-pub fn record_and_analyze_with(
+pub fn record_and_analyze_with_recorder(
     playback: &mut impl super::playback::SweepPlayback,
+    recorder: &mut impl super::recorder::SweepRecorder,
     temp_wav_path: &Path,
     recorded_wav_path: &Path,
     reference_signal: &[f32],
@@ -1545,6 +1262,7 @@ pub fn record_and_analyze_with(
         }
         let take = capture_sweep_take(
             playback,
+            recorder,
             temp_wav_path,
             reference_signal,
             sample_rate,
@@ -1597,9 +1315,61 @@ pub fn record_and_analyze_with(
     )
 }
 
+/// Perform recording and analysis using the given playback backend
+/// for output and cpal for recording.
+///
+/// Hardware equivalent of [`record_and_analyze_with_recorder`] with a
+/// [`super::recorder::CpalRecorder`]; emulated callers pass their own
+/// [`super::recorder::SweepRecorder`] to the `_recorder` variant instead.
+/// See [`record_and_analyze_with_recorder`] for the take pipeline.
+///
+/// `cancel` is a cooperative cancellation flag (see [`CancelFlag`]): when
+/// set, the capture stops the streams and returns
+/// `Err(CANCELLED_ERR)` ("cancelled") instead of analyzing.
+#[cfg(not(target_os = "ios"))]
+#[allow(clippy::too_many_arguments)]
+pub fn record_and_analyze_with(
+    playback: &mut impl super::playback::SweepPlayback,
+    temp_wav_path: &Path,
+    recorded_wav_path: &Path,
+    reference_signal: &[f32],
+    sample_rate: u32,
+    output_csv_path: &Path,
+    output_channel: u16,
+    input_channel: u16,
+    output_device_name: Option<&str>,
+    input_device_name: Option<&str>,
+    microphone_compensation_path: Option<&str>,
+    sweep_range: Option<(f32, f32)>,
+    num_sweeps: u16,
+    cancel: Option<CancelFlag>,
+) -> Result<CaptureAnalysis, String> {
+    let mut recorder = super::recorder::CpalRecorder::new("record_and_analyze");
+    record_and_analyze_with_recorder(
+        playback,
+        &mut recorder,
+        temp_wav_path,
+        recorded_wav_path,
+        reference_signal,
+        sample_rate,
+        output_csv_path,
+        output_channel,
+        input_channel,
+        output_device_name,
+        input_device_name,
+        microphone_compensation_path,
+        sweep_range,
+        num_sweeps,
+        cancel,
+    )
+}
+
 /// Record and analyze capturing multiple input channels simultaneously.
 ///
-/// Plays the signal on `output_channel` and records from all `input_channels` at once.
+/// Plays the signal on `output_channel` and records from all `input_channels` at once,
+/// using the given playback backend for output and the given recorder backend for
+/// input. Pass [`super::recorder::CpalRecorder`] for hardware capture or an
+/// emulated [`super::recorder::SweepRecorder`] for hardware-free tests.
 /// Returns one [`CaptureAnalysis`] per input channel (same order as `input_channels`):
 /// the math-dsp analysis plus a per-mic quality report (lag-confidence gate,
 /// clock-drift estimate/correction, capture diagnostics — see [`super::quality`]).
@@ -1608,8 +1378,9 @@ pub fn record_and_analyze_with(
 /// `num_sweeps` selects the repeat-sweep path (Task 8): each take is one
 /// play/record cycle capturing ALL mics simultaneously; per mic the takes
 /// are then drift-corrected, robustly averaged, and analyzed exactly like
-/// [`record_and_analyze_with`]. `num_sweeps <= 1` keeps the legacy single-sweep
-/// behavior; `num_sweeps == 2` is bumped to 3 (see [`record_and_analyze_with`]).
+/// [`record_and_analyze_with_recorder`]. `num_sweeps <= 1` keeps the legacy
+/// single-sweep behavior; `num_sweeps == 2` is bumped to 3 (see
+/// [`record_and_analyze_with_recorder`]).
 /// A cancelled or gated-out take aborts the whole set.
 ///
 /// `mic_calibrations` must be the same length as `input_channels` (use `None` for uncalibrated).
@@ -1619,8 +1390,9 @@ pub fn record_and_analyze_with(
 /// `Err(CANCELLED_ERR)` ("cancelled") instead of analyzing.
 #[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
-pub fn record_and_analyze_with_multi(
+pub fn record_and_analyze_with_multi_recorder(
     playback: &mut impl super::playback::SweepPlayback,
+    recorder: &mut impl super::recorder::SweepRecorder,
     temp_wav_path: &Path,
     recorded_wav_paths: &[PathBuf],
     reference_signal: &[f32],
@@ -1672,6 +1444,7 @@ pub fn record_and_analyze_with_multi(
         }
         let take = capture_sweep_take_multi(
             playback,
+            recorder,
             temp_wav_path,
             reference_signal,
             sample_rate,
@@ -1727,4 +1500,52 @@ pub fn record_and_analyze_with_multi(
     }
 
     Ok(results)
+}
+
+/// Record and analyze capturing multiple input channels simultaneously.
+///
+/// Hardware equivalent of [`record_and_analyze_with_multi_recorder`] with a
+/// [`super::recorder::CpalRecorder`]; emulated callers pass their own
+/// [`super::recorder::SweepRecorder`] to the `_recorder` variant instead.
+/// See [`record_and_analyze_with_multi_recorder`] for the take pipeline.
+///
+/// `cancel` is a cooperative cancellation flag (see [`CancelFlag`]): when
+/// set, the capture stops the streams and returns
+/// `Err(CANCELLED_ERR)` ("cancelled") instead of analyzing.
+#[cfg(not(target_os = "ios"))]
+#[allow(clippy::too_many_arguments)]
+pub fn record_and_analyze_with_multi(
+    playback: &mut impl super::playback::SweepPlayback,
+    temp_wav_path: &Path,
+    recorded_wav_paths: &[PathBuf],
+    reference_signal: &[f32],
+    sample_rate: u32,
+    csv_paths: &[PathBuf],
+    output_channel: u16,
+    input_channels: &[u16],
+    output_device_name: Option<&str>,
+    input_device_name: Option<&str>,
+    mic_calibrations: &[Option<String>],
+    sweep_range: Option<(f32, f32)>,
+    num_sweeps: u16,
+    cancel: Option<CancelFlag>,
+) -> Result<Vec<CaptureAnalysis>, String> {
+    let mut recorder = super::recorder::CpalRecorder::new("record_and_analyze_multi");
+    record_and_analyze_with_multi_recorder(
+        playback,
+        &mut recorder,
+        temp_wav_path,
+        recorded_wav_paths,
+        reference_signal,
+        sample_rate,
+        csv_paths,
+        output_channel,
+        input_channels,
+        output_device_name,
+        input_device_name,
+        mic_calibrations,
+        sweep_range,
+        num_sweeps,
+        cancel,
+    )
 }
