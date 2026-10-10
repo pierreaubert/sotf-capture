@@ -20,4 +20,5 @@ test:
     {{cargo}} test --all --workspace --all-targets -- --check
 
 ntest:
-    {{cargo}} nextest run 
+    {{cargo}} nextest run
+    
