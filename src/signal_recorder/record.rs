@@ -842,6 +842,28 @@ fn pre_silence_window<'a>(take: &'a [f32], reference: &[f32], lag: &LagEstimate)
     &take[..noise_len.min(take.len())]
 }
 
+/// Lag-aligned active (non-padding) content of one take: the reference's
+/// active span landed at `lag` in the take. Mirrors
+/// [`pre_silence_window`] from the other end — padding must not dilute the
+/// broadband signal RMS used by the single-take SNR check. Clamped to the
+/// take; empty when nothing overlaps.
+#[cfg(not(target_os = "ios"))]
+pub(super) fn active_take_span<'a>(
+    take: &'a [f32],
+    reference: &[f32],
+    lag: &LagEstimate,
+) -> &'a [f32] {
+    let start = super::quality::active_reference_start(reference) as isize + lag.lag_samples;
+    let end = start + super::quality::active_reference_span(reference).len() as isize;
+    let take_len = take.len() as isize;
+    let clamped_start = start.clamp(0, take_len) as usize;
+    let clamped_end = end.clamp(0, take_len) as usize;
+    if clamped_end <= clamped_start {
+        return &[];
+    }
+    &take[clamped_start..clamped_end]
+}
+
 /// Longest pre-sweep room-noise window across the accepted takes. The
 /// longest single window is the cleanest estimator input — concatenating
 /// windows would invent discontinuities at the joins.
@@ -1068,6 +1090,16 @@ pub(super) fn analyze_sweep_takes(
     {
         quality_issues.push(message.clone());
     }
+    // Single takes supply no measured/noise pair, so math-dsp cannot judge
+    // their SNR — broadband RMS stands in. Repeat captures get the finer
+    // spectral assessment (`minimum_median_snr_db`) instead.
+    if single_take {
+        let active = active_take_span(&analysis_capture, analysis_reference, &lag_for_quality);
+        let silence = pre_silence_window(&analysis_capture, analysis_reference, &lag_for_quality);
+        if let Some(issue) = super::quality::snr_warning_issue(active, silence) {
+            quality_issues.push(issue);
+        }
+    }
 
     // The WAV on disk is exactly what gets analyzed.
     log::info!(
@@ -1133,6 +1165,16 @@ pub(super) fn analyze_sweep_takes(
         noise_floor_column.as_deref(),
     )?;
     log::info!("[{log_tag}] Wrote analysis to {:?}", output_csv_path);
+
+    // High-distortion advisory from the Farina THD curve (sweeps only;
+    // other signals analyze to zero THD and never trigger).
+    if let Some(issue) = super::quality::thd_warning_issue(
+        &analysis.frequencies,
+        &analysis.thd_percent,
+        &analysis.spl_db,
+    ) {
+        quality_issues.push(issue);
+    }
 
     // Per-take quality report. Advisory only — the silence/clip/lag gates
     // above already hard-failed unusable takes. Repeat captures supply the

@@ -73,6 +73,52 @@ pub struct RawCaptureTake {
     pub clipped_samples: usize,
 }
 
+/// Completed delay-probe pass journaled with the sweeps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureProbePass {
+    /// Mono probe WAV relative to the session directory.
+    pub wav_file: String,
+    /// Recording microphone identity (always the first plan microphone).
+    pub microphone_id: String,
+    /// Per-channel arrivals and alignment delays.
+    pub results: crate::signal_recorder::ProbeDelayResults,
+}
+
+/// Completed bass-anchor pass journaled with the sweeps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureBassAnchorPass {
+    /// Anchor WAV relative to the session directory (mic + loopback
+    /// stereo when a loopback channel was recorded, else mono).
+    pub wav_file: String,
+    /// Recording microphone identity (always the first plan microphone).
+    pub microphone_id: String,
+    /// Loopback input channel on the microphone's device, when recorded.
+    pub loopback_channel: Option<u16>,
+    /// Per-channel low-frequency phase evidence.
+    pub results: crate::signal_recorder::BassAnchorResults,
+}
+
+/// One recorded loopback take, backing CTC raw-sweep alignment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureLoopbackTake {
+    /// Zero-based repeat index within the session.
+    pub repeat_index: u32,
+    /// Source identity playing during the take.
+    pub source_id: String,
+    /// Mono loopback WAV relative to the session directory.
+    pub wav_file: String,
+    /// Recorded sample count.
+    pub samples: usize,
+    /// Negotiated input device identity.
+    pub device_id: String,
+    /// Negotiated input sample format.
+    pub input_sample_format: String,
+    /// Peak absolute amplitude in linear units.
+    pub peak_amplitude: f32,
+    /// Samples at or above digital full scale.
+    pub clipped_samples: usize,
+}
+
 /// Durable acquisition journal, separate from corrected recording imports.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawCaptureManifest {
@@ -80,6 +126,15 @@ pub struct RawCaptureManifest {
     pub version: u32,
     /// Frozen user declaration, including geometry, gains, and orientations.
     pub plan: CaptureSessionPlan,
+    /// Loopback takes, one per repeat/source when the plan declares CTC.
+    #[serde(default)]
+    pub loopback_files: Vec<CaptureLoopbackTake>,
+    /// Completed probe pass; absent when the plan declares none.
+    #[serde(default)]
+    pub probe_pass: Option<CaptureProbePass>,
+    /// Completed anchor pass; absent when the plan declares none.
+    #[serde(default)]
+    pub bass_anchor_pass: Option<CaptureBassAnchorPass>,
     /// Explicit timing-chirp and sweep positions on the stimulus clock.
     pub stimulus: CaptureStimulusLayout,
     /// Fixed chirp output route; absent in older journals that used each source.
@@ -148,14 +203,164 @@ pub fn record_capture_session(
     cancel: &CancelFlag,
     progress: impl FnMut(CaptureProgress),
 ) -> Result<RawCaptureManifest, String> {
-    record_with(
+    let manifest = record_with(
         session,
         plan_directory,
         output_directory,
         cancel,
         progress,
         capture_multidevice,
+    )?;
+    run_auxiliary_passes(
+        session,
+        output_directory,
+        cancel,
+        manifest,
+        crate::signal_recorder::probe_channel_delays_with_recording,
+        crate::signal_recorder::run_bass_anchor_with_recording,
     )
+}
+
+/// Probe WAV name inside raw and processed session directories.
+const PROBE_WAV_FILE: &str = "probe.wav";
+/// Bass-anchor WAV name inside raw and processed session directories.
+const BASS_ANCHOR_WAV_FILE: &str = "bass-anchor.wav";
+
+/// Run declared probe/anchor passes after the sweeps and journal them.
+///
+/// Channels follow the plan sources in order; the first microphone records.
+/// A declared pass that fails marks the session Failed with its reason while
+/// preserving completed sweeps for explicit-selection processing. Runners are
+/// injected so hardware-free tests can supply canned results.
+pub(crate) fn run_auxiliary_passes(
+    session: &ValidatedCaptureSession,
+    output_directory: &Path,
+    cancel: &CancelFlag,
+    mut manifest: RawCaptureManifest,
+    mut probe_runner: impl FnMut(
+        &[u16],
+        &[String],
+        u32,
+        f32,
+        f32,
+        Option<&str>,
+        Option<&str>,
+        u16,
+        &Path,
+        f32,
+        Option<CancelFlag>,
+    ) -> Result<crate::signal_recorder::ProbeDelayResults, String>,
+    mut anchor_runner: impl FnMut(
+        &[u16],
+        &[String],
+        u32,
+        f32,
+        f32,
+        f32,
+        u16,
+        f32,
+        Option<&str>,
+        Option<&str>,
+        u16,
+        Option<u16>,
+        &Path,
+        f32,
+        Option<CancelFlag>,
+    ) -> Result<crate::signal_recorder::BassAnchorResults, String>,
+) -> Result<RawCaptureManifest, String> {
+    let plan = session.plan();
+    if plan.probe.is_none() && plan.bass_anchor.is_none() {
+        return Ok(manifest);
+    }
+    let fail = |manifest: &mut RawCaptureManifest, error: String| -> String {
+        manifest.status = if error == "cancelled" {
+            RawCaptureStatus::Cancelled
+        } else {
+            RawCaptureStatus::Failed
+        };
+        manifest.error = Some(error.clone());
+        save_manifest(output_directory, manifest)
+            .map(|()| error.clone())
+            .unwrap_or_else(|save_error| format!("{error}; additionally {save_error}"))
+    };
+    let channels: Vec<u16> = plan
+        .sources
+        .iter()
+        .map(|source| source.output_channel)
+        .collect();
+    let names: Vec<String> = plan
+        .sources
+        .iter()
+        .map(|source| source.id.clone())
+        .collect();
+    let microphone = &plan.microphones[0];
+    if cancel.load(Ordering::Relaxed) {
+        let error = fail(&mut manifest, "cancelled".into());
+        return Err(error);
+    }
+    if let Some(probe) = &plan.probe {
+        let wav = output_directory.join(PROBE_WAV_FILE);
+        match probe_runner(
+            &channels,
+            &names,
+            plan.sample_rate_hz,
+            probe.probe_duration_ms,
+            probe.silence_duration_ms,
+            Some(plan.output_device.as_str()),
+            Some(microphone.device.as_str()),
+            microphone.input_channel,
+            &wav,
+            probe.signal_level_db,
+            Some(CancelFlag::clone(cancel)),
+        ) {
+            Ok(results) => {
+                manifest.probe_pass = Some(CaptureProbePass {
+                    wav_file: PROBE_WAV_FILE.into(),
+                    microphone_id: microphone.id.clone(),
+                    results,
+                });
+                save_manifest(output_directory, &manifest)?;
+            }
+            Err(error) => return Err(fail(&mut manifest, error)),
+        }
+    }
+    if cancel.load(Ordering::Relaxed) {
+        let error = fail(&mut manifest, "cancelled".into());
+        return Err(error);
+    }
+    if let Some(anchor) = &plan.bass_anchor {
+        let loopback_channel = plan.loopback.as_ref().map(|route| route.input_channel);
+        let wav = output_directory.join(BASS_ANCHOR_WAV_FILE);
+        match anchor_runner(
+            &channels,
+            &names,
+            plan.sample_rate_hz,
+            anchor.bass_freq_hz,
+            anchor.bass_duration_s,
+            anchor.fade_ms,
+            anchor.num_windows,
+            anchor.silence_duration_ms,
+            Some(plan.output_device.as_str()),
+            Some(microphone.device.as_str()),
+            microphone.input_channel,
+            loopback_channel,
+            &wav,
+            anchor.signal_level_db,
+            Some(CancelFlag::clone(cancel)),
+        ) {
+            Ok(results) => {
+                manifest.bass_anchor_pass = Some(CaptureBassAnchorPass {
+                    wav_file: BASS_ANCHOR_WAV_FILE.into(),
+                    microphone_id: microphone.id.clone(),
+                    loopback_channel,
+                    results,
+                });
+                save_manifest(output_directory, &manifest)?;
+            }
+            Err(error) => return Err(fail(&mut manifest, error)),
+        }
+    }
+    Ok(manifest)
 }
 
 fn record_with(
@@ -212,15 +417,7 @@ fn record_with(
         version: 1,
         plan: session.plan().clone(),
         stimulus: stimulus.layout,
-        timing_reference_output_channel: Some(
-            session
-                .plan()
-                .timing_reference
-                .as_ref()
-                .map_or(session.plan().sources[0].output_channel, |reference| {
-                    reference.output_channel
-                }),
-        ),
+        timing_reference_output_channel: Some(super::timing_emitter_channel(session)),
         status: RawCaptureStatus::Capturing,
         pending_processing: vec![
             "clock_correction".into(),
@@ -229,7 +426,10 @@ fn record_with(
         ],
         calibrations,
         takes: Vec::new(),
+        loopback_files: Vec::new(),
         error: None,
+        probe_pass: None,
+        bass_anchor_pass: None,
     };
     save_manifest(output_directory, &manifest)?;
     let result = (|| -> Result<(), String> {
@@ -264,17 +464,34 @@ fn record_with(
                     repeat_index,
                     repeat_count: session.plan().repeat_count,
                 });
+                let mut inputs: Vec<CaptureInput> = session
+                    .plan()
+                    .microphones
+                    .iter()
+                    .map(|mic| CaptureInput {
+                        device: mic.device.clone(),
+                        channel: mic.input_channel,
+                    })
+                    .collect();
+                // The loopback rides the same capture call so it shares the
+                // take timeline; CTC assembly aligns RoomEQ to it later.
+                let loopback_index = if session.plan().ctc.is_some() {
+                    let route = session
+                        .plan()
+                        .loopback
+                        .as_ref()
+                        .ok_or("ctc requires a plan loopback route")?;
+                    inputs.push(CaptureInput {
+                        device: route.device.clone(),
+                        channel: route.input_channel,
+                    });
+                    Some(inputs.len() - 1)
+                } else {
+                    None
+                };
                 let captured = capture(
                     MultiCaptureRequest {
-                        inputs: session
-                            .plan()
-                            .microphones
-                            .iter()
-                            .map(|mic| CaptureInput {
-                                device: mic.device.clone(),
-                                channel: mic.input_channel,
-                            })
-                            .collect(),
+                        inputs,
                         output_device: session.plan().output_device.clone(),
                         output_channel: source.output_channel,
                         output_overrides: [
@@ -295,10 +512,12 @@ fn record_with(
                     },
                     cancel,
                 )?;
+                let expected_inputs =
+                    session.plan().microphones.len() + usize::from(loopback_index.is_some());
                 if captured.sample_rate_hz != session.plan().sample_rate_hz
-                    || captured.recordings.len() != session.plan().microphones.len()
-                    || captured.input_sample_formats.len() != captured.recordings.len()
-                    || captured.input_device_ids.len() != captured.recordings.len()
+                    || captured.recordings.len() != expected_inputs
+                    || captured.input_sample_formats.len() != expected_inputs
+                    || captured.input_device_ids.len() != expected_inputs
                     || captured.input_device_ids.iter().any(String::is_empty)
                     || captured.output_device_id.is_empty()
                     || captured.recordings.iter().any(|samples| {
@@ -339,6 +558,28 @@ fn record_with(
                         samples: samples.len(),
                         input_sample_format: captured.input_sample_formats[mic_index].clone(),
                         output_sample_format: captured.output_sample_format.clone(),
+                        peak_amplitude: samples.iter().fold(0.0_f32, |peak, s| peak.max(s.abs())),
+                        clipped_samples: samples.iter().filter(|s| s.abs() >= 1.0).count(),
+                    });
+                }
+                if let Some(loopback) = loopback_index {
+                    let samples = &captured.recordings[loopback];
+                    let wav_file = format!(
+                        "repeat-{repeat_index:02}-source-{source_index:02}-loopback-raw.wav"
+                    );
+                    write_wav_file(
+                        &output_directory.join(&wav_file),
+                        samples,
+                        captured.sample_rate_hz,
+                        1,
+                    )?;
+                    manifest.loopback_files.push(CaptureLoopbackTake {
+                        repeat_index,
+                        source_id: source.id.clone(),
+                        wav_file,
+                        samples: samples.len(),
+                        device_id: captured.input_device_ids[loopback].clone(),
+                        input_sample_format: captured.input_sample_formats[loopback].clone(),
                         peak_amplitude: samples.iter().fold(0.0_f32, |peak, s| peak.max(s.abs())),
                         clipped_samples: samples.iter().filter(|s| s.abs() >= 1.0).count(),
                     });

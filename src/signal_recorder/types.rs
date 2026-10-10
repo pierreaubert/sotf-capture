@@ -76,6 +76,11 @@ pub enum SignalParams {
     Dirac {
         amp: f32,
     },
+    /// STIPA speech-intelligibility test signal (IEC 60268-16 timing).
+    ///
+    /// Self-contained: fixed speech spectrum, modulation table, level, and
+    /// deterministic seed. Sample rate and duration come from the call.
+    Stipa,
 }
 
 /// Result of a delay probing session across all channels.

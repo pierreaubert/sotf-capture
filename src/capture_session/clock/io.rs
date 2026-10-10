@@ -2,7 +2,8 @@
 
 use super::{CaptureClockProvenance, correct_capture_clock};
 use crate::capture_session::record::{
-    CaptureCalibration, RawCaptureManifest, RawCaptureStatus, RawCaptureTake,
+    CaptureBassAnchorPass, CaptureCalibration, CaptureLoopbackTake, CaptureProbePass,
+    RawCaptureManifest, RawCaptureStatus, RawCaptureTake,
 };
 use crate::capture_session::{CaptureSessionPlan, protocol::CaptureStimulusLayout};
 use crate::recording_helpers::save_recording_session_json;
@@ -39,6 +40,14 @@ pub struct ClockProcessedManifest {
     /// Absent means no import-ready projection was requested or is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_take_ids: Option<Vec<String>>,
+    /// Microphone backing measured-IR declarations; the first plan
+    /// microphone when absent (legacy reports predate the selector).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ir_microphone: Option<String>,
+    /// Timing-chirp output route copied from the raw journal; absent in
+    /// legacy reports that predate the stored route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing_reference_output_channel: Option<u16>,
     /// Filename of the byte-for-byte raw acquisition journal retained in this bundle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_inventory_file: Option<String>,
@@ -50,6 +59,21 @@ pub struct ClockProcessedManifest {
     pub takes: Vec<ClockProcessedTake>,
     /// Remaining stages; clock correction alone is not complete measurement QA.
     pub pending_processing: Vec<String>,
+    /// Completed probe pass copied from the raw journal, when declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_pass: Option<CaptureProbePass>,
+    /// Completed anchor pass copied from the raw journal, when declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bass_anchor_pass: Option<CaptureBassAnchorPass>,
+    /// Loopback takes copied from the raw journal, when the plan declares CTC.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loopback_files: Vec<CaptureLoopbackTake>,
+    /// CTC fragment filename, when CTC assembly ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctc_measurements: Option<String>,
+    /// Assembled CTC files for handoff inventory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ctc_files: Vec<String>,
     /// Canonical RoomEQ manifest, present only when every magnitude take is available.
     #[serde(default)]
     pub recording_manifest: Option<String>,
@@ -116,6 +140,47 @@ fn read_wave(path: &Path, rate: u32, frames: usize) -> Result<Vec<f32>, String> 
     Ok(samples)
 }
 
+/// One-line timing-reference accounting for process reporting.
+///
+/// Names the chirp output route and whether all takes share one reference
+/// identity. Mixed or missing identities forbid coherent use; the summary
+/// says so instead of naming a representative take.
+pub fn timing_reference_summary(report: &ClockProcessedManifest) -> String {
+    let route = report
+        .timing_reference_output_channel
+        .map_or("unknown route (legacy report)".into(), |channel| {
+            format!("output channel {channel}")
+        });
+    let mut identities: Vec<&str> = report
+        .takes
+        .iter()
+        .filter_map(|take| take.clock.reference_id.as_deref())
+        .collect();
+    identities.sort_unstable();
+    identities.dedup();
+    let identified = report
+        .takes
+        .iter()
+        .filter(|take| take.clock.reference_id.is_some())
+        .count();
+    if identities.len() == 1 && identified == report.takes.len() && !report.takes.is_empty() {
+        format!(
+            "timing reference '{}' shared by {}/{} takes on {}",
+            identities[0],
+            report.takes.len(),
+            report.takes.len(),
+            route
+        )
+    } else {
+        format!(
+            "no shared timing reference ({} of {} takes carry an identity) on {}; arrival-aligned takes forbid coherent use",
+            identified,
+            report.takes.len(),
+            route
+        )
+    }
+}
+
 /// Process saved captures without opening audio devices or altering raw takes.
 ///
 /// `output_directory` must not exist. Invalid timing markers preserve raw samples
@@ -131,6 +196,16 @@ pub fn process_capture_session(
     process_capture_session_with_selection(raw_directory, output_directory, &[])
 }
 
+/// Offline projection controls for processed capture bundles.
+#[derive(Debug, Clone, Default)]
+pub struct ProcessOptions {
+    /// Explicit take IDs; empty keeps legacy single-repeat behavior.
+    pub selected_take_ids: Vec<String>,
+    /// Microphone backing measured-IR declarations; the first plan
+    /// microphone when absent.
+    pub ir_microphone: Option<String>,
+}
+
 /// Process saved captures and project exactly one explicit take per planned
 /// source/microphone pair when selection is required.
 ///
@@ -142,6 +217,26 @@ pub fn process_capture_session_with_selection(
     raw_directory: &Path,
     output_directory: &Path,
     selected_take_ids: &[String],
+) -> Result<ClockProcessedManifest, String> {
+    process_capture_session_with_options(
+        raw_directory,
+        output_directory,
+        &ProcessOptions {
+            selected_take_ids: selected_take_ids.to_vec(),
+            ir_microphone: None,
+        },
+    )
+}
+
+/// Process saved captures with explicit projection controls.
+///
+/// Behaves like [`process_capture_session_with_selection`] and additionally
+/// resolves which microphone backs the measured-IR declarations. An unknown
+/// microphone ID is refused before any artifact is written.
+pub fn process_capture_session_with_options(
+    raw_directory: &Path,
+    output_directory: &Path,
+    options: &ProcessOptions,
 ) -> Result<ClockProcessedManifest, String> {
     let root = raw_directory
         .canonicalize()
@@ -162,6 +257,23 @@ pub fn process_capture_session_with_selection(
         .clone()
         .validate()
         .map_err(|e| e.to_string())?;
+    let ir_microphone = match &options.ir_microphone {
+        None => session
+            .plan()
+            .microphones
+            .first()
+            .map(|microphone| microphone.id.clone()),
+        Some(id)
+            if session
+                .plan()
+                .microphones
+                .iter()
+                .any(|microphone| &microphone.id == id) =>
+        {
+            Some(id.clone())
+        }
+        Some(id) => return Err(format!("unknown IR microphone: {id}")),
+    };
     normalize_legacy_take_ids(&mut manifest)?;
     let expected = crate::capture_session::protocol::prepare_capture_stimulus(&session)?;
     if manifest.stimulus != expected.layout {
@@ -189,6 +301,8 @@ pub fn process_capture_session_with_selection(
             format!("take-{index:03}-magnitude.csv"),
             format!("take-{index:03}-phase.csv"),
             format!("take-{index:03}-ir.json"),
+            format!("take-{index:03}-ir.csv"),
+            format!("take-{index:03}-coherence.csv"),
         ] {
             output_names.insert(name);
         }
@@ -229,7 +343,7 @@ pub fn process_capture_session_with_selection(
     {
         return Err("completed raw capture is missing source/microphone/repeat takes".into());
     }
-    let selected_take_ids = if selected_take_ids.is_empty() {
+    let selected_take_ids = if options.selected_take_ids.is_empty() {
         if manifest.status == RawCaptureStatus::RawComplete && manifest.plan.repeat_count == 1 {
             Some(
                 manifest
@@ -242,8 +356,8 @@ pub fn process_capture_session_with_selection(
             None
         }
     } else {
-        validate_selected_take_ids(&manifest, selected_take_ids)?;
-        Some(selected_take_ids.to_vec())
+        validate_selected_take_ids(&manifest, &options.selected_take_ids)?;
+        Some(options.selected_take_ids.clone())
     };
     let mut calibration_ids = HashSet::new();
     let mut calibration_bytes = Vec::new();
@@ -289,11 +403,34 @@ pub fn process_capture_session_with_selection(
         std::fs::copy(artifact(&root, name)?, output_directory.join(name))
             .map_err(|e| e.to_string())?;
     }
+    for wav in [
+        manifest
+            .probe_pass
+            .as_ref()
+            .map(|pass| pass.wav_file.as_str()),
+        manifest
+            .bass_anchor_pass
+            .as_ref()
+            .map(|pass| pass.wav_file.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        std::fs::copy(artifact(&root, wav)?, output_directory.join(wav))
+            .map_err(|e| e.to_string())?;
+    }
     let mut result = ClockProcessedManifest {
         version: 1,
         plan: manifest.plan.clone(),
         raw_status: Some(manifest.status),
         selected_take_ids,
+        ir_microphone,
+        timing_reference_output_channel: manifest.timing_reference_output_channel,
+        probe_pass: manifest.probe_pass.clone(),
+        bass_anchor_pass: manifest.bass_anchor_pass.clone(),
+        loopback_files: manifest.loopback_files.clone(),
+        ctc_measurements: None,
+        ctc_files: Vec::new(),
         parent_inventory_file: Some("capture-raw.json".into()),
         stimulus: manifest.stimulus.clone(),
         calibrations: manifest.calibrations.clone(),
@@ -407,6 +544,10 @@ pub fn process_capture_session_with_selection(
         Err(reason) => result
             .pending_processing
             .push(format!("recording_manifest: {reason}")),
+    }
+    if let Some(ctc) = super::super::ctc::assemble_ctc_takes(&result, &root, output_directory)? {
+        result.ctc_measurements = Some(ctc.fragment_file);
+        result.ctc_files = ctc.files;
     }
     let json = serde_json::to_vec_pretty(&result).map_err(|e| e.to_string())?;
     save_recording_session_json(&output_directory.join("capture-clock.json"), &json)

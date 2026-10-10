@@ -1,5 +1,8 @@
 /target
+/docs
 Cargo.lock
 *.log
+*.csv
+*.wav
 *~
 

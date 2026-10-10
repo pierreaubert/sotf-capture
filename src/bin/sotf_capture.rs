@@ -23,10 +23,6 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Clap parses this command once; inline fields keep its argument definitions together"
-)]
 enum Command {
     /// List input and output audio devices.
     Devices {
@@ -54,7 +50,7 @@ enum Command {
     },
     /// Capture stimulus takes for output/input channel pairs.
     Capture {
-        /// Stimulus: sweep, tone, two-tone, white-noise, pink-noise,
+        /// Stimulus: sweep, tone, two-tone, white-noise, pink-noise, stipa,
         /// m-noise, mls, dirac.
         #[arg(long, default_value = "sweep")]
         signal: String,
@@ -126,6 +122,111 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Probe per-channel arrival times with sequential multisine bursts.
+    Probe {
+        /// Hardware output channels, e.g. "0,1".
+        #[arg(long)]
+        hwaudio_send_to: String,
+        /// Channel names, e.g. "L,R"; defaults to ch{N} labels.
+        #[arg(long)]
+        channel_names: Option<String>,
+        /// Single hardware input channel, e.g. "0".
+        #[arg(long)]
+        hwaudio_record_from: String,
+        /// Sample rate in Hz.
+        #[arg(long, default_value_t = 48000)]
+        sample_rate: u32,
+        /// Probe duration per channel in milliseconds.
+        #[arg(long, default_value_t = 1000.0)]
+        probe_duration_ms: f32,
+        /// Silence gap between probes in milliseconds.
+        #[arg(long, default_value_t = 500.0)]
+        silence_duration_ms: f32,
+        /// Probe playback level in dBFS.
+        #[arg(long, default_value_t = -6.0206, allow_negative_numbers = true)]
+        signal_level_db: f32,
+        /// Output filename prefix.
+        #[arg(long)]
+        name: Option<String>,
+        /// Output directory (created when missing).
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+        /// Shared input/output device selector (legacy convenience).
+        #[arg(long, conflicts_with_all = ["input_device", "output_device"])]
+        device: Option<String>,
+        /// Independent input device ID or unique name.
+        #[arg(long)]
+        input_device: Option<String>,
+        /// Independent output device ID or unique name.
+        #[arg(long)]
+        output_device: Option<String>,
+        /// Emit the results as JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Capture per-channel low-frequency phase with steady-state tones.
+    BassAnchor {
+        /// Hardware output channels, e.g. "0,1".
+        #[arg(long)]
+        hwaudio_send_to: String,
+        /// Channel names, e.g. "L,R"; defaults to ch{N} labels.
+        #[arg(long)]
+        channel_names: Option<String>,
+        /// Single hardware input channel, e.g. "0".
+        #[arg(long)]
+        hwaudio_record_from: String,
+        /// Loopback input channel on the recording device, when wired.
+        #[arg(long)]
+        loopback_from: Option<u16>,
+        /// Sample rate in Hz.
+        #[arg(long, default_value_t = 48000)]
+        sample_rate: u32,
+        /// Tone centre frequency in Hz.
+        #[arg(long, default_value_t = 30.0)]
+        bass_freq_hz: f32,
+        /// Tone length in seconds, steady portion plus fades.
+        #[arg(long, default_value_t = 2.0)]
+        bass_duration_s: f32,
+        /// Half-Hann fade length in milliseconds.
+        #[arg(long, default_value_t = 50.0)]
+        fade_ms: f32,
+        /// Lock-in sub-window count.
+        #[arg(long, default_value_t = 8)]
+        num_windows: u16,
+        /// Silence gap between tones in milliseconds.
+        #[arg(long, default_value_t = 500.0)]
+        silence_duration_ms: f32,
+        /// Tone playback level in dBFS.
+        #[arg(long, default_value_t = -6.0206, allow_negative_numbers = true)]
+        signal_level_db: f32,
+        /// Output filename prefix.
+        #[arg(long)]
+        name: Option<String>,
+        /// Output directory (created when missing).
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+        /// Shared input/output device selector (legacy convenience).
+        #[arg(long, conflicts_with_all = ["input_device", "output_device"])]
+        device: Option<String>,
+        /// Independent input device ID or unique name.
+        #[arg(long)]
+        input_device: Option<String>,
+        /// Independent output device ID or unique name.
+        #[arg(long)]
+        output_device: Option<String>,
+        /// Emit the results as JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Merge per-position CTC fragments into one self-contained bundle.
+    PlanCtcMerge {
+        /// Processed session directories, one head position each.
+        #[arg(long = "session", required = true)]
+        sessions: Vec<PathBuf>,
+        /// New output directory for the merged bundle.
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Validate a capture-session plan without recording.
     PlanValidate {
         /// Path to the session plan JSON.
@@ -152,6 +253,10 @@ enum Command {
         /// Explicit take ID to project; repeat once per source/microphone pair.
         #[arg(long = "select-take")]
         selected_take_ids: Vec<String>,
+        /// Microphone backing measured-IR declarations; the first plan
+        /// microphone when absent.
+        #[arg(long)]
+        ir_microphone: Option<String>,
     },
 }
 
@@ -329,6 +434,9 @@ fn record_signal(
         SignalType::Dirac => SignalParams::Dirac {
             amp: validated_amp(amp, "--amp")?,
         },
+        // STIPA carries a standardized spectrum and level; --amp does not
+        // apply and any supplied value is ignored like other unused flags.
+        SignalType::Stipa => SignalParams::Stipa,
     };
 
     // Playback pre-compensation (sweeps only) runs between generation and
@@ -424,6 +532,225 @@ fn record_signal(
     Ok(())
 }
 
+fn resolve_aux_channels(
+    send_to: &str,
+    record_from: &str,
+    channel_names: Option<&str>,
+) -> Result<(Vec<u16>, Vec<String>, u16), String> {
+    use sotf_capture::signal_recorder::parse_channel_list;
+
+    let send = parse_channel_list(send_to)?;
+    if send.is_empty() {
+        return Err("hwaudio-send-to must specify at least 1 channel".to_string());
+    }
+    let record = parse_channel_list(record_from)?;
+    if record.len() != 1 {
+        return Err("hwaudio-record-from must specify exactly 1 channel".to_string());
+    }
+    let names = match channel_names {
+        None => send.iter().map(|channel| format!("ch{channel}")).collect(),
+        Some(list) => {
+            let names: Vec<String> = list.split(',').map(|name| name.trim().to_owned()).collect();
+            if names.len() != send.len() || names.iter().any(String::is_empty) {
+                return Err(
+                    "channel-names must name every send-to channel exactly once".to_string()
+                );
+            }
+            names
+        }
+    };
+    Ok((send, names, record[0]))
+}
+
+fn check_device_selectors(
+    device: &Option<String>,
+    input_device: &Option<String>,
+    output_device: &Option<String>,
+) -> Result<(), String> {
+    for selector in [device, input_device, output_device].into_iter().flatten() {
+        if selector.trim().is_empty() {
+            return Err("device selectors must be nonempty when supplied".into());
+        }
+    }
+    Ok(())
+}
+
+fn aux_output_dir(output_dir: Option<PathBuf>) -> Result<PathBuf, String> {
+    let output_dir = match output_dir {
+        Some(dir) => dir,
+        None => std::env::current_dir()
+            .map_err(|e| format!("cannot determine current directory: {e}"))?,
+    };
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("failed to create output directory: {e}"))?;
+    Ok(output_dir)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Clap hands each flag through once; a parameter object would only rename the plumbing"
+)]
+fn run_probe(
+    hwaudio_send_to: String,
+    channel_names: Option<String>,
+    hwaudio_record_from: String,
+    sample_rate: u32,
+    probe_duration_ms: f32,
+    silence_duration_ms: f32,
+    signal_level_db: f32,
+    name: Option<String>,
+    output_dir: Option<PathBuf>,
+    device: Option<String>,
+    input_device: Option<String>,
+    output_device: Option<String>,
+    json: bool,
+) -> Result<(), String> {
+    use sotf_capture::signal_recorder::probe_channel_delays_with_recording;
+
+    let output_dir = aux_output_dir(output_dir)?;
+    check_device_selectors(&device, &input_device, &output_device)?;
+    let (send, names, record) = resolve_aux_channels(
+        &hwaudio_send_to,
+        &hwaudio_record_from,
+        channel_names.as_deref(),
+    )?;
+    let prefix = name.unwrap_or_else(|| "probe".into());
+    let wav_path = output_dir.join(format!("{prefix}-probe.wav"));
+    let results_path = output_dir.join(format!("{prefix}-probe-results.json"));
+    let results = probe_channel_delays_with_recording(
+        &send,
+        &names,
+        sample_rate,
+        probe_duration_ms,
+        silence_duration_ms,
+        output_device.as_deref().or(device.as_deref()),
+        input_device.as_deref().or(device.as_deref()),
+        record,
+        &wav_path,
+        signal_level_db,
+        None,
+    )?;
+    std::fs::write(
+        &results_path,
+        serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("cannot write probe results: {e}"))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "version": 1,
+                "wav": wav_path.display().to_string(),
+                "results": results_path.display().to_string(),
+                "delays": results,
+            })
+        );
+        return Ok(());
+    }
+    println!("probe recording: {}", wav_path.display());
+    for (channel, delay) in results
+        .channels
+        .iter()
+        .zip(results.alignment_delays_ms.iter())
+    {
+        println!(
+            "  {}: arrival={:.3} ms gain={:.1} dB snr={:.1} dB align={:.3} ms",
+            channel.channel_name, channel.arrival_ms, channel.gain_db, channel.snr_db, delay
+        );
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Clap hands each flag through once; a parameter object would only rename the plumbing"
+)]
+fn run_bass_anchor(
+    hwaudio_send_to: String,
+    channel_names: Option<String>,
+    hwaudio_record_from: String,
+    loopback_from: Option<u16>,
+    sample_rate: u32,
+    bass_freq_hz: f32,
+    bass_duration_s: f32,
+    fade_ms: f32,
+    num_windows: u16,
+    silence_duration_ms: f32,
+    signal_level_db: f32,
+    name: Option<String>,
+    output_dir: Option<PathBuf>,
+    device: Option<String>,
+    input_device: Option<String>,
+    output_device: Option<String>,
+    json: bool,
+) -> Result<(), String> {
+    use sotf_capture::signal_recorder::run_bass_anchor_with_recording;
+
+    let output_dir = aux_output_dir(output_dir)?;
+    check_device_selectors(&device, &input_device, &output_device)?;
+    let (send, names, record) = resolve_aux_channels(
+        &hwaudio_send_to,
+        &hwaudio_record_from,
+        channel_names.as_deref(),
+    )?;
+    if loopback_from == Some(record) {
+        return Err("loopback-from must differ from the recording channel".into());
+    }
+    let prefix = name.unwrap_or_else(|| "bass-anchor".into());
+    let wav_path = output_dir.join(format!("{prefix}-bass-anchor.wav"));
+    let results_path = output_dir.join(format!("{prefix}-bass-anchor-results.json"));
+    let results = run_bass_anchor_with_recording(
+        &send,
+        &names,
+        sample_rate,
+        bass_freq_hz,
+        bass_duration_s,
+        fade_ms,
+        num_windows,
+        silence_duration_ms,
+        output_device.as_deref().or(device.as_deref()),
+        input_device.as_deref().or(device.as_deref()),
+        record,
+        loopback_from,
+        &wav_path,
+        signal_level_db,
+        None,
+    )?;
+    std::fs::write(
+        &results_path,
+        serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("cannot write bass-anchor results: {e}"))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "version": 1,
+                "wav": wav_path.display().to_string(),
+                "results": results_path.display().to_string(),
+                "anchors": results,
+            })
+        );
+        return Ok(());
+    }
+    println!("bass-anchor recording: {}", wav_path.display());
+    for channel in &results.channels {
+        println!(
+            "  {}: phase={:.2} deg magnitude={:.4} stability={:.2} deg{}",
+            channel.channel_name,
+            channel.bass_anchor_phase_deg,
+            channel.bass_anchor_magnitude,
+            channel.bass_anchor_stability_deg,
+            if channel.bass_anchor_stability_deg < 20.0 {
+                ""
+            } else {
+                " UNRELIABLE"
+            }
+        );
+    }
+    Ok(())
+}
+
 fn plan_validate(plan_path: &std::path::Path) -> Result<(), String> {
     use sotf_capture::capture_session::CaptureSessionPlan;
 
@@ -438,6 +765,10 @@ fn plan_validate(plan_path: &std::path::Path) -> Result<(), String> {
         session.plan().microphones.len(),
         session.plan().sources.len(),
         session.plan().sample_rate_hz,
+    );
+    println!(
+        "{}",
+        sotf_capture::capture_session::timing_emitter_summary(&session)
     );
     Ok(())
 }
@@ -482,17 +813,41 @@ fn plan_process(
     raw_manifest_path: &std::path::Path,
     output: &std::path::Path,
     selected_take_ids: &[String],
+    ir_microphone: Option<String>,
 ) -> Result<(), String> {
-    use sotf_capture::capture_session::clock::io::process_capture_session_with_selection;
+    use sotf_capture::capture_session::clock::io::{
+        ProcessOptions, process_capture_session_with_options,
+    };
 
     if raw_manifest_path.file_name().and_then(|name| name.to_str()) != Some("capture-raw.json") {
         return Err("--raw must name a capture-raw.json journal".into());
+    }
+    if ir_microphone.as_deref().is_some_and(str::is_empty) {
+        return Err("--ir-microphone must be nonempty when supplied".into());
     }
     let raw_directory = raw_manifest_path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
-    let report = process_capture_session_with_selection(raw_directory, output, selected_take_ids)?;
+    let report = process_capture_session_with_options(
+        raw_directory,
+        output,
+        &ProcessOptions {
+            selected_take_ids: selected_take_ids.to_vec(),
+            ir_microphone,
+        },
+    )?;
+    println!(
+        "{}",
+        sotf_capture::capture_session::clock::io::timing_reference_summary(&report)
+    );
+    if let Some(ctc) = &report.ctc_measurements {
+        println!(
+            "CTC raw-sweep fragment: {} ({} files).",
+            ctc,
+            report.ctc_files.len()
+        );
+    }
     if let Some(configuration) = report.recording_manifest {
         println!(
             "Saved analyzed capture selection to {}/{}.",
@@ -622,13 +977,92 @@ fn run() -> Result<(), String> {
             parse_mic_calibrations(&mic_calibrations)?,
             json,
         ),
+        Command::Probe {
+            hwaudio_send_to,
+            channel_names,
+            hwaudio_record_from,
+            sample_rate,
+            probe_duration_ms,
+            silence_duration_ms,
+            signal_level_db,
+            name,
+            output_dir,
+            device,
+            input_device,
+            output_device,
+            json,
+        } => run_probe(
+            hwaudio_send_to,
+            channel_names,
+            hwaudio_record_from,
+            sample_rate,
+            probe_duration_ms,
+            silence_duration_ms,
+            signal_level_db,
+            name,
+            output_dir,
+            device,
+            input_device,
+            output_device,
+            json,
+        ),
+        Command::BassAnchor {
+            hwaudio_send_to,
+            channel_names,
+            hwaudio_record_from,
+            loopback_from,
+            sample_rate,
+            bass_freq_hz,
+            bass_duration_s,
+            fade_ms,
+            num_windows,
+            silence_duration_ms,
+            signal_level_db,
+            name,
+            output_dir,
+            device,
+            input_device,
+            output_device,
+            json,
+        } => run_bass_anchor(
+            hwaudio_send_to,
+            channel_names,
+            hwaudio_record_from,
+            loopback_from,
+            sample_rate,
+            bass_freq_hz,
+            bass_duration_s,
+            fade_ms,
+            num_windows,
+            silence_duration_ms,
+            signal_level_db,
+            name,
+            output_dir,
+            device,
+            input_device,
+            output_device,
+            json,
+        ),
+        Command::PlanCtcMerge { sessions, output } => {
+            let merged =
+                sotf_capture::capture_session::ctc::merge_ctc_fragments(&sessions, &output)?;
+            println!(
+                "Merged CTC bundle in {}: {} head positions, {} speakers, {} files.",
+                output.display(),
+                merged.heads.len(),
+                merged.speakers.len(),
+                merged.files.len(),
+            );
+            Ok(())
+        }
         Command::PlanValidate { plan } => plan_validate(&plan),
         Command::PlanRecord { plan, output } => plan_record(&plan, &output),
         Command::PlanProcess {
             raw,
             output,
             selected_take_ids,
-        } => plan_process(&raw, &output, &selected_take_ids),
+            ir_microphone,
+        } => plan_process(&raw, &output, &selected_take_ids, ir_microphone),
     }
 }
 
@@ -722,12 +1156,160 @@ mod tests {
                 raw,
                 output,
                 selected_take_ids,
+                ir_microphone,
             } => {
                 assert_eq!(raw, PathBuf::from("session/capture-raw.json"));
                 assert_eq!(output, PathBuf::from("processed"));
                 assert_eq!(selected_take_ids.len(), 2);
                 assert_eq!(selected_take_ids[0], "take-r000-0123456789abcdef");
                 assert_eq!(selected_take_ids[1], "take-r000-fedcba9876543210");
+                assert_eq!(ir_microphone, None);
+            }
+            _ => panic!("expected plan-process command"),
+        }
+    }
+
+    #[test]
+    fn probe_command_parses_channels_levels_and_devices() {
+        let cli = Cli::try_parse_from([
+            "sotf-capture",
+            "probe",
+            "--hwaudio-send-to",
+            "0,1",
+            "--channel-names",
+            "L,R",
+            "--hwaudio-record-from",
+            "0",
+            "--probe-duration-ms",
+            "500",
+            "--signal-level-db",
+            "-12",
+            "--output-device",
+            "dac",
+            "--input-device",
+            "mic",
+            "--json",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Probe {
+                hwaudio_send_to,
+                channel_names,
+                hwaudio_record_from,
+                probe_duration_ms,
+                signal_level_db,
+                output_device,
+                input_device,
+                json,
+                ..
+            } => {
+                assert_eq!(hwaudio_send_to, "0,1");
+                assert_eq!(channel_names.as_deref(), Some("L,R"));
+                assert_eq!(hwaudio_record_from, "0");
+                assert_eq!(probe_duration_ms, 500.0);
+                assert_eq!(signal_level_db, -12.0);
+                assert_eq!(output_device.as_deref(), Some("dac"));
+                assert_eq!(input_device.as_deref(), Some("mic"));
+                assert!(json);
+            }
+            _ => panic!("expected probe command"),
+        }
+    }
+
+    #[test]
+    fn bass_anchor_command_parses_tone_and_loopback() {
+        let cli = Cli::try_parse_from([
+            "sotf-capture",
+            "bass-anchor",
+            "--hwaudio-send-to",
+            "2",
+            "--hwaudio-record-from",
+            "0",
+            "--loopback-from",
+            "1",
+            "--bass-freq-hz",
+            "25",
+            "--num-windows",
+            "16",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::BassAnchor {
+                hwaudio_send_to,
+                loopback_from,
+                bass_freq_hz,
+                num_windows,
+                channel_names,
+                ..
+            } => {
+                assert_eq!(hwaudio_send_to, "2");
+                assert_eq!(loopback_from, Some(1));
+                assert_eq!(bass_freq_hz, 25.0);
+                assert_eq!(num_windows, 16);
+                assert_eq!(channel_names, None);
+            }
+            _ => panic!("expected bass-anchor command"),
+        }
+    }
+
+    #[test]
+    fn aux_channel_resolution_enforces_single_input_and_named_outputs() {
+        let (send, names, record) = resolve_aux_channels("0,1", "0", None).unwrap();
+        assert_eq!(send, vec![0, 1]);
+        assert_eq!(names, vec!["ch0".to_string(), "ch1".to_string()]);
+        assert_eq!(record, 0);
+        let (_, names, _) = resolve_aux_channels("0,1", "0", Some("L,R")).unwrap();
+        assert_eq!(names, vec!["L".to_string(), "R".to_string()]);
+        assert!(resolve_aux_channels("0,1", "0", Some("L")).is_err());
+        assert!(resolve_aux_channels("0,1", "0", Some("L,")).is_err());
+        assert!(resolve_aux_channels("0,1", "0,1", None).is_err());
+        assert!(resolve_aux_channels("", "0", None).is_err());
+    }
+
+    #[test]
+    fn plan_ctc_merge_parses_session_list_and_output() {
+        let cli = Cli::try_parse_from([
+            "sotf-capture",
+            "plan-ctc-merge",
+            "--session",
+            "head-0",
+            "--session",
+            "head-1",
+            "--output",
+            "merged",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::PlanCtcMerge { sessions, output } => {
+                assert_eq!(
+                    sessions,
+                    vec![PathBuf::from("head-0"), PathBuf::from("head-1")]
+                );
+                assert_eq!(output, PathBuf::from("merged"));
+            }
+            _ => panic!("expected plan-ctc-merge command"),
+        }
+        assert!(
+            Cli::try_parse_from(["sotf-capture", "plan-ctc-merge", "--output", "merged"]).is_err()
+        );
+    }
+
+    #[test]
+    fn plan_process_accepts_ir_microphone_selector() {
+        let cli = Cli::try_parse_from([
+            "sotf-capture",
+            "plan-process",
+            "--raw",
+            "session/capture-raw.json",
+            "--output",
+            "processed",
+            "--ir-microphone",
+            "seat-left",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::PlanProcess { ir_microphone, .. } => {
+                assert_eq!(ir_microphone.as_deref(), Some("seat-left"));
             }
             _ => panic!("expected plan-process command"),
         }

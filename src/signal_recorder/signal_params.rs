@@ -1,5 +1,6 @@
 use super::signal_type::SignalType;
 use super::types::SignalParams;
+use math_audio_dsp::signals::STI_MIN_SAMPLE_RATE_HZ;
 
 /// Build `SignalParams` for the sweep path used by `record_and_analyze`.
 ///
@@ -165,6 +166,11 @@ pub fn validate_signal_params(
         }
         (SignalType::Dirac, SignalParams::Dirac { amp }) if (*amp <= 0.0 || *amp > 1.0) => {
             return Err(format!("Amplitude {} must be in range (0, 1]", amp));
+        }
+        (SignalType::Stipa, SignalParams::Stipa) if sample_rate < STI_MIN_SAMPLE_RATE_HZ => {
+            return Err(format!(
+                "STIPA requires a sample rate of at least {STI_MIN_SAMPLE_RATE_HZ} Hz, got {sample_rate}"
+            ));
         }
         _ => {}
     }

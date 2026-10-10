@@ -50,7 +50,10 @@ fn fixture() -> (Golden, RawCaptureManifest, Vec<f32>, Vec<f32>) {
         pending_processing: vec!["clock_correction".into()],
         calibrations: vec![],
         takes: vec![],
+        loopback_files: vec![],
         error: None,
+        probe_pass: None,
+        bass_anchor_pass: None,
     };
     (golden, manifest, stimulus.samples, stimulus.timing_chirp)
 }
@@ -375,6 +378,274 @@ fn saved_golden_session_round_trips_clock_provenance_and_magnitude_fallback() {
 }
 
 #[test]
+fn unknown_ir_microphone_is_refused_before_writing() {
+    let root = write_golden_directory();
+    let output = root.path().join("processed");
+    let error = io::process_capture_session_with_options(
+        root.path(),
+        &output,
+        &io::ProcessOptions {
+            selected_take_ids: Vec::new(),
+            ir_microphone: Some("seat-ghost".into()),
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("unknown IR microphone"), "{error}");
+    assert!(!output.exists());
+}
+
+#[test]
+fn ir_microphone_defaults_to_first_plan_microphone() {
+    let root = write_golden_directory();
+    let output = root.path().join("processed");
+    let report = io::process_capture_session_with_options(
+        root.path(),
+        &output,
+        &io::ProcessOptions::default(),
+    )
+    .unwrap();
+    let expected = report.plan.microphones[0].id.clone();
+    assert_eq!(report.ir_microphone.as_deref(), Some(expected.as_str()));
+}
+
+#[test]
+fn auxiliary_passes_flow_into_projection_and_handoff() {
+    use crate::capture_session::record::{CaptureBassAnchorPass, CaptureProbePass};
+    use crate::signal_recorder::{
+        BassAnchorChannelResult, BassAnchorResults, ProbeDelayChannelResult, ProbeDelayResults,
+    };
+
+    let root = write_golden_directory();
+    let mut manifest: crate::capture_session::record::RawCaptureManifest =
+        serde_json::from_slice(&std::fs::read(root.path().join("capture-raw.json")).unwrap())
+            .unwrap();
+    manifest.probe_pass = Some(CaptureProbePass {
+        wav_file: "probe.wav".into(),
+        microphone_id: manifest.plan.microphones[0].id.clone(),
+        results: ProbeDelayResults {
+            channels: vec![ProbeDelayChannelResult {
+                channel_name: "left".into(),
+                channel_index: 0,
+                arrival_ms: 1.5,
+                gain_db: -3.0,
+                snr_db: 40.0,
+            }],
+            sample_rate: golden_sample_rate(&manifest),
+            alignment_delays_ms: vec![0.5],
+        },
+    });
+    manifest.bass_anchor_pass = Some(CaptureBassAnchorPass {
+        wav_file: "bass-anchor.wav".into(),
+        microphone_id: manifest.plan.microphones[0].id.clone(),
+        loopback_channel: None,
+        results: BassAnchorResults {
+            channels: vec![BassAnchorChannelResult {
+                channel_name: "left".into(),
+                channel_index: 0,
+                bass_anchor_phase_deg: 12.0,
+                bass_anchor_magnitude: 0.5,
+                bass_anchor_stability_deg: 2.0,
+                bass_anchor_loopback_phase_deg: None,
+                bass_anchor_coherence: None,
+            }],
+            sample_rate: golden_sample_rate(&manifest),
+            bass_freq_hz: 30.0,
+            bass_duration_s: 2.0,
+        },
+    });
+    std::fs::write(
+        root.path().join("capture-raw.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    for wav in ["probe.wav", "bass-anchor.wav"] {
+        crate::signal_recorder::write_wav_file(
+            &root.path().join(wav),
+            &[0.1, -0.1, 0.05],
+            golden_sample_rate(&manifest),
+            1,
+        )
+        .unwrap();
+    }
+    let output = root.path().join("processed");
+    let report = io::process_capture_session(root.path(), &output).unwrap();
+    assert!(output.join("probe.wav").is_file());
+    assert!(output.join("bass-anchor.wav").is_file());
+    assert!(report.probe_pass.is_some());
+    assert!(report.bass_anchor_pass.is_some());
+    let configuration: autoeq::roomeq::RoomConfig =
+        serde_json::from_slice(&std::fs::read(output.join("recordings.json")).unwrap()).unwrap();
+    let recording = configuration.recording_config.as_ref().unwrap();
+    assert_eq!(
+        recording.probe_results.as_ref().unwrap().channels[0].arrival_ms,
+        1.5
+    );
+    assert_eq!(recording.probe_wav_relative.as_deref(), Some("probe.wav"));
+    assert_eq!(
+        recording.bass_anchor_results.as_ref().unwrap().channels[0].bass_anchor_phase_deg,
+        12.0
+    );
+    assert_eq!(recording.bass_probe_freq_hz, Some(30.0));
+    let handoff: autoeq::capture_handoff::CaptureHandoff = serde_json::from_slice(
+        &std::fs::read(output.join(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME)).unwrap(),
+    )
+    .unwrap();
+    handoff.validate().unwrap();
+    for wav in ["probe.wav", "bass-anchor.wav"] {
+        assert!(
+            handoff.artifacts.iter().any(|asset| asset.file == wav),
+            "handoff inventories {wav}"
+        );
+    }
+    autoeq::roomeq::load_config(&output.join("recordings.json"), None).unwrap();
+}
+
+fn golden_sample_rate(manifest: &crate::capture_session::record::RawCaptureManifest) -> u32 {
+    manifest.plan.sample_rate_hz
+}
+
+#[test]
+fn ctc_assembly_crops_raw_takes_into_stereo_ears_loopback_and_reference() {
+    use crate::capture_session::record::CaptureLoopbackTake;
+    use crate::capture_session::{CaptureCtc, CaptureHeadPosition, CaptureLoopback};
+
+    let root = write_golden_directory();
+    let mut manifest: crate::capture_session::record::RawCaptureManifest =
+        serde_json::from_slice(&std::fs::read(root.path().join("capture-raw.json")).unwrap())
+            .unwrap();
+    manifest.plan.loopback = Some(CaptureLoopback {
+        device: manifest.plan.microphones[0].device.clone(),
+        input_channel: 7,
+    });
+    manifest.plan.ctc = Some(CaptureCtc {
+        left_ear: manifest.plan.microphones[0].id.clone(),
+        right_ear: manifest.plan.microphones[1].id.clone(),
+        head_position: CaptureHeadPosition {
+            id: "head-0".into(),
+            x: 1.0,
+            y: 0.0,
+            z: 1.2,
+            yaw_deg: 0.0,
+        },
+    });
+    let take_samples = manifest.takes[0].samples;
+    manifest.loopback_files.push(CaptureLoopbackTake {
+        repeat_index: 0,
+        source_id: manifest.plan.sources[0].id.clone(),
+        wav_file: "loopback.wav".into(),
+        samples: take_samples,
+        device_id: "id:loopback".into(),
+        input_sample_format: "F32".into(),
+        peak_amplitude: 0.1,
+        clipped_samples: 0,
+    });
+    std::fs::copy(
+        root.path().join(&manifest.takes[0].wav_file),
+        root.path().join("loopback.wav"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join("capture-raw.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let output = root.path().join("processed");
+    let report = io::process_capture_session(root.path(), &output).unwrap();
+    assert_eq!(
+        report.ctc_measurements.as_deref(),
+        Some(crate::capture_session::ctc::CTC_FRAGMENT_FILE)
+    );
+    assert_eq!(report.ctc_files.len(), 4);
+    let window = report.stimulus.end_chirp_offset - report.stimulus.sweep_offset;
+    let fragment: crate::capture_session::ctc::CtcFragment = serde_json::from_slice(
+        &std::fs::read(output.join(crate::capture_session::ctc::CTC_FRAGMENT_FILE)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(fragment.measurements.speakers, vec!["left".to_string()]);
+    assert_eq!(
+        fragment.measurements.mics,
+        vec!["left_ear".to_string(), "right_ear".to_string()]
+    );
+    assert_eq!(fragment.measurements.files.len(), 1);
+    assert_eq!(fragment.measurements.files[0].head_position, "head-0");
+    let entry = &fragment.measurements.files[0];
+    let ears = entry.raw_sweep.as_deref().unwrap();
+    let loopback = entry.loopback.as_deref().unwrap();
+    let mut ears_reader = hound::WavReader::open(output.join(ears)).unwrap();
+    assert_eq!(ears_reader.spec().channels, 2);
+    assert_eq!(ears_reader.duration() as usize, window);
+    let loopback_reader = hound::WavReader::open(output.join(loopback)).unwrap();
+    assert_eq!(loopback_reader.spec().channels, 1);
+    assert_eq!(loopback_reader.duration() as usize, window);
+    let reference_reader = hound::WavReader::open(output.join(&fragment.reference_sweep)).unwrap();
+    assert_eq!(
+        reference_reader.duration() as usize,
+        report.stimulus.sweep_samples
+    );
+    // Channel order: left ear first.
+    let left: Vec<f32> = hound::WavReader::open(root.path().join(&manifest.takes[0].wav_file))
+        .unwrap()
+        .samples::<f32>()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let stereo: Vec<f32> = ears_reader
+        .samples::<f32>()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(stereo[0], left[report.stimulus.sweep_offset]);
+    assert_eq!(stereo[1], {
+        let right: Vec<f32> = hound::WavReader::open(root.path().join(&manifest.takes[1].wav_file))
+            .unwrap()
+            .samples::<f32>()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        right[report.stimulus.sweep_offset]
+    });
+    let handoff: autoeq::capture_handoff::CaptureHandoff = serde_json::from_slice(
+        &std::fs::read(output.join(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME)).unwrap(),
+    )
+    .unwrap();
+    handoff.validate().unwrap();
+    for file in &report.ctc_files {
+        assert!(
+            handoff.artifacts.iter().any(|asset| &asset.file == file),
+            "handoff inventories {file}"
+        );
+    }
+}
+
+#[test]
+fn process_reports_mixed_timing_identities_without_naming_a_winner() {
+    let root = write_golden_directory();
+    let output = root.path().join("processed");
+    let report = io::process_capture_session(root.path(), &output).unwrap();
+    assert_eq!(report.timing_reference_output_channel, Some(0));
+    let summary = io::timing_reference_summary(&report);
+    assert!(summary.contains("no shared timing reference"), "{summary}");
+    assert!(summary.contains("1 of 2 takes"), "{summary}");
+    assert!(summary.contains("output channel 0"), "{summary}");
+    assert!(summary.contains("forbid coherent use"), "{summary}");
+}
+
+#[test]
+fn process_reports_fully_shared_timing_identity() {
+    let root = write_golden_directory();
+    let output = root.path().join("processed");
+    let mut report = io::process_capture_session(root.path(), &output).unwrap();
+    for take in &mut report.takes {
+        take.clock.reference_id = Some("dac:0".into());
+    }
+    assert_eq!(
+        io::timing_reference_summary(&report),
+        "timing reference 'dac:0' shared by 2/2 takes on output channel 0"
+    );
+    report.timing_reference_output_channel = None;
+    let legacy = io::timing_reference_summary(&report);
+    assert!(legacy.contains("unknown route (legacy report)"), "{legacy}");
+    assert!(legacy.contains("shared by 2/2 takes"), "{legacy}");
+}
+
+#[test]
 fn canonical_phase_requires_complete_quality_and_retains_frequency_gate() {
     use crate::capture_session::analysis::{CaptureFrequencySnr, CapturePhaseArtifacts};
     let root = write_golden_directory();
@@ -398,6 +669,9 @@ fn canonical_phase_requires_complete_quality_and_retains_frequency_gate() {
         analysis.common_reference = Some(CapturePhaseArtifacts {
             response_file: format!("take-{index:03}-phase.csv"),
             impulse_file: format!("take-{index:03}-ir.json"),
+            impulse_csv_file: None,
+            sti: None,
+            coherence_file: None,
             timing_limit_hz: 1250.0,
             low_hz: 20.0,
             high_hz: 20000.0,

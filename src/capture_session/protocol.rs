@@ -50,13 +50,23 @@ pub fn prepare_capture_stimulus(
     let rate = plan.sample_rate_hz;
     let amplitude = plan.sweep.amplitude as f32;
     let mut chirp = try_gen_log_sweep(2000.0, 8000.0, amplitude, rate, 0.1)?;
-    let mut sweep = try_gen_log_sweep(
-        plan.sweep.start_hz as f32,
-        plan.sweep.end_hz as f32,
-        amplitude,
-        rate,
-        plan.sweep.duration_secs as f32,
-    )?;
+    let mut sweep = match plan.sweep.bass_octave_duration_s {
+        Some(bass) => math_audio_dsp::signals::gen_log_sweep_octave_scaled(
+            plan.sweep.start_hz as f32,
+            plan.sweep.end_hz as f32,
+            amplitude,
+            rate,
+            bass,
+            plan.sweep.duration_secs as f32,
+        ),
+        None => try_gen_log_sweep(
+            plan.sweep.start_hz as f32,
+            plan.sweep.end_hz as f32,
+            amplitude,
+            rate,
+            plan.sweep.duration_secs as f32,
+        )?,
+    };
     if chirp.is_empty() || sweep.is_empty() {
         return Err("capture waveform generator returned an empty signal".into());
     }
@@ -132,5 +142,30 @@ mod tests {
             );
             assert_eq!(signal.samples.len(), layout.total_samples);
         }
+    }
+
+    #[test]
+    fn bass_weighting_extends_the_sweep_span_past_nominal() {
+        use crate::capture_session::octave_weighted_sweep_seconds;
+
+        let mut plan: CaptureSessionPlan =
+            serde_json::from_str(include_str!("../../tests/fixtures/capture-session.json"))
+                .unwrap();
+        plan.sweep.duration_secs = 2.0;
+        let plain = prepare_capture_stimulus(&plan.clone().validate().unwrap()).unwrap();
+        plan.sweep.bass_octave_duration_s = Some(3.0);
+        let weighted = prepare_capture_stimulus(&plan.clone().validate().unwrap()).unwrap();
+        let expected = octave_weighted_sweep_seconds(20.0, 20000.0, Some(3.0), 2.0);
+        assert!(expected > 2.0);
+        let actual = weighted.layout.sweep_samples as f64 / f64::from(plan.sample_rate_hz);
+        assert!((actual - expected).abs() < 2.0 / f64::from(plan.sample_rate_hz));
+        assert!(weighted.layout.sweep_samples > plain.layout.sweep_samples);
+        assert_eq!(
+            weighted.layout.end_chirp_offset
+                - weighted.layout.sweep_offset
+                - weighted.layout.sweep_samples,
+            plan.sample_rate_hz as usize * 2
+        );
+        assert_eq!(weighted.samples.len(), weighted.layout.total_samples);
     }
 }

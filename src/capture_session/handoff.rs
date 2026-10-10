@@ -107,6 +107,24 @@ pub fn publish_capture_handoff(
     ] {
         roles.insert(name.into(), CaptureArtifactRole::SupportingEvidence);
     }
+    for wav in [
+        report
+            .probe_pass
+            .as_ref()
+            .map(|pass| pass.wav_file.as_str()),
+        report
+            .bass_anchor_pass
+            .as_ref()
+            .map(|pass| pass.wav_file.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        roles.insert(wav.into(), CaptureArtifactRole::SupportingEvidence);
+    }
+    for file in &report.ctc_files {
+        roles.insert(file.clone(), CaptureArtifactRole::SupportingEvidence);
+    }
     let selected_take_ids = report.selected_take_ids.as_ref().map(|ids| {
         ids.iter()
             .map(String::as_str)
@@ -170,6 +188,16 @@ pub fn publish_capture_handoff(
                 for file in [&phase.response_file, &phase.impulse_file] {
                     roles
                         .entry(file.clone())
+                        .or_insert(CaptureArtifactRole::SupportingEvidence);
+                }
+                if let Some(csv) = &phase.impulse_csv_file {
+                    roles
+                        .entry(csv.clone())
+                        .or_insert(CaptureArtifactRole::SupportingEvidence);
+                }
+                if let Some(coherence) = &phase.coherence_file {
+                    roles
+                        .entry(coherence.clone())
                         .or_insert(CaptureArtifactRole::SupportingEvidence);
                 }
             }

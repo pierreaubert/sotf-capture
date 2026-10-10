@@ -51,6 +51,19 @@ analysis and is not reapplied by the handoff loader. Hashes do not authenticate
 hardware calibration or establish listening benefit. Repeated/partial capture
 selection remains an explicit review step; missing clocks remain unknown.
 
+## RoomEQ handoff rules
+
+One plan per optimization. Sources that RoomEQ combines coherently — subs and
+mains for bass alignment, channels for Group-Delay optimization — must come
+from a single `plan-record`/`plan-process` run: one sample rate, one sweep
+layout, one shared timing reference, one response grid. Separate process runs
+are never merged for coherent use; their grids and clocks are unrelated even
+when the plans look identical, and GD-Opt skips mismatched grids silently by
+design. The processed directory carries everything RoomEQ needs: room
+dimensions when the plan declares them, per-source room IRs from the selected
+IR microphone, per-bin coherence beside each phase response, the resolved
+timing identity, probe/anchor passes when recorded, and per-take IR-only STI.
+
 ## Per-machine device and calibration parameters
 
 Choose input and output independently with `sotf-capture capture --input-device

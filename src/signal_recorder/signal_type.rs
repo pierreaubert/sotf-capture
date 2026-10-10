@@ -11,6 +11,7 @@ pub enum SignalType {
     MNoise,
     Mls,
     Dirac,
+    Stipa,
 }
 
 impl SignalType {
@@ -24,6 +25,7 @@ impl SignalType {
             Self::MNoise => "m-noise",
             Self::Mls => "mls",
             Self::Dirac => "dirac",
+            Self::Stipa => "stipa",
         }
     }
 }
@@ -44,6 +46,7 @@ impl FromStr for SignalType {
             | "maximum_length_sequence"
             | "maximumlengthsequence" => Ok(Self::Mls),
             "dirac" | "impulse" => Ok(Self::Dirac),
+            "stipa" | "sti-pa" => Ok(Self::Stipa),
             _ => Err(format!("Unknown signal type: {}", s)),
         }
     }

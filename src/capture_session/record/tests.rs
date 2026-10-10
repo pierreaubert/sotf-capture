@@ -294,3 +294,256 @@ fn cancelled_repeated_parent_processes_an_explicit_full_matrix_and_keeps_lineage
     std::fs::write(output.join("capture-raw.json"), changed_parent).unwrap();
     assert!(autoeq::roomeq::load_config(&output.join("recordings.json"), None).is_err());
 }
+
+fn aux_session() -> (
+    tempfile::TempDir,
+    crate::capture_session::ValidatedCaptureSession,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let mut plan: crate::capture_session::CaptureSessionPlan =
+        serde_json::from_str(include_str!("../../../tests/fixtures/capture-session.json")).unwrap();
+    plan.probe = Some(crate::capture_session::CaptureProbe {
+        probe_duration_ms: 1000.0,
+        silence_duration_ms: 500.0,
+        signal_level_db: -6.0,
+    });
+    plan.bass_anchor = Some(crate::capture_session::CaptureBassAnchor {
+        bass_freq_hz: 30.0,
+        bass_duration_s: 2.0,
+        fade_ms: 50.0,
+        num_windows: 8,
+        silence_duration_ms: 500.0,
+        signal_level_db: -6.0,
+    });
+    plan.loopback = Some(crate::capture_session::CaptureLoopback {
+        device: plan.microphones[0].device.clone(),
+        input_channel: 7,
+    });
+    (root, plan.validate().unwrap())
+}
+
+fn aux_manifest(session: &crate::capture_session::ValidatedCaptureSession) -> RawCaptureManifest {
+    let stimulus = crate::capture_session::protocol::prepare_capture_stimulus(session).unwrap();
+    RawCaptureManifest {
+        version: 1,
+        plan: session.plan().clone(),
+        probe_pass: None,
+        bass_anchor_pass: None,
+        stimulus: stimulus.layout,
+        timing_reference_output_channel: Some(0),
+        status: RawCaptureStatus::RawComplete,
+        pending_processing: Vec::new(),
+        calibrations: Vec::new(),
+        takes: Vec::new(),
+        loopback_files: Vec::new(),
+        error: None,
+    }
+}
+
+fn canned_probe() -> crate::signal_recorder::ProbeDelayResults {
+    crate::signal_recorder::ProbeDelayResults {
+        channels: vec![crate::signal_recorder::ProbeDelayChannelResult {
+            channel_name: "left".into(),
+            channel_index: 0,
+            arrival_ms: 1.5,
+            gain_db: -3.0,
+            snr_db: 40.0,
+        }],
+        sample_rate: 48000,
+        alignment_delays_ms: vec![0.5],
+    }
+}
+
+fn canned_anchor() -> crate::signal_recorder::BassAnchorResults {
+    crate::signal_recorder::BassAnchorResults {
+        channels: vec![crate::signal_recorder::BassAnchorChannelResult {
+            channel_name: "left".into(),
+            channel_index: 0,
+            bass_anchor_phase_deg: 12.0,
+            bass_anchor_magnitude: 0.5,
+            bass_anchor_stability_deg: 2.0,
+            bass_anchor_loopback_phase_deg: Some(3.0),
+            bass_anchor_coherence: Some(0.98),
+        }],
+        sample_rate: 48000,
+        bass_freq_hz: 30.0,
+        bass_duration_s: 2.0,
+    }
+}
+
+#[test]
+fn auxiliary_passes_journal_results_with_plan_routing() {
+    let (root, session) = aux_session();
+    let output = root.path().join("aux-session");
+    std::fs::create_dir(&output).unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let manifest = run_auxiliary_passes(
+        &session,
+        &output,
+        &cancel,
+        aux_manifest(&session),
+        |channels, names, rate, duration, silence, _out, _input, _ch, wav, _level, _cancel| {
+            assert_eq!(channels, &[0, 1]);
+            assert_eq!(names, &["left".to_string(), "right".to_string()]);
+            assert_eq!(rate, 48000);
+            assert_eq!(duration, 1000.0);
+            assert_eq!(silence, 500.0);
+            assert_eq!(
+                wav.file_name().and_then(|name| name.to_str()),
+                Some("probe.wav")
+            );
+            Ok(canned_probe())
+        },
+        |channels,
+         names,
+         rate,
+         freq,
+         duration,
+         fade,
+         windows,
+         _silence,
+         _out,
+         _input,
+         _ch,
+         loopback,
+         wav,
+         _level,
+         _cancel| {
+            assert_eq!(channels, &[0, 1]);
+            assert_eq!(names, &["left".to_string(), "right".to_string()]);
+            assert_eq!(rate, 48000);
+            assert_eq!(freq, 30.0);
+            assert_eq!(duration, 2.0);
+            assert_eq!(fade, 50.0);
+            assert_eq!(windows, 8);
+            assert_eq!(loopback, Some(7));
+            assert_eq!(
+                wav.file_name().and_then(|name| name.to_str()),
+                Some("bass-anchor.wav")
+            );
+            Ok(canned_anchor())
+        },
+    )
+    .unwrap();
+    assert_eq!(manifest.status, RawCaptureStatus::RawComplete);
+    let probe = manifest.probe_pass.as_ref().unwrap();
+    assert_eq!(probe.wav_file, "probe.wav");
+    assert_eq!(probe.microphone_id, "seat-left");
+    assert_eq!(probe.results.alignment_delays_ms, vec![0.5]);
+    let anchor = manifest.bass_anchor_pass.as_ref().unwrap();
+    assert_eq!(anchor.wav_file, "bass-anchor.wav");
+    assert_eq!(anchor.loopback_channel, Some(7));
+    assert_eq!(anchor.results.bass_freq_hz, 30.0);
+    let saved = journal(&output);
+    assert!(saved.probe_pass.is_some());
+    assert!(saved.bass_anchor_pass.is_some());
+}
+
+#[test]
+fn auxiliary_failure_marks_the_session_failed() {
+    let (root, session) = aux_session();
+    let output = root.path().join("aux-session");
+    std::fs::create_dir(&output).unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let error = run_auxiliary_passes(
+        &session,
+        &output,
+        &cancel,
+        aux_manifest(&session),
+        |_, _, _, _, _, _, _, _, _, _, _| Err("no probe tone".to_string()),
+        |_, _, _, _, _, _, _, _, _, _, _, _, _, _, _| Ok(canned_anchor()),
+    )
+    .unwrap_err();
+    assert!(error.contains("no probe tone"), "{error}");
+    let saved = journal(&output);
+    assert_eq!(saved.status, RawCaptureStatus::Failed);
+    assert!(saved.probe_pass.is_none());
+}
+
+#[test]
+fn auxiliary_passes_honor_cancellation() {
+    let (root, session) = aux_session();
+    let output = root.path().join("aux-session");
+    std::fs::create_dir(&output).unwrap();
+    let cancel = Arc::new(AtomicBool::new(true));
+    let error = run_auxiliary_passes(
+        &session,
+        &output,
+        &cancel,
+        aux_manifest(&session),
+        |_, _, _, _, _, _, _, _, _, _, _| Ok(canned_probe()),
+        |_, _, _, _, _, _, _, _, _, _, _, _, _, _, _| Ok(canned_anchor()),
+    )
+    .unwrap_err();
+    assert_eq!(error, "cancelled");
+    assert_eq!(journal(&output).status, RawCaptureStatus::Cancelled);
+}
+
+#[test]
+fn ctc_sessions_record_one_loopback_take_per_source() {
+    let (root, plain) = setup();
+    let mut plan = plain.plan().clone();
+    plan.loopback = Some(crate::capture_session::CaptureLoopback {
+        device: plan.microphones[0].device.clone(),
+        input_channel: 7,
+    });
+    plan.ctc = Some(crate::capture_session::CaptureCtc {
+        left_ear: plan.microphones[0].id.clone(),
+        right_ear: plan.microphones[1].id.clone(),
+        head_position: crate::capture_session::CaptureHeadPosition {
+            id: "head-0".into(),
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw_deg: 0.0,
+        },
+    });
+    let session = plan.validate().unwrap();
+    let output = root.path().join("session");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let manifest = record_with(
+        &session,
+        root.path(),
+        &output,
+        &cancel,
+        |_| {},
+        fake_capture,
+    )
+    .unwrap();
+    assert_eq!(manifest.status, RawCaptureStatus::RawComplete);
+    assert_eq!(manifest.loopback_files.len(), session.plan().sources.len());
+    for loopback in &manifest.loopback_files {
+        assert!(output.join(&loopback.wav_file).is_file());
+        assert!(loopback.samples > 0);
+        assert_eq!(
+            loopback.device_id,
+            format!("id:{}", session.plan().loopback.as_ref().unwrap().device)
+        );
+    }
+    let saved = journal(&output);
+    assert_eq!(saved.loopback_files.len(), session.plan().sources.len());
+}
+
+#[test]
+fn sessions_without_auxiliary_sections_skip_the_runners() {
+    let (_root, session) = setup();
+    let output = tempfile::tempdir().unwrap();
+    let out = output.path().join("aux-session");
+    std::fs::create_dir(&out).unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let manifest = run_auxiliary_passes(
+        &session,
+        &out,
+        &cancel,
+        aux_manifest(&session),
+        |_, _, _, _, _, _, _, _, _, _, _| -> Result<_, String> {
+            unreachable!("probe must not run without a plan section")
+        },
+        |_, _, _, _, _, _, _, _, _, _, _, _, _, _, _| -> Result<_, String> {
+            unreachable!("anchor must not run without a plan section")
+        },
+    )
+    .unwrap();
+    assert!(manifest.probe_pass.is_none());
+    assert!(manifest.bass_anchor_pass.is_none());
+}

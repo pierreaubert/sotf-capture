@@ -91,6 +91,13 @@ pub fn generate_signal(
         }
         (SignalType::Mls, SignalParams::Mls { order, amp }) => gen_mls(*order, *amp),
         (SignalType::Dirac, SignalParams::Dirac { amp }) => gen_dirac(*amp, sample_rate, duration),
+        (SignalType::Stipa, SignalParams::Stipa) => {
+            let signal = gen_stipa_signal(sample_rate, duration);
+            if signal.is_empty() {
+                return Err("STIPA generation produced no samples".into());
+            }
+            signal
+        }
         _ => {
             return Err(format!(
                 "Signal type {:?} does not match parameters {:?}",

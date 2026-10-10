@@ -19,7 +19,12 @@ use super::misc::prepare_signal;
 use super::playback::CpalPlayback;
 use super::probe::gen_schroeder_narrowband_probe;
 #[cfg(not(target_os = "ios"))]
-use super::quality::{DriftAction, build_capture_quality, check_lag_lock, drift_action};
+use super::quality::{
+    DriftAction, build_capture_quality, check_lag_lock, drift_action, snr_warning_issue,
+    thd_warning_issue,
+};
+#[cfg(not(target_os = "ios"))]
+use super::record::active_take_span;
 #[cfg(not(target_os = "ios"))]
 use super::record::record_and_analyze_with;
 #[cfg(not(target_os = "ios"))]
@@ -1316,6 +1321,84 @@ fn test_repeat_sweep_averaging_rejects_outlier_and_extends_csv() {
     }
 }
 
+/// A take driven through soft saturation carries real harmonic
+/// distortion: the Farina THD curve must trip the high-distortion advisory
+/// without tripping the hard-clip abort (tanh saturation peaks below the
+/// 0.999 clip threshold).
+#[test]
+#[cfg(not(target_os = "ios"))]
+fn distorted_sweep_take_warns_high_thd() {
+    let sample_rate = 48_000_u32;
+    let reference = padded_sweep_reference(sample_rate);
+    let ir = test_room_ir();
+    let mut take = simulate_sweep_take(&reference, &ir, 0.003, 0xD157_0000);
+    // Saturate the sweep body only, keeping the pre-roll noise clean so
+    // the SNR check stays quiet.
+    for sample in take.iter_mut().skip(4800) {
+        *sample = (4.0 * *sample).tanh();
+    }
+    let takes = vec![take];
+    let dir = tempdir().unwrap();
+    let capture = super::record::analyze_sweep_takes(
+        &dir.path().join("D.wav"),
+        &dir.path().join("D.csv"),
+        &takes,
+        &reference,
+        sample_rate,
+        sample_rate,
+        Some((20.0, 20_000.0)),
+        None,
+        0,
+        "test",
+    )
+    .expect("distorted take still analyzes");
+    assert!(
+        capture
+            .quality
+            .issues
+            .iter()
+            .any(|issue| issue.contains("high distortion")),
+        "expected THD warning, issues: {:?}",
+        capture.quality.issues
+    );
+    assert!(!capture.quality.trustworthy);
+}
+
+/// A take buried in room noise trips the broadband-SNR advisory while
+/// still locking (long-sweep processing gain beats the noise), proving the
+/// single-take SNR path that math-dsp's spectral assessment cannot supply.
+#[test]
+#[cfg(not(target_os = "ios"))]
+fn noisy_sweep_take_warns_low_snr() {
+    let sample_rate = 48_000_u32;
+    let reference = padded_sweep_reference(sample_rate);
+    let ir = test_room_ir();
+    let takes = vec![simulate_sweep_take(&reference, &ir, 0.3, 0x9015_E000)];
+    let dir = tempdir().unwrap();
+    let capture = super::record::analyze_sweep_takes(
+        &dir.path().join("N.wav"),
+        &dir.path().join("N.csv"),
+        &takes,
+        &reference,
+        sample_rate,
+        sample_rate,
+        Some((20.0, 20_000.0)),
+        None,
+        0,
+        "test",
+    )
+    .expect("noisy take still locks and analyzes");
+    assert!(
+        capture
+            .quality
+            .issues
+            .iter()
+            .any(|issue| issue.contains("low SNR")),
+        "expected SNR warning, issues: {:?}",
+        capture.quality.issues
+    );
+}
+
 /// With only three takes, coherence cannot be computed (math-dsp needs at
 /// least 4 accepted takes): the CSV must OMIT the `coherence` column rather
 /// than fabricate an all-ones one, while the real noise floor is still
@@ -2481,6 +2564,91 @@ fn check_capture_clipping_ignores_undersized_tail_block() {
 }
 
 #[test]
+#[cfg(not(target_os = "ios"))]
+fn thd_warning_issue_flags_peak_above_threshold() {
+    let issue =
+        thd_warning_issue(&[20.0, 100.0, 1000.0], &[1.0, 12.3, 0.5], &[0.0, 0.0, 0.0]).unwrap();
+    assert!(issue.contains("12.3%"), "{issue}");
+    assert!(issue.contains("100 Hz"), "{issue}");
+    // At or below 10% stays quiet (strictly-above threshold).
+    assert!(thd_warning_issue(&[20.0, 100.0], &[1.0, 10.0], &[0.0, 0.0]).is_none());
+    // Non-sweep analyses report zeros and never trigger.
+    assert!(thd_warning_issue(&[20.0, 100.0], &[0.0, 0.0], &[0.0, 0.0]).is_none());
+}
+
+#[test]
+#[cfg(not(target_os = "ios"))]
+fn thd_warning_issue_ignores_nulls_nonfinite_and_shortens_mismatch() {
+    assert!(thd_warning_issue(&[], &[], &[]).is_none());
+    assert!(thd_warning_issue(&[100.0], &[f32::NAN], &[0.0]).is_none());
+    // NaN bins are skipped; the finite peak still fires.
+    let issue = thd_warning_issue(&[50.0, 100.0], &[f32::NAN, 15.0], &[0.0, 0.0]).unwrap();
+    assert!(issue.contains("100 Hz"), "{issue}");
+    // A huge THD at a deep response null is noise, not distortion: the
+    // 50% bin sits 30 dB below the peak and must not fire.
+    assert!(thd_warning_issue(&[100.0, 1000.0], &[1.0, 50.0], &[0.0, -30.0]).is_none());
+    // Only the shared prefix is compared: the 50% peak sits past the end
+    // of the shorter grid and must not fire.
+    assert!(thd_warning_issue(&[100.0], &[1.0, 50.0], &[0.0]).is_none());
+}
+
+#[test]
+#[cfg(not(target_os = "ios"))]
+fn snr_warning_issue_flags_low_broadband_snr() {
+    let loud = vec![1.0_f32; 1024];
+    // 20 dB SNR stays quiet.
+    assert!(snr_warning_issue(&loud, &vec![0.1; 1024]).is_none());
+    // ~6 dB SNR warns with the measured value.
+    let issue = snr_warning_issue(&loud, &vec![0.5; 1024]).unwrap();
+    assert!(issue.contains("6.0 dB"), "{issue}");
+    // Near-boundary values on both sides of the strictly-below threshold.
+    assert!(snr_warning_issue(&loud, &vec![0.316; 1024]).is_none());
+    assert!(snr_warning_issue(&loud, &vec![0.317; 1024]).is_some());
+}
+
+#[test]
+#[cfg(not(target_os = "ios"))]
+fn snr_warning_issue_ignores_degenerate_windows() {
+    let loud = vec![1.0_f32; 1024];
+    let silent = vec![0.0_f32; 1024];
+    assert!(snr_warning_issue(&[], &loud).is_none());
+    assert!(snr_warning_issue(&loud, &[]).is_none());
+    // Digital silence on either side: infinite SNR, or a dead take the
+    // lag gate already refused — nothing useful to say here.
+    assert!(snr_warning_issue(&loud, &silent).is_none());
+    assert!(snr_warning_issue(&silent, &loud).is_none());
+}
+
+#[test]
+#[cfg(not(target_os = "ios"))]
+fn active_take_span_lands_reference_active_content() {
+    // Reference without padding: the full reference length from lag on.
+    let reference = vec![1.0_f32; 100];
+    let take = vec![0.5_f32; 200];
+    let lag = LagEstimate {
+        lag_samples: 10,
+        ..lag_estimate_with_confidence(0.9)
+    };
+    assert_eq!(active_take_span(&take, &reference, &lag), &take[10..110]);
+    // Leading reference silence shifts the span past the padding.
+    let padded: Vec<f32> = [vec![0.0; 50], vec![1.0; 50]].concat();
+    let span = active_take_span(&take, &padded, &lag);
+    assert_eq!(span.len(), 50);
+    assert_eq!(span, &take[60..110]);
+    // Negative lag clamps to the take start; lag past the end is empty.
+    let early = LagEstimate {
+        lag_samples: -5,
+        ..lag_estimate_with_confidence(0.9)
+    };
+    assert_eq!(active_take_span(&take, &reference, &early), &take[0..95]);
+    let late = LagEstimate {
+        lag_samples: 500,
+        ..lag_estimate_with_confidence(0.9)
+    };
+    assert!(active_take_span(&take, &reference, &late).is_empty());
+}
+
+#[test]
 fn prepare_measurement_signal_validates_generates_and_pads() {
     let sample_rate = 48_000;
     let params = SignalParams::Sweep {
@@ -2631,4 +2799,66 @@ fn actionable_capture_error_passes_through_unclassified_errors() {
     let msg = actionable_capture_error("[test] Failed to load file", &"no such file: temp.wav");
     assert_eq!(msg, "[test] Failed to load file: no such file: temp.wav");
     assert!(!msg.contains("original error"), "{msg}");
+}
+
+#[test]
+fn stipa_signal_parses_validates_and_generates_deterministically() {
+    use std::str::FromStr as _;
+
+    assert_eq!(SignalType::from_str("stipa").unwrap(), SignalType::Stipa);
+    assert_eq!(SignalType::from_str("STI-PA").unwrap(), SignalType::Stipa);
+    assert_eq!(SignalType::Stipa.as_str(), "stipa");
+    assert!(validate_signal_params(SignalType::Stipa, &SignalParams::Stipa, 15.0, 48000).is_ok());
+    let error =
+        validate_signal_params(SignalType::Stipa, &SignalParams::Stipa, 15.0, 16000).unwrap_err();
+    assert!(error.contains("22050"), "{error}");
+    let first = generate_signal(SignalType::Stipa, &SignalParams::Stipa, 15.0, 48000).unwrap();
+    let second = generate_signal(SignalType::Stipa, &SignalParams::Stipa, 15.0, 48000).unwrap();
+    assert_eq!(first.len(), 15 * 48000);
+    assert_eq!(first, second);
+    assert!(first.iter().all(|sample| sample.is_finite()));
+    let prepared =
+        prepare_measurement_signal(SignalType::Stipa, &SignalParams::Stipa, 15.0, 48000).unwrap();
+    assert!(prepared.len() > first.len());
+}
+
+#[test]
+fn stipa_generate_analyze_self_reference_identity() {
+    use math_rir::sti_direct::{StipaOptions, analyze_stipa_direct};
+
+    // 11 s at 48 kHz through the capture generate path: a 10 s analysis
+    // window remains after the default 0.25 s edge trims.
+    let signal = generate_signal(SignalType::Stipa, &SignalParams::Stipa, 11.0, 48000).unwrap();
+    let options = StipaOptions::default();
+    // End-to-end shape check: the analyzer accepts generator output
+    // (rate/duration/energy gates) and a signal against itself scores
+    // exactly 1.0 in all 14 cells (math-audio handoff identity).
+    let identity = analyze_stipa_direct(&signal, Some(&signal), 48000.0, &options).unwrap();
+    for row in &identity.modulation_transfer {
+        for &mtf in row {
+            assert_eq!(mtf, 1.0);
+        }
+    }
+    assert!((identity.sti - 1.0).abs() < 1e-9, "sti={}", identity.sti);
+}
+
+#[test]
+fn stipa_generate_analyze_no_reference_recovers_sent_depth() {
+    use math_rir::sti_direct::{StipaOptions, analyze_stipa_direct};
+
+    // Clean generator output against the 0.55 sent-depth denominator, no
+    // loopback reference. Observed on the fixed generator (math-dsp time
+    // base per requirements §10): STI 0.752, per-cell MTF 0.755–1.0.
+    // Bounds keep ~0.05 margin for platform float variation; both sides
+    // are deterministic (seeded generator, assert_eq-stable analyzer), so
+    // a regression here means the sent depth or the tables drifted.
+    let signal = generate_signal(SignalType::Stipa, &SignalParams::Stipa, 11.0, 48000).unwrap();
+    let options = StipaOptions::default();
+    let absolute = analyze_stipa_direct(&signal, None, 48000.0, &options).unwrap();
+    for (band, row) in absolute.modulation_transfer.iter().enumerate() {
+        for (cell, &mtf) in row.iter().enumerate() {
+            assert!(mtf > 0.70, "band {band} cell {cell}: MTF {mtf}");
+        }
+    }
+    assert!(absolute.sti > 0.70, "sti={}", absolute.sti);
 }

@@ -1,6 +1,9 @@
 # Use `mbx` when installed, else plain `cargo` (mirrors ../math-audio).
 cargo := `if command -v mbx >/dev/null 2>&1; then echo mbx; else echo cargo; fi`
 
+_default:
+	just --list
+
 check:
     {{cargo}} check --workspace --all-targets
 

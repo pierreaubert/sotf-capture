@@ -15,6 +15,10 @@ pub mod analysis;
 #[cfg(not(target_os = "ios"))]
 pub mod clock;
 #[cfg(not(target_os = "ios"))]
+mod coherence;
+#[cfg(not(target_os = "ios"))]
+pub mod ctc;
+#[cfg(not(target_os = "ios"))]
 pub mod handoff;
 #[cfg(not(target_os = "ios"))]
 pub mod manifest;
@@ -123,11 +127,29 @@ pub struct CaptureTimingReference {
     pub sound_speed_uncertainty_m_s: f64,
 }
 
+/// Physical room dimensions in meters for RoomEQ Schroeder handling.
+///
+/// Length, width, and height are all required when present. Values are
+/// validated on plan load; RoomEQ resolves them into engine settings and
+/// falls back to its default Schroeder frequency when absent.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoomDimensions {
+    /// Room length in meters, finite and positive.
+    pub length: f64,
+    /// Room width in meters, finite and positive.
+    pub width: f64,
+    /// Room height in meters, finite and positive.
+    pub height: f64,
+}
+
 /// Explicit logarithmic sweep settings shared by all sources.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureSweep {
-    /// Sweep duration, excluding timing chirps and silence, in seconds.
+    /// Nominal sweep duration, excluding timing chirps and silence, in
+    /// seconds. With bass weighting this is the minimum; sub-100 Hz
+    /// octaves extend past it and the journal records the actual span.
     pub duration_secs: f64,
     /// Low sweep frequency in Hz.
     pub start_hz: f64,
@@ -135,6 +157,93 @@ pub struct CaptureSweep {
     pub end_hz: f64,
     /// Linear playback peak amplitude, in (0, 1].
     pub amplitude: f64,
+    /// Seconds per octave below 100 Hz, within [1, 10]; absent keeps the
+    /// legacy plain fixed-duration log sweep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bass_octave_duration_s: Option<f32>,
+}
+
+/// Delay-probe pass parameters, played once per source after the sweeps.
+///
+/// Probes run through the plan output device while the first microphone
+/// records; results land in the raw journal for RoomEQ delay evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureProbe {
+    /// Narrowband probe duration per channel in milliseconds.
+    pub probe_duration_ms: f32,
+    /// Silence gap between channel probes in milliseconds.
+    pub silence_duration_ms: f32,
+    /// Probe playback level in dBFS, within [-60, 0].
+    pub signal_level_db: f32,
+}
+
+/// Bass-anchor pass parameters: a steady low-frequency tone per source.
+///
+/// The lock-in phase at `bass_freq_hz` anchors low-frequency timing
+/// confidence. A plan loopback on the probe microphone's device turns the
+/// reported phase into loopback-corrected acoustic phase.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureBassAnchor {
+    /// Steady-state tone centre frequency in Hz, below Nyquist.
+    pub bass_freq_hz: f32,
+    /// Total tone length in seconds, steady portion plus fades.
+    pub bass_duration_s: f32,
+    /// Half-Hann fade-in/out length in milliseconds.
+    pub fade_ms: f32,
+    /// Lock-in sub-window count for the stability estimate, at least one.
+    pub num_windows: u16,
+    /// Silence gap between channel tones in milliseconds.
+    pub silence_duration_ms: f32,
+    /// Tone playback level in dBFS, within [-60, 0].
+    pub signal_level_db: f32,
+}
+
+/// Electrical loopback input recorded alongside acoustic takes.
+///
+/// Shared by the bass-anchor pass (same device as the probe microphone)
+/// and later CTC raw-sweep takes. Never a microphone: no calibration or
+/// position applies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureLoopback {
+    /// Exact audio input device ID or unique name.
+    pub device: String,
+    /// Zero-based channel within the selected input device.
+    pub input_channel: u16,
+}
+
+/// Binaural head position for one CTC capture session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureHeadPosition {
+    /// Stable identity shared across the merged head-position matrix.
+    pub id: String,
+    /// Head x/y/z in meters in the session coordinate frame.
+    pub x: f64,
+    /// Head y in meters (see [`CaptureHeadPosition::x`]).
+    pub y: f64,
+    /// Head z in meters (see [`CaptureHeadPosition::x`]).
+    pub z: f64,
+    /// Head yaw in degrees, 0 facing the reference axis.
+    pub yaw_deg: f64,
+}
+
+/// Crosstalk-cancellation capture declaration for one head position.
+///
+/// Names the simultaneously recorded ear-microphone pair. The plan loopback
+/// is recorded with every sweep take and backs RoomEQ loopback alignment;
+/// each head position is one session, merged later by `plan-ctc-merge`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureCtc {
+    /// Microphone identity recording the left ear (stereo channel 1).
+    pub left_ear: String,
+    /// Microphone identity recording the right ear (stereo channel 2).
+    pub right_ear: String,
+    /// Head position of this session.
+    pub head_position: CaptureHeadPosition,
 }
 
 /// Serializable multi-microphone session declaration.
@@ -163,6 +272,24 @@ pub struct CaptureSessionPlan {
     /// Without this declaration the first source channel emits timing chirps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing_reference: Option<CaptureTimingReference>,
+    /// Physical room dimensions in meters, projected to RoomEQ when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_dimensions: Option<RoomDimensions>,
+    /// Free-form room treatment, seating, and placement notes for RoomEQ.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_description: Option<String>,
+    /// Delay-probe pass after the sweeps; absent runs sweeps only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<CaptureProbe>,
+    /// Bass-anchor pass after the sweeps; absent runs sweeps only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bass_anchor: Option<CaptureBassAnchor>,
+    /// Electrical loopback input for anchor/CTC passes; never a microphone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loopback: Option<CaptureLoopback>,
+    /// CTC ear-pair capture for one head position; absent skips CTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctc: Option<CaptureCtc>,
 }
 
 fn default_repeat_count() -> u32 {
@@ -277,6 +404,94 @@ impl CaptureSessionPlan {
                 "capture session exceeds the 1024-take metadata limit",
             ));
         }
+        if let Some(room) = &self.room_dimensions {
+            let volume = room.length * room.width * room.height;
+            if ![room.length, room.width, room.height, volume]
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+            {
+                return Err(reject(
+                    "room dimensions require finite positive length, width, height, and volume in meters",
+                ));
+            }
+        }
+        if self
+            .setup_description
+            .as_deref()
+            .is_some_and(|note| note.trim().is_empty())
+        {
+            return Err(reject("setup description must be nonempty when supplied"));
+        }
+        if let Some(probe) = &self.probe {
+            if !probe.probe_duration_ms.is_finite()
+                || probe.probe_duration_ms <= 0.0
+                || !probe.silence_duration_ms.is_finite()
+                || probe.silence_duration_ms < 0.0
+                || !probe.signal_level_db.is_finite()
+                || !(-60.0..=0.0).contains(&probe.signal_level_db)
+            {
+                return Err(reject(
+                    "probe requires finite positive duration, nonnegative silence, and level in [-60, 0] dBFS",
+                ));
+            }
+        }
+        if let Some(anchor) = &self.bass_anchor {
+            let nyquist = f64::from(self.sample_rate_hz) / 2.0;
+            if !anchor.bass_freq_hz.is_finite()
+                || anchor.bass_freq_hz <= 0.0
+                || f64::from(anchor.bass_freq_hz) >= nyquist
+                || !anchor.bass_duration_s.is_finite()
+                || anchor.bass_duration_s <= 0.0
+                || !anchor.fade_ms.is_finite()
+                || anchor.fade_ms < 0.0
+                || f64::from(anchor.fade_ms) * 2.0 / 1000.0 > f64::from(anchor.bass_duration_s)
+                || anchor.num_windows == 0
+                || !anchor.silence_duration_ms.is_finite()
+                || anchor.silence_duration_ms < 0.0
+                || !anchor.signal_level_db.is_finite()
+                || !(-60.0..=0.0).contains(&anchor.signal_level_db)
+            {
+                return Err(reject(
+                    "bass anchor requires a sub-Nyquist tone, fades within its duration, at least one window, nonnegative silence, and level in [-60, 0] dBFS",
+                ));
+            }
+        }
+        if let Some(loopback) = &self.loopback {
+            if loopback.device.trim().is_empty()
+                || loopback.input_channel >= 64
+                || self.microphones.iter().any(|mic| {
+                    mic.device == loopback.device && mic.input_channel == loopback.input_channel
+                })
+            {
+                return Err(reject(
+                    "loopback route must be explicit, below channel 64, and distinct from every microphone route",
+                ));
+            }
+            if self.bass_anchor.is_some() && loopback.device != self.microphones[0].device {
+                return Err(reject(
+                    "bass-anchor loopback must share the probe microphone's device",
+                ));
+            }
+        }
+        if let Some(ctc) = &self.ctc {
+            let ears_known = |id: &str| self.microphones.iter().any(|mic| mic.id == id);
+            let head = &ctc.head_position;
+            if ctc.left_ear == ctc.right_ear
+                || !ears_known(&ctc.left_ear)
+                || !ears_known(&ctc.right_ear)
+                || head.id.trim().is_empty()
+                || ![head.x, head.y, head.z, head.yaw_deg]
+                    .iter()
+                    .all(|value| value.is_finite())
+            {
+                return Err(reject(
+                    "ctc requires two distinct known ear microphones and a finite head position with a nonempty id",
+                ));
+            }
+            if self.loopback.is_none() {
+                return Err(reject("ctc requires a plan loopback route"));
+            }
+        }
         let sweep = &self.sweep;
         if let Some(reference) = &self.timing_reference {
             if reference.output_channel >= 64
@@ -309,9 +524,25 @@ impl CaptureSessionPlan {
                 "sweep requires finite positive duration, ascending frequencies below Nyquist, and amplitude in (0, 1]",
             ));
         }
+        if sweep
+            .bass_octave_duration_s
+            .is_some_and(|bass| !bass.is_finite() || !(1.0..=10.0).contains(&bass))
+        {
+            return Err(reject(
+                "bass octave duration must be finite and within [1, 10] seconds",
+            ));
+        }
         // Budget includes chirps, decay gaps and engine startup/drain storage.
         // Match the engine's bounded per-microphone capture memory budget.
-        if (sweep.duration_secs + 14.0) * f64::from(self.sample_rate_hz) > 16_000_000.0 {
+        // Bass weighting extends the sweep past its nominal duration; the
+        // bound prices the weighted total, not the nominal one.
+        let sweep_seconds = octave_weighted_sweep_seconds(
+            sweep.start_hz,
+            sweep.end_hz,
+            sweep.bass_octave_duration_s,
+            sweep.duration_secs,
+        );
+        if (sweep_seconds + 14.0) * f64::from(self.sample_rate_hz) > 16_000_000.0 {
             return Err(reject(
                 "sweep duration exceeds bounded capture storage at this sample rate",
             ));
@@ -331,6 +562,69 @@ impl ValidatedCaptureSession {
     /// Inspect the frozen session configuration.
     pub fn plan(&self) -> &CaptureSessionPlan {
         &self.0
+    }
+}
+
+/// Nominal sweep seconds including bass weighting, if any.
+///
+/// Mirrors the octave-scaled generator's timing law (full dwell below
+/// 100 Hz, half to 1 kHz, quarter above, floored at the nominal duration)
+/// so validation prices the played span without generating audio. Unclamped
+/// start frequencies only widen the bound, never narrow it.
+pub(crate) fn octave_weighted_sweep_seconds(
+    start_hz: f64,
+    end_hz: f64,
+    bass_octave_duration_s: Option<f32>,
+    nominal_secs: f64,
+) -> f64 {
+    let Some(bass) = bass_octave_duration_s.map(f64::from) else {
+        return nominal_secs;
+    };
+    let zone = |lo: f64, hi: f64| {
+        if hi > lo { (hi / lo).log2() } else { 0.0 }
+    };
+    let weighted = zone(start_hz, 100.0f64.min(end_hz)) * bass
+        + zone(100.0f64.max(start_hz), 1000.0f64.min(end_hz)) * bass * 0.5
+        + zone(1000.0f64.max(start_hz), end_hz) * bass * 0.25;
+    weighted.max(nominal_secs)
+}
+
+/// Output channel emitting timing chirps on every source take.
+///
+/// A declared fixed emitter wins; otherwise the first source channel
+/// carries the chirps and takes stay arrival-aligned.
+pub fn timing_emitter_channel(session: &ValidatedCaptureSession) -> u16 {
+    session
+        .plan()
+        .timing_reference
+        .as_ref()
+        .map_or(session.plan().sources[0].output_channel, |reference| {
+            reference.output_channel
+        })
+}
+
+/// One-line timing-emitter declaration for validate/record reporting.
+///
+/// Names the chirp channel and whether a fixed emitter survey backs
+/// coherent use. Per-take reference identities resolve at record time.
+pub fn timing_emitter_summary(session: &ValidatedCaptureSession) -> String {
+    let channel = timing_emitter_channel(session);
+    match &session.plan().timing_reference {
+        Some(emitter) => format!(
+            "timing chirps on output channel {channel} (dedicated emitter at [{:.3}, {:.3}, {:.3}] m); per-take reference identity resolves at record time",
+            emitter.position_m[0], emitter.position_m[1], emitter.position_m[2]
+        ),
+        None => {
+            let source = session
+                .plan()
+                .sources
+                .iter()
+                .find(|source| source.output_channel == channel)
+                .map_or("unknown source", |source| source.id.as_str());
+            format!(
+                "timing chirps on output channel {channel} (source '{source}'); no fixed emitter declared, takes stay arrival-aligned and coherent use is forbidden"
+            )
+        }
     }
 }
 

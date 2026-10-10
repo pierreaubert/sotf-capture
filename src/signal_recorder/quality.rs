@@ -206,6 +206,98 @@ pub(super) fn check_lag_lock(lag: &LagEstimate, log_tag: &str) -> Result<(), Str
     Ok(())
 }
 
+/// Peak THD+N (%) above which a take gets a high-distortion quality
+/// issue. THD this high means the playback chain is driven far outside
+/// linear behavior (or the mic preamp is saturating without hard
+/// clipping); the deconvolved response around the peak is suspect.
+/// Non-sweep analyses report zero THD and never trigger this.
+#[cfg(not(target_os = "ios"))]
+pub(super) const THD_WARN_PERCENT: f32 = 10.0;
+
+/// Broadband SNR (dB) below which a single take gets a low-SNR quality
+/// issue. Repeat captures get the finer spectral assessment from math-dsp
+/// instead (`minimum_median_snr_db`, same 10 dB default); single takes
+/// supply no measured/noise pair, so broadband RMS stands in.
+#[cfg(not(target_os = "ios"))]
+pub(super) const SNR_WARN_DB: f32 = 10.0;
+
+/// Bins whose fundamental sits more than this far below the response peak
+/// are excluded from the THD verdict: where the room (or the excitation)
+/// has a deep null, the Farina harmonic windows measure noise against a
+/// near-zero fundamental and the ratio is meaningless.
+#[cfg(not(target_os = "ios"))]
+const THD_FUNDAMENTAL_GATE_DB: f32 = 20.0;
+
+/// Advisory issue when peak THD exceeds [`THD_WARN_PERCENT`], naming the
+/// peak value and its frequency. Only bins whose fundamental is within
+/// [`THD_FUNDAMENTAL_GATE_DB`] of the response peak count — THD at a deep
+/// null or past the excited band is noise, not distortion. Returns `None`
+/// for empty input, when no bin has a usable fundamental, or when every
+/// counted bin is at/below the threshold. The three slices pair by index;
+/// length mismatches shorten the comparison to the shared prefix.
+#[cfg(not(target_os = "ios"))]
+pub(super) fn thd_warning_issue(
+    frequencies: &[f32],
+    thd_percent: &[f32],
+    fundamental_db: &[f32],
+) -> Option<String> {
+    let peak_fundamental = fundamental_db
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .max_by(f32::total_cmp)?;
+    let floor = peak_fundamental - THD_FUNDAMENTAL_GATE_DB;
+    let (peak_freq, peak_thd) = frequencies
+        .iter()
+        .zip(thd_percent.iter())
+        .zip(fundamental_db.iter())
+        .filter(|((_, thd), _)| thd.is_finite())
+        .filter(|((_, _), fundamental)| **fundamental >= floor)
+        .max_by(|((_, left), _), ((_, right), _)| left.total_cmp(right))
+        .map(|((frequency, thd), _)| (*frequency, *thd))?;
+    if peak_thd > THD_WARN_PERCENT {
+        Some(format!(
+            "high distortion: peak THD {peak_thd:.1}% at {peak_freq:.0} Hz exceeds {THD_WARN_PERCENT:.0}% — lower the playback level and re-run"
+        ))
+    } else {
+        None
+    }
+}
+
+/// Advisory issue when the broadband SNR of a single take falls below
+/// [`SNR_WARN_DB`]. `active` is the lag-aligned sweep content of the take
+/// and `silence` its pre-sweep room-noise window; SNR is
+/// 20·log10(RMS(active)/RMS(silence)). Returns `None` when either window
+/// is empty, when either RMS is zero (digital silence means infinite SNR,
+/// and a fully dead take never survives the lag gate), or when the SNR is
+/// finite and at/above the threshold.
+#[cfg(not(target_os = "ios"))]
+pub(super) fn snr_warning_issue(active: &[f32], silence: &[f32]) -> Option<String> {
+    fn rms(samples: &[f32]) -> f64 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = samples
+            .iter()
+            .map(|&sample| f64::from(sample) * f64::from(sample))
+            .sum();
+        (sum / samples.len() as f64).sqrt()
+    }
+    let signal = rms(active);
+    let noise = rms(silence);
+    if signal.is_nan() || noise.is_nan() || signal <= 0.0 || noise <= 0.0 {
+        return None;
+    }
+    let snr_db = 20.0 * (signal / noise).log10();
+    if snr_db.is_finite() && snr_db < f64::from(SNR_WARN_DB) {
+        Some(format!(
+            "low SNR: broadband SNR {snr_db:.1} dB is below {SNR_WARN_DB:.1} dB — raise the playback level or reduce background noise"
+        ))
+    } else {
+        None
+    }
+}
+
 /// Build the per-take quality report.
 ///
 /// Single-sweep captures pass `None` for all three spectral inputs (see

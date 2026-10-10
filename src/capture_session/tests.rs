@@ -49,12 +49,329 @@ fn invalid_plans_fail_before_hardware_access() {
         |p| p.sweep.amplitude = 1.01,
         |p| p.sweep.amplitude = 0.0,
         |p| p.sweep.amplitude = 1e-100,
+        |p| {
+            p.room_dimensions = Some(RoomDimensions {
+                length: 0.0,
+                width: 4.0,
+                height: 2.5,
+            })
+        },
+        |p| {
+            p.room_dimensions = Some(RoomDimensions {
+                length: 5.0,
+                width: -4.0,
+                height: 2.5,
+            })
+        },
+        |p| {
+            p.room_dimensions = Some(RoomDimensions {
+                length: 5.0,
+                width: 4.0,
+                height: f64::NAN,
+            })
+        },
+        |p| {
+            p.room_dimensions = Some(RoomDimensions {
+                length: f64::INFINITY,
+                width: 4.0,
+                height: 2.5,
+            })
+        },
+        |p| {
+            p.room_dimensions = Some(RoomDimensions {
+                length: 1e200,
+                width: 1e200,
+                height: 1e200,
+            })
+        },
+        |p| p.setup_description = Some(String::new()),
+        |p| p.setup_description = Some("   ".into()),
+        |p| {
+            p.probe = Some(CaptureProbe {
+                probe_duration_ms: 0.0,
+                silence_duration_ms: 500.0,
+                signal_level_db: -6.0,
+            })
+        },
+        |p| {
+            p.probe = Some(CaptureProbe {
+                probe_duration_ms: 1000.0,
+                silence_duration_ms: -1.0,
+                signal_level_db: -6.0,
+            })
+        },
+        |p| {
+            p.probe = Some(CaptureProbe {
+                probe_duration_ms: 1000.0,
+                silence_duration_ms: 500.0,
+                signal_level_db: 1.0,
+            })
+        },
+        |p| {
+            p.bass_anchor = Some(CaptureBassAnchor {
+                bass_freq_hz: 24000.0,
+                bass_duration_s: 2.0,
+                fade_ms: 50.0,
+                num_windows: 8,
+                silence_duration_ms: 500.0,
+                signal_level_db: -6.0,
+            })
+        },
+        |p| {
+            p.bass_anchor = Some(CaptureBassAnchor {
+                bass_freq_hz: 30.0,
+                bass_duration_s: 0.05,
+                fade_ms: 50.0,
+                num_windows: 8,
+                silence_duration_ms: 500.0,
+                signal_level_db: -6.0,
+            })
+        },
+        |p| {
+            p.bass_anchor = Some(CaptureBassAnchor {
+                bass_freq_hz: 30.0,
+                bass_duration_s: 2.0,
+                fade_ms: 50.0,
+                num_windows: 0,
+                silence_duration_ms: 500.0,
+                signal_level_db: -6.0,
+            })
+        },
+        |p| {
+            p.loopback = Some(CaptureLoopback {
+                device: p.microphones[0].device.clone(),
+                input_channel: p.microphones[0].input_channel,
+            })
+        },
+        |p| {
+            p.bass_anchor = Some(CaptureBassAnchor {
+                bass_freq_hz: 30.0,
+                bass_duration_s: 2.0,
+                fade_ms: 50.0,
+                num_windows: 8,
+                silence_duration_ms: 500.0,
+                signal_level_db: -6.0,
+            });
+            p.loopback = Some(CaptureLoopback {
+                device: "other-device".into(),
+                input_channel: 3,
+            })
+        },
+        |p| p.sweep.bass_octave_duration_s = Some(0.5),
+        |p| p.sweep.bass_octave_duration_s = Some(11.0),
+        |p| p.sweep.bass_octave_duration_s = Some(f32::NAN),
+        |p| {
+            p.loopback = Some(CaptureLoopback {
+                device: p.microphones[0].device.clone(),
+                input_channel: 7,
+            });
+            p.ctc = Some(CaptureCtc {
+                left_ear: "seat-left".into(),
+                right_ear: "seat-ghost".into(),
+                head_position: CaptureHeadPosition {
+                    id: "head-0".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    yaw_deg: 0.0,
+                },
+            })
+        },
+        |p| {
+            p.loopback = Some(CaptureLoopback {
+                device: p.microphones[0].device.clone(),
+                input_channel: 7,
+            });
+            p.ctc = Some(CaptureCtc {
+                left_ear: "seat-left".into(),
+                right_ear: "seat-left".into(),
+                head_position: CaptureHeadPosition {
+                    id: "head-0".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    yaw_deg: 0.0,
+                },
+            })
+        },
+        |p| {
+            p.ctc = Some(CaptureCtc {
+                left_ear: "seat-left".into(),
+                right_ear: "seat-right".into(),
+                head_position: CaptureHeadPosition {
+                    id: "head-0".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    yaw_deg: 0.0,
+                },
+            })
+        },
+        |p| {
+            p.loopback = Some(CaptureLoopback {
+                device: p.microphones[0].device.clone(),
+                input_channel: 7,
+            });
+            p.ctc = Some(CaptureCtc {
+                left_ear: "seat-left".into(),
+                right_ear: "seat-right".into(),
+                head_position: CaptureHeadPosition {
+                    id: "  ".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    z: f64::NAN,
+                    yaw_deg: 0.0,
+                },
+            })
+        },
     ];
     for (index, change) in cases.iter().enumerate() {
         let mut value = plan();
         change(&mut value);
         assert!(value.validate().is_err(), "invalid case {index} accepted");
     }
+}
+
+#[test]
+fn room_dimensions_and_setup_description_round_trip() {
+    let mut value = plan();
+    value.room_dimensions = Some(RoomDimensions {
+        length: 5.0,
+        width: 4.0,
+        height: 2.5,
+    });
+    value.setup_description = Some("Treated room; mic at main seat".into());
+    let session = value.validate().unwrap();
+    let json = serde_json::to_string(session.plan()).unwrap();
+    assert!(json.contains("room_dimensions"));
+    assert!(json.contains("setup_description"));
+    let restored: CaptureSessionPlan = serde_json::from_str(&json).unwrap();
+    let frozen = restored.validate().unwrap();
+    assert_eq!(
+        frozen.plan().room_dimensions,
+        Some(RoomDimensions {
+            length: 5.0,
+            width: 4.0,
+            height: 2.5,
+        })
+    );
+    assert_eq!(
+        frozen.plan().setup_description.as_deref(),
+        Some("Treated room; mic at main seat")
+    );
+}
+
+#[test]
+fn timing_emitter_prefers_declared_reference_over_first_source() {
+    let fallback = plan().validate().unwrap();
+    assert_eq!(timing_emitter_channel(&fallback), 0);
+    let summary = timing_emitter_summary(&fallback);
+    assert!(summary.contains("output channel 0"), "{summary}");
+    assert!(summary.contains("source 'left'"), "{summary}");
+    assert!(summary.contains("arrival-aligned"), "{summary}");
+
+    let mut declared = plan();
+    declared.timing_reference = Some(CaptureTimingReference {
+        output_channel: 5,
+        position_m: [1.0, 2.0, 3.0],
+        position_uncertainty_mm: 0.5,
+        sound_speed_m_s: 343.0,
+        sound_speed_uncertainty_m_s: 1.0,
+    });
+    let fixed = declared.validate().unwrap();
+    assert_eq!(timing_emitter_channel(&fixed), 5);
+    let summary = timing_emitter_summary(&fixed);
+    assert!(summary.contains("output channel 5"), "{summary}");
+    assert!(summary.contains("dedicated emitter"), "{summary}");
+    assert!(summary.contains("[1.000, 2.000, 3.000]"), "{summary}");
+}
+
+#[test]
+fn auxiliary_sections_round_trip_when_valid() {
+    let mut value = plan();
+    value.probe = Some(CaptureProbe {
+        probe_duration_ms: 1000.0,
+        silence_duration_ms: 500.0,
+        signal_level_db: -6.0,
+    });
+    value.bass_anchor = Some(CaptureBassAnchor {
+        bass_freq_hz: 30.0,
+        bass_duration_s: 2.0,
+        fade_ms: 50.0,
+        num_windows: 8,
+        silence_duration_ms: 500.0,
+        signal_level_db: -6.0,
+    });
+    value.loopback = Some(CaptureLoopback {
+        device: value.microphones[0].device.clone(),
+        input_channel: 7,
+    });
+    let frozen = value.validate().unwrap();
+    let restored: CaptureSessionPlan =
+        serde_json::from_slice(&serde_json::to_vec(frozen.plan()).unwrap()).unwrap();
+    let frozen = restored.validate().unwrap();
+    assert!(frozen.plan().probe.is_some());
+    assert!(frozen.plan().bass_anchor.is_some());
+    assert_eq!(frozen.plan().loopback.as_ref().unwrap().input_channel, 7);
+}
+
+#[test]
+fn storage_budget_prices_bass_weighted_sweeps() {
+    let mut heavy = plan();
+    heavy.sample_rate_hz = 192000;
+    heavy.sweep.duration_secs = 30.0;
+    heavy.sweep.start_hz = 1.0;
+    heavy.sweep.bass_octave_duration_s = Some(10.0);
+    let error = heavy.validate().unwrap_err().to_string();
+    assert!(error.contains("bounded capture storage"), "{error}");
+
+    let mut plain = plan();
+    plain.sample_rate_hz = 192000;
+    plain.sweep.duration_secs = 30.0;
+    plain.validate().unwrap();
+
+    let mut weighted = plan();
+    weighted.sweep.bass_octave_duration_s = Some(3.0);
+    let frozen = weighted.clone().validate().unwrap();
+    assert_eq!(frozen.plan().sweep.bass_octave_duration_s, Some(3.0));
+    let json = serde_json::to_string(&weighted).unwrap();
+    assert!(json.contains("bass_octave_duration_s"));
+}
+
+#[test]
+fn ctc_declaration_round_trips_when_valid() {
+    let mut value = plan();
+    value.loopback = Some(CaptureLoopback {
+        device: value.microphones[0].device.clone(),
+        input_channel: 7,
+    });
+    value.ctc = Some(CaptureCtc {
+        left_ear: "seat-left".into(),
+        right_ear: "seat-right".into(),
+        head_position: CaptureHeadPosition {
+            id: "head-0".into(),
+            x: 1.0,
+            y: 2.0,
+            z: 1.2,
+            yaw_deg: 15.0,
+        },
+    });
+    let frozen = value.clone().validate().unwrap();
+    assert!(frozen.plan().ctc.is_some());
+    let json = serde_json::to_string(&value).unwrap();
+    assert!(json.contains("\"ctc\""));
+    let restored: CaptureSessionPlan = serde_json::from_str(&json).unwrap();
+    restored.validate().unwrap();
+}
+
+#[test]
+fn legacy_plan_without_room_fields_stays_valid() {
+    let json = serde_json::to_string(&plan()).unwrap();
+    assert!(!json.contains("room_dimensions"));
+    assert!(!json.contains("setup_description"));
+    let frozen = plan().validate().unwrap();
+    assert_eq!(frozen.plan().room_dimensions, None);
+    assert_eq!(frozen.plan().setup_description, None);
 }
 
 #[test]

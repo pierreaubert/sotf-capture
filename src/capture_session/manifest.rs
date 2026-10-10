@@ -5,9 +5,14 @@ use super::clock::io::ClockProcessedManifest;
 use super::{CalibrationOrientation, CaptureGeometry};
 use autoeq::capture_provenance::{CaptureCorrection, CaptureProvenance, CaptureTakeProvenance};
 use autoeq::read::{MeasurementMultiple, MeasurementRef};
-use autoeq::roomeq::{MeasurementSource, RecordingConfiguration, RoomConfig, SpeakerConfig};
+use autoeq::roomeq::{
+    BassAnchorChannelResultLegacy, BassAnchorResultsLegacy, MeasuredIrSource, MeasurementSource,
+    ProbeChannelResultLegacy, ProbeResultsLegacy, RecordingConfiguration, RoomConfig,
+    RoomDimensions, SpeakerConfig, validate_measured_ir_map,
+};
 use autoeq::{MeasurementProvenance, ProvenanceCaptureKind};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 
 fn measurement_quality_passed(analysis: &super::analysis::CaptureAnalysisReport) -> bool {
     analysis.magnitude_file.is_some()
@@ -133,24 +138,189 @@ pub fn recording_configuration(report: &ClockProcessedManifest) -> Result<RoomCo
     }
     Ok(RoomConfig {
         speakers,
+        measured_impulse_responses: measured_impulse_responses(report)?,
         recording_config: Some(RecordingConfiguration {
             capture_handoff_file: Some(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME.into()),
             recording_sample_rate: Some(report.plan.sample_rate_hz),
             recording_channels: Some(report.plan.microphones.len()),
             signal_type: Some("Sweep".into()),
-            signal_duration_secs: Some(report.plan.sweep.duration_secs as f32),
+            signal_duration_secs: Some(recording_signal_duration_secs(report)),
+            bass_octave_duration_s: Some(recording_bass_octave_duration_s(&report.plan)),
             signal_level_db: Some((20.0 * report.plan.sweep.amplitude.log10()) as f32),
             sweep_start_freq: Some(report.plan.sweep.start_hz as f32),
             sweep_end_freq: Some(report.plan.sweep.end_hz as f32),
             num_sweeps: Some(1),
-            setup_description: Some("Calibrated multi-microphone capture. Phase requires accepted shared-reference artifacts and frequency-specific clock eligibility. See capture-clock.json for raw artifacts, timing bandwidth and review issues.".into()),
+            room_dimensions: recording_room_dimensions(&report.plan),
+            setup_description: Some(recording_setup_description(&report.plan)),
+            probe_results: report
+                .probe_pass
+                .as_ref()
+                .map(|pass| legacy_probe_results(&pass.results)),
+            probe_wav_relative: report.probe_pass.as_ref().map(|pass| pass.wav_file.clone()),
+            bass_anchor_results: report
+                .bass_anchor_pass
+                .as_ref()
+                .map(|pass| legacy_bass_anchor_results(&pass.results)),
+            bass_anchor_wav_relative: report
+                .bass_anchor_pass
+                .as_ref()
+                .map(|pass| pass.wav_file.clone()),
+            bass_probe_freq_hz: report
+                .bass_anchor_pass
+                .as_ref()
+                .map(|pass| pass.results.bass_freq_hz),
+            bass_probe_duration_s: report
+                .bass_anchor_pass
+                .as_ref()
+                .map(|pass| pass.results.bass_duration_s),
             ..Default::default()
         }),
         ..Default::default()
     })
 }
 
-fn selected_takes<'a>(
+/// Default provenance note when the plan carries no setup description.
+///
+/// Kept distinct from user notes: plan text is passed through verbatim and
+/// never merged with this fallback.
+const DEFAULT_SETUP_DESCRIPTION: &str = "Calibrated multi-microphone capture. Phase requires accepted shared-reference artifacts and frequency-specific clock eligibility. See capture-clock.json for raw artifacts, timing bandwidth and review issues.";
+
+fn recording_room_dimensions(plan: &super::CaptureSessionPlan) -> Option<RoomDimensions> {
+    plan.room_dimensions.map(|room| RoomDimensions {
+        length: room.length,
+        width: room.width,
+        height: room.height,
+    })
+}
+
+fn recording_setup_description(plan: &super::CaptureSessionPlan) -> String {
+    plan.setup_description
+        .clone()
+        .unwrap_or_else(|| DEFAULT_SETUP_DESCRIPTION.into())
+}
+
+/// Actual played sweep seconds from the journaled stimulus layout.
+///
+/// Bass weighting extends the sweep past its nominal duration; RoomEQ
+/// must see the played span, not the nominal one.
+fn recording_signal_duration_secs(report: &ClockProcessedManifest) -> f32 {
+    report.stimulus.sweep_samples as f32 / f64::from(report.plan.sample_rate_hz) as f32
+}
+
+/// Bass dwell in seconds per octave below 100 Hz.
+///
+/// The plan value when bass weighting was played, else the effective dwell
+/// of the plain log sweep (equal time per octave across the whole band).
+fn recording_bass_octave_duration_s(plan: &super::CaptureSessionPlan) -> f32 {
+    plan.sweep.bass_octave_duration_s.unwrap_or_else(|| {
+        (plan.sweep.duration_secs / (plan.sweep.end_hz / plan.sweep.start_hz).log2()) as f32
+    })
+}
+
+/// Translate runner probe results into the autoeq-local legacy mirror.
+fn legacy_probe_results(results: &crate::signal_recorder::ProbeDelayResults) -> ProbeResultsLegacy {
+    ProbeResultsLegacy {
+        channels: results
+            .channels
+            .iter()
+            .map(|channel| ProbeChannelResultLegacy {
+                channel_name: channel.channel_name.clone(),
+                channel_index: channel.channel_index,
+                arrival_ms: channel.arrival_ms,
+                gain_db: channel.gain_db,
+                snr_db: channel.snr_db,
+            })
+            .collect(),
+        sample_rate: results.sample_rate,
+        alignment_delays_ms: results.alignment_delays_ms.clone(),
+    }
+}
+
+/// Translate runner anchor results into the autoeq-local legacy mirror.
+fn legacy_bass_anchor_results(
+    results: &crate::signal_recorder::BassAnchorResults,
+) -> BassAnchorResultsLegacy {
+    BassAnchorResultsLegacy {
+        channels: results
+            .channels
+            .iter()
+            .map(|channel| BassAnchorChannelResultLegacy {
+                channel_name: channel.channel_name.clone(),
+                channel_index: channel.channel_index,
+                bass_anchor_phase_deg: channel.bass_anchor_phase_deg,
+                bass_anchor_magnitude: channel.bass_anchor_magnitude,
+                bass_anchor_stability_deg: channel.bass_anchor_stability_deg,
+                bass_anchor_loopback_phase_deg: channel.bass_anchor_loopback_phase_deg,
+                bass_anchor_coherence: channel.bass_anchor_coherence,
+            })
+            .collect(),
+        sample_rate: results.sample_rate,
+        bass_freq_hz: results.bass_freq_hz,
+        bass_duration_s: results.bass_duration_s,
+    }
+}
+
+/// Measured room IR declarations, one per source, from one microphone.
+///
+/// RoomEQ admits a single IR per delivered channel, so the selected
+/// microphone (explicit `--ir-microphone`, else the first plan microphone)
+/// backs every source entry. Sources whose take lacks a deconvolved IR are
+/// omitted; their report cells stay pending rather than borrowing audio.
+fn measured_impulse_responses(
+    report: &ClockProcessedManifest,
+) -> Result<BTreeMap<String, MeasuredIrSource>, String> {
+    let selected = selected_takes(report)?;
+    let microphone = report
+        .ir_microphone
+        .as_deref()
+        .or_else(|| {
+            report
+                .plan
+                .microphones
+                .first()
+                .map(|microphone| microphone.id.as_str())
+        })
+        .ok_or("capture plan declares no microphones")?;
+    if !report
+        .plan
+        .microphones
+        .iter()
+        .any(|candidate| candidate.id == microphone)
+    {
+        return Err(format!("unknown IR microphone: {microphone}"));
+    }
+    let mut declarations = BTreeMap::new();
+    for source in &report.plan.sources {
+        let take = selected
+            .get(&(source.id.as_str(), microphone))
+            .ok_or_else(|| format!("{}/{}: selected take is missing", source.id, microphone))?;
+        let Some(csv) = take
+            .analysis
+            .as_ref()
+            .and_then(|analysis| analysis.common_reference.as_ref())
+            .and_then(|phase| phase.impulse_csv_file.clone())
+        else {
+            continue;
+        };
+        if !autoeq::capture_handoff::portable_capture_filename(&csv) {
+            return Err("measured IR artifact must be a local filename".into());
+        }
+        declarations.insert(
+            source.id.clone(),
+            MeasuredIrSource {
+                output_channel: None,
+                driver: None,
+                path: PathBuf::from(csv),
+                sample_rate_hz: Some(f64::from(report.plan.sample_rate_hz)),
+                timing_reference_id: take.clock.reference_id.clone(),
+            },
+        );
+    }
+    validate_measured_ir_map(&declarations)?;
+    Ok(declarations)
+}
+
+pub(crate) fn selected_takes<'a>(
     report: &'a ClockProcessedManifest,
 ) -> Result<HashMap<(&'a str, &'a str), &'a super::clock::io::ClockProcessedTake>, String> {
     let selected_ids = if let Some(selected_ids) = &report.selected_take_ids {
@@ -287,4 +457,261 @@ pub(crate) fn take_provenance(
             .as_ref()
             .is_some_and(measurement_quality_passed),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::analysis::{CaptureAnalysisReport, CapturePhaseArtifacts};
+    use super::super::clock::CaptureClockBasis;
+    use super::super::clock::io::{ClockProcessedManifest, ClockProcessedTake};
+    use super::super::protocol::CaptureStimulusLayout;
+    use super::super::record::RawCaptureTake;
+    use super::super::{CaptureSessionPlan, RoomDimensions};
+    use super::{
+        DEFAULT_SETUP_DESCRIPTION, measured_impulse_responses, recording_room_dimensions,
+        recording_setup_description,
+    };
+
+    fn plan() -> CaptureSessionPlan {
+        serde_json::from_str(include_str!("../../tests/fixtures/capture-session.json")).unwrap()
+    }
+
+    fn fabricated_take(
+        source_id: &str,
+        microphone_id: &str,
+        index: usize,
+        impulse_csv: Option<&str>,
+    ) -> ClockProcessedTake {
+        ClockProcessedTake {
+            raw: RawCaptureTake {
+                take_id: format!("take-{source_id}-{microphone_id}"),
+                repeat_index: 0,
+                device_id: "usb".into(),
+                output_device_id: "dac".into(),
+                source_id: source_id.into(),
+                microphone_id: microphone_id.into(),
+                wav_file: format!("take-{index:03}.wav"),
+                samples: 1024,
+                input_sample_format: "F32".into(),
+                output_sample_format: "F32".into(),
+                peak_amplitude: 0.1,
+                clipped_samples: 0,
+            },
+            audio_file: format!("take-{index:03}.wav"),
+            clock: super::super::clock::CaptureClockProvenance {
+                device_id: "usb".into(),
+                offset_samples: Some(0.0),
+                skew_ppm: Some(0.0),
+                residual_uncertainty_us: Some(20.0),
+                marker_uncertainty_us: Some(10.0),
+                start_confidence_db: Some(30.0),
+                end_confidence_db: Some(30.0),
+                correction_applied: "resampled".into(),
+                basis: CaptureClockBasis::FixedAcousticReference,
+                reference_id: Some("dac:0".into()),
+                max_abs_skew_ppm: 200.0,
+                magnitude_only_reason: None,
+            },
+            analysis: Some(CaptureAnalysisReport {
+                magnitude_file: Some(format!("take-{index:03}-magnitude.csv")),
+                clipped_samples: 0,
+                broadband_snr_db: None,
+                frequency_snr: Vec::new(),
+                common_reference: impulse_csv.map(|csv| CapturePhaseArtifacts {
+                    response_file: format!("take-{index:03}-phase.csv"),
+                    impulse_file: format!("take-{index:03}-ir.json"),
+                    impulse_csv_file: Some(csv.into()),
+                    sti: None,
+                    coherence_file: None,
+                    timing_limit_hz: 1250.0,
+                    low_hz: 20.0,
+                    high_hz: 20000.0,
+                }),
+                issues: Vec::new(),
+            }),
+        }
+    }
+
+    fn fabricated_report(ir_microphone: Option<&str>) -> ClockProcessedManifest {
+        let plan = plan();
+        let takes = vec![
+            fabricated_take("left", "seat-left", 0, Some("take-000-ir.csv")),
+            fabricated_take("left", "seat-right", 1, None),
+            fabricated_take("right", "seat-left", 2, Some("take-002-ir.csv")),
+            fabricated_take("right", "seat-right", 3, None),
+        ];
+        ClockProcessedManifest {
+            version: 1,
+            plan,
+            raw_status: None,
+            selected_take_ids: None,
+            ir_microphone: ir_microphone.map(str::to_owned),
+            timing_reference_output_channel: Some(0),
+            parent_inventory_file: None,
+            stimulus: CaptureStimulusLayout {
+                sample_rate_hz: 48000,
+                start_chirp_offset: 0,
+                end_chirp_offset: 0,
+                chirp_samples: 0,
+                sweep_offset: 0,
+                sweep_samples: 5 * 48000,
+                total_samples: 0,
+            },
+            calibrations: ["seat-left", "seat-right"]
+                .into_iter()
+                .enumerate()
+                .map(
+                    |(index, microphone)| super::super::record::CaptureCalibration {
+                        microphone_id: microphone.into(),
+                        file: format!("calibration-{index:02}.txt"),
+                        sha256: "abc123".into(),
+                    },
+                )
+                .collect(),
+            takes,
+            pending_processing: Vec::new(),
+            probe_pass: None,
+            bass_anchor_pass: None,
+            loopback_files: Vec::new(),
+            ctc_measurements: None,
+            ctc_files: Vec::new(),
+            recording_manifest: None,
+            reflection_reports: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn measured_map_uses_first_microphone_by_default() {
+        let map = measured_impulse_responses(&fabricated_report(None)).unwrap();
+        assert_eq!(map.len(), 2);
+        for (source, file) in [("left", "take-000-ir.csv"), ("right", "take-002-ir.csv")] {
+            let entry = &map[source];
+            assert_eq!(entry.path.to_str(), Some(file));
+            assert_eq!(entry.sample_rate_hz, Some(48000.0));
+            assert_eq!(entry.timing_reference_id.as_deref(), Some("dac:0"));
+            assert!(entry.output_channel.is_none());
+            assert!(entry.driver.is_none());
+        }
+    }
+
+    #[test]
+    fn measured_map_omits_sources_without_a_deconvolved_ir() {
+        let map = measured_impulse_responses(&fabricated_report(Some("seat-right"))).unwrap();
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn measured_map_refuses_unknown_microphones() {
+        assert!(measured_impulse_responses(&fabricated_report(Some("seat-ghost"))).is_err());
+    }
+
+    #[test]
+    fn configuration_projects_auxiliary_passes_verbatim() {
+        use super::super::record::{CaptureBassAnchorPass, CaptureProbePass};
+        use crate::signal_recorder::{
+            BassAnchorChannelResult, BassAnchorResults, ProbeDelayChannelResult, ProbeDelayResults,
+        };
+
+        let mut report = fabricated_report(None);
+        report.probe_pass = Some(CaptureProbePass {
+            wav_file: "probe.wav".into(),
+            microphone_id: "seat-left".into(),
+            results: ProbeDelayResults {
+                channels: vec![ProbeDelayChannelResult {
+                    channel_name: "left".into(),
+                    channel_index: 0,
+                    arrival_ms: 1.5,
+                    gain_db: -3.0,
+                    snr_db: 40.0,
+                }],
+                sample_rate: 48000,
+                alignment_delays_ms: vec![0.5],
+            },
+        });
+        report.bass_anchor_pass = Some(CaptureBassAnchorPass {
+            wav_file: "bass-anchor.wav".into(),
+            microphone_id: "seat-left".into(),
+            loopback_channel: Some(7),
+            results: BassAnchorResults {
+                channels: vec![BassAnchorChannelResult {
+                    channel_name: "left".into(),
+                    channel_index: 0,
+                    bass_anchor_phase_deg: 12.0,
+                    bass_anchor_magnitude: 0.5,
+                    bass_anchor_stability_deg: 2.0,
+                    bass_anchor_loopback_phase_deg: Some(3.0),
+                    bass_anchor_coherence: Some(0.98),
+                }],
+                sample_rate: 48000,
+                bass_freq_hz: 30.0,
+                bass_duration_s: 2.0,
+            },
+        });
+        let configuration = super::recording_configuration(&report).unwrap();
+        let recording = configuration.recording_config.as_ref().unwrap();
+        let probe = recording.probe_results.as_ref().unwrap();
+        assert_eq!(probe.channels[0].arrival_ms, 1.5);
+        assert_eq!(probe.alignment_delays_ms, vec![0.5]);
+        assert_eq!(probe.sample_rate, 48000);
+        assert_eq!(recording.probe_wav_relative.as_deref(), Some("probe.wav"));
+        let anchor = recording.bass_anchor_results.as_ref().unwrap();
+        assert_eq!(anchor.channels[0].bass_anchor_phase_deg, 12.0);
+        assert_eq!(anchor.channels[0].bass_anchor_coherence, Some(0.98));
+        assert_eq!(
+            recording.bass_anchor_wav_relative.as_deref(),
+            Some("bass-anchor.wav")
+        );
+        assert_eq!(recording.bass_probe_freq_hz, Some(30.0));
+        assert_eq!(recording.bass_probe_duration_s, Some(2.0));
+
+        let bare = super::recording_configuration(&fabricated_report(None)).unwrap();
+        let recording = bare.recording_config.as_ref().unwrap();
+        assert_eq!(recording.signal_duration_secs, Some(5.0));
+        let effective = (5.0 / 1000f64.log2()) as f32;
+        assert!((recording.bass_octave_duration_s.unwrap() - effective).abs() < 1e-6);
+        assert!(recording.probe_results.is_none());
+        assert!(recording.probe_wav_relative.is_none());
+        assert!(recording.bass_anchor_results.is_none());
+        assert!(recording.bass_anchor_wav_relative.is_none());
+        assert!(recording.bass_probe_freq_hz.is_none());
+        assert!(recording.bass_probe_duration_s.is_none());
+
+        let mut weighted = fabricated_report(None);
+        weighted.plan.sweep.bass_octave_duration_s = Some(3.0);
+        let weighted = super::recording_configuration(&weighted).unwrap();
+        assert_eq!(
+            weighted
+                .recording_config
+                .as_ref()
+                .unwrap()
+                .bass_octave_duration_s,
+            Some(3.0)
+        );
+    }
+
+    #[test]
+    fn room_projection_passes_dimensions_through_verbatim() {
+        let mut value = plan();
+        assert!(recording_room_dimensions(&value).is_none());
+        value.room_dimensions = Some(RoomDimensions {
+            length: 5.0,
+            width: 4.0,
+            height: 2.5,
+        });
+        let projected = recording_room_dimensions(&value).unwrap();
+        assert_eq!(projected.length, 5.0);
+        assert_eq!(projected.width, 4.0);
+        assert_eq!(projected.height, 2.5);
+    }
+
+    #[test]
+    fn setup_description_falls_back_without_merging() {
+        let mut value = plan();
+        assert_eq!(
+            recording_setup_description(&value),
+            DEFAULT_SETUP_DESCRIPTION
+        );
+        value.setup_description = Some("Treated room".into());
+        assert_eq!(recording_setup_description(&value), "Treated room");
+    }
 }
