@@ -162,7 +162,8 @@ fn public_surface_emulated_two_mic_capture() {
 #[test]
 fn public_surface_multi_take_capture_reports_coherent_quality() {
     let dir = tempfile::tempdir().unwrap();
-    let sweep = sweep_2s();
+    let mut sweep = vec![0.0; SAMPLE_RATE as usize / 10];
+    sweep.extend(sweep_2s());
     let temp_wav = sotf_capture::signal_recorder::write_temp_wav(&sweep, SAMPLE_RATE, 1).unwrap();
     let wav_paths = vec![dir.path().join("mic0.wav"), dir.path().join("mic1.wav")];
     let csv_paths = vec![dir.path().join("mic0.csv"), dir.path().join("mic1.csv")];
@@ -200,14 +201,78 @@ fn public_surface_multi_take_capture_reports_coherent_quality() {
         assert!(analysis.quality.mean_coherence.is_some_and(|coherence| {
             coherence.is_finite() && (0.0..=1.0).contains(&coherence)
         }));
+        assert!(analysis.quality.median_snr_db.is_some_and(f32::is_finite));
         // Coherent-repeat metrics live in the full quality summary. The
         // THD advisory remains separately represented as a typed finding.
         assert!(analysis.quality_findings.iter().any(|finding| {
             finding.metric == sotf_capture::quality::QualityMetric::TotalHarmonicDistortion
         }));
         let csv = std::fs::read_to_string(csv_path).unwrap();
-        assert!(csv.lines().next().unwrap().contains("coherence"));
+        let header = csv.lines().next().unwrap();
+        assert!(header.contains("coherence"));
+        assert!(header.contains("noise_floor_db"));
     }
+}
+
+#[test]
+fn public_repeat_capture_keeps_digital_silence_snr_unknown() {
+    use sotf_capture::quality::{QualityMetric, QualityPolicy, QualityStatus};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut sweep = vec![0.0; SAMPLE_RATE as usize / 10];
+    sweep.extend(sweep_2s());
+    let temp_wav = sotf_capture::signal_recorder::write_temp_wav(&sweep, SAMPLE_RATE, 1).unwrap();
+    let recorded_wav = dir.path().join("recorded.wav");
+    let csv = dir.path().join("analysis.csv");
+    let wire = VirtualWire::for_profile(FakeAudioProfile::UnknownEvidence);
+    let mut playback = wire.playback("repeat_unknown_snr");
+    let mut recorder = wire.recorder("repeat_unknown_snr");
+
+    let capture = record_and_analyze_with_recorder(
+        &mut playback,
+        &mut recorder,
+        temp_wav.path(),
+        &recorded_wav,
+        &sweep,
+        SAMPLE_RATE,
+        &csv,
+        0,
+        0,
+        None,
+        None,
+        None,
+        Some((100.0, 20_000.0)),
+        3,
+        None,
+    )
+    .expect("three exact-silence takes still produce a response analysis");
+
+    let snr = capture
+        .quality_findings
+        .iter()
+        .find(|finding| finding.metric == QualityMetric::BroadbandSnr)
+        .expect("repeat-capture SNR finding");
+    assert_eq!(snr.policy, QualityPolicy::SweepAnalysis);
+    assert_eq!(snr.status, QualityStatus::Unknown);
+    assert_eq!(
+        snr.measured, None,
+        "unknown evidence is never encoded as 0 dB"
+    );
+    assert_eq!(snr.threshold.unwrap().value, 10.0);
+    assert!(
+        snr.unknown_reason
+            .as_deref()
+            .unwrap()
+            .contains("digital zeros")
+    );
+    assert!(!capture.quality.trustworthy);
+
+    let csv_header = std::fs::read_to_string(&csv).unwrap();
+    let header = csv_header.lines().next().unwrap();
+    assert!(
+        !header.split(',').any(|column| column == "noise_floor_db"),
+        "exact digital silence is not serialized as a measured noise floor: {header}"
+    );
 }
 
 #[test]
