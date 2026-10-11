@@ -44,6 +44,290 @@ pub struct RecordingQualityEntry {
     pub quality: TakeQualitySummary,
 }
 
+/// Effective stimulus settings and playback length for one capture source.
+///
+/// `generated_frames` includes stimulus-internal silence windows, while
+/// `playback_frames` also includes the standard playback padding. This keeps
+/// the configured duration distinct from the duration the recorder plays.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EffectiveAcquisitionConfig {
+    /// Signal kind used by the capture generator.
+    pub signal_type: String,
+    /// Playback sample rate in hertz.
+    pub sample_rate_hz: u32,
+    /// Nominal duration supplied to the generator. Some signals ignore it.
+    pub requested_signal_duration_secs: f32,
+    /// Whether the selected generator uses the nominal duration.
+    pub duration_control_applies: bool,
+    /// Number of samples returned by the signal generator before outer padding.
+    pub generated_frames: usize,
+    /// Duration represented by `generated_frames`.
+    pub generated_duration_secs: f32,
+    /// Number of outer silence-padding samples added before and after playback.
+    pub playback_padding_frames: usize,
+    /// Total samples played by the capture path.
+    pub playback_frames: usize,
+    /// Duration represented by `playback_frames`.
+    pub playback_duration_secs: f32,
+    /// Peak linear amplitude passed to the signal generator.
+    pub amplitude_peak: Option<f32>,
+    /// Equivalent peak dBFS when the amplitude is positive and finite.
+    pub level_dbfs: Option<f32>,
+    /// Lowest stimulus frequency when the signal has a frequency bound.
+    pub low_frequency_hz: Option<f32>,
+    /// Highest stimulus frequency when the signal has a frequency bound.
+    pub high_frequency_hz: Option<f32>,
+    /// Seconds per octave below 100 Hz for octave-scaled sweeps.
+    pub bass_octave_duration_secs: Option<f32>,
+    /// Internal pre-sweep silence duration for octave-scaled sweeps.
+    pub pre_silence_secs: Option<f32>,
+    /// Internal post-sweep silence duration for octave-scaled sweeps.
+    pub post_silence_secs: Option<f32>,
+}
+
+/// Describe the exact frame duration and signal settings used by capture.
+///
+/// The calculation mirrors the shared generator: fixed-duration signals use
+/// the requested duration, MLS uses its sequence length, and octave-scaled
+/// sweeps use their bass-weighted duration plus their configured silence.
+///
+/// # Examples
+///
+/// ```
+/// use sotf_capture::recording_helpers::effective_acquisition_config;
+/// use sotf_capture::signal_recorder::{SignalParams, SignalType};
+///
+/// let params = SignalParams::Sweep {
+///     start_freq: 20.0,
+///     end_freq: 20_000.0,
+///     amp: 0.5,
+/// };
+/// let config = effective_acquisition_config(SignalType::Sweep, &params, 2.0, 48_000)?;
+/// assert_eq!(config.generated_frames, 96_000);
+/// assert_eq!(config.playback_frames, 120_000);
+/// # Ok::<(), String>(())
+/// ```
+///
+/// # Errors
+/// Returns an error for mismatched signal parameters, invalid duration, or a
+/// zero sample rate.
+///
+/// # Panics
+/// This function does not panic for caller-provided signal settings.
+pub fn effective_acquisition_config(
+    signal_type: SignalType,
+    params: &SignalParams,
+    requested_signal_duration_secs: f32,
+    sample_rate_hz: u32,
+) -> Result<EffectiveAcquisitionConfig, String> {
+    if sample_rate_hz == 0 {
+        return Err("sample rate must be greater than zero".to_string());
+    }
+    if !requested_signal_duration_secs.is_finite()
+        || (signal_type != SignalType::Mls && requested_signal_duration_secs <= 0.0)
+    {
+        return Err("signal duration must be finite and positive when used".to_string());
+    }
+    let finite_parameters = match params {
+        SignalParams::Tone { freq, amp } => freq.is_finite() && amp.is_finite(),
+        SignalParams::TwoTone {
+            freq1,
+            amp1,
+            freq2,
+            amp2,
+        } => [freq1, amp1, freq2, amp2]
+            .into_iter()
+            .all(|value| value.is_finite()),
+        SignalParams::Sweep {
+            start_freq,
+            end_freq,
+            amp,
+        } => [start_freq, end_freq, amp]
+            .into_iter()
+            .all(|value| value.is_finite()),
+        SignalParams::OctaveSweep {
+            start_freq,
+            end_freq,
+            amp,
+            bass_octave_duration_s,
+            pre_silence_s,
+            post_silence_s,
+        } => [
+            start_freq,
+            end_freq,
+            amp,
+            bass_octave_duration_s,
+            pre_silence_s,
+            post_silence_s,
+        ]
+        .into_iter()
+        .all(|value| value.is_finite()),
+        SignalParams::Noise { amp }
+        | SignalParams::Mls { amp, .. }
+        | SignalParams::Dirac { amp } => amp.is_finite(),
+        SignalParams::Stipa => true,
+    };
+    if !finite_parameters {
+        return Err("signal parameters must be finite".to_string());
+    }
+    crate::signal_recorder::validate_signal_params(
+        signal_type,
+        params,
+        requested_signal_duration_secs,
+        sample_rate_hz,
+    )?;
+
+    let mut config = EffectiveAcquisitionConfig {
+        signal_type: signal_type.as_str().to_string(),
+        sample_rate_hz,
+        requested_signal_duration_secs,
+        duration_control_applies: true,
+        generated_frames: 0,
+        generated_duration_secs: 0.0,
+        playback_padding_frames: 2 * ((0.250_f32 * sample_rate_hz as f32) as usize),
+        playback_frames: 0,
+        playback_duration_secs: 0.0,
+        amplitude_peak: None,
+        level_dbfs: None,
+        low_frequency_hz: None,
+        high_frequency_hz: None,
+        bass_octave_duration_secs: None,
+        pre_silence_secs: None,
+        post_silence_secs: None,
+    };
+
+    let sample_rate = sample_rate_hz as f64;
+    config.generated_frames = match (signal_type, params) {
+        (
+            SignalType::Sweep,
+            SignalParams::Sweep {
+                start_freq,
+                end_freq,
+                amp,
+            },
+        ) => {
+            config.amplitude_peak = Some(*amp);
+            config.low_frequency_hz = Some(*start_freq);
+            config.high_frequency_hz = Some(*end_freq);
+            math_audio_dsp::signals::frames_for(requested_signal_duration_secs, sample_rate_hz)
+        }
+        (
+            SignalType::Sweep,
+            SignalParams::OctaveSweep {
+                start_freq,
+                end_freq,
+                amp,
+                bass_octave_duration_s,
+                pre_silence_s,
+                post_silence_s,
+            },
+        ) => {
+            config.duration_control_applies = false;
+            config.amplitude_peak = Some(*amp);
+            config.low_frequency_hz = Some(*start_freq);
+            config.high_frequency_hz = Some(*end_freq);
+            let bass_duration = bass_octave_duration_s.clamp(1.0, 10.0);
+            let pre_silence = pre_silence_s.max(0.0);
+            let post_silence = post_silence_s.max(0.0);
+            config.bass_octave_duration_secs = Some(bass_duration);
+            config.pre_silence_secs = Some(pre_silence);
+            config.post_silence_secs = Some(post_silence);
+
+            // Keep these boundaries and rate ratios aligned with
+            // `gen_log_sweep_octave_scaled` in math-audio.
+            let low = (*start_freq as f64).max(1.0);
+            let high = (*end_freq as f64).max(low * 1.001);
+            let bass_rate = bass_duration as f64;
+            let bass_octaves = octave_span(low, 100.0_f64.min(high));
+            let mid_octaves = octave_span(100.0_f64.max(low), 1_000.0_f64.min(high));
+            let high_octaves = octave_span(1_000.0_f64.max(low), high);
+            let sweep_duration = (bass_octaves * bass_rate
+                + mid_octaves * bass_rate * 0.5
+                + high_octaves * bass_rate * 0.25)
+                .max(1.0);
+            let sweep_frames = (sweep_duration * sample_rate).round() as usize;
+            let pre_frames = (pre_silence * sample_rate_hz as f32).round() as usize;
+            let post_frames = (post_silence * sample_rate_hz as f32).round() as usize;
+            pre_frames
+                .saturating_add(sweep_frames)
+                .saturating_add(post_frames)
+        }
+        (SignalType::Tone, SignalParams::Tone { freq, amp }) => {
+            config.amplitude_peak = Some(*amp);
+            config.low_frequency_hz = Some(*freq);
+            config.high_frequency_hz = Some(*freq);
+            math_audio_dsp::signals::frames_for(requested_signal_duration_secs, sample_rate_hz)
+        }
+        (
+            SignalType::TwoTone,
+            SignalParams::TwoTone {
+                freq1,
+                freq2,
+                amp1,
+                amp2,
+            },
+        ) => {
+            config.amplitude_peak = Some(amp1.abs().max(amp2.abs()));
+            config.low_frequency_hz = Some((*freq1).min(*freq2));
+            config.high_frequency_hz = Some((*freq1).max(*freq2));
+            math_audio_dsp::signals::frames_for(requested_signal_duration_secs, sample_rate_hz)
+        }
+        (
+            SignalType::WhiteNoise | SignalType::PinkNoise | SignalType::MNoise,
+            SignalParams::Noise { amp },
+        ) => {
+            config.amplitude_peak = Some(*amp);
+            math_audio_dsp::signals::frames_for(requested_signal_duration_secs, sample_rate_hz)
+        }
+        (SignalType::Mls, SignalParams::Mls { order, amp }) => {
+            config.duration_control_applies = false;
+            config.amplitude_peak = Some(*amp);
+            (1_usize << u32::from(*order)) - 1
+        }
+        (SignalType::Dirac, SignalParams::Dirac { amp }) => {
+            config.amplitude_peak = Some(*amp);
+            math_audio_dsp::signals::frames_for(requested_signal_duration_secs, sample_rate_hz)
+        }
+        (SignalType::Stipa, SignalParams::Stipa) => {
+            math_audio_dsp::signals::frames_for(requested_signal_duration_secs, sample_rate_hz)
+        }
+        _ => {
+            return Err(format!(
+                "signal type {signal_type:?} does not match parameters {params:?}"
+            ));
+        }
+    };
+    config.generated_duration_secs = config.generated_frames as f32 / sample_rate_hz as f32;
+    config.playback_frames = config
+        .generated_frames
+        .saturating_add(config.playback_padding_frames);
+    config.playback_duration_secs = config.playback_frames as f32 / sample_rate_hz as f32;
+    if let Some(amplitude_peak) = config.amplitude_peak
+        && amplitude_peak.is_finite()
+        && amplitude_peak > 0.0
+    {
+        config.level_dbfs = Some(20.0 * amplitude_peak.log10());
+    }
+    Ok(config)
+}
+
+fn octave_span(low_hz: f64, high_hz: f64) -> f64 {
+    if high_hz > low_hz {
+        (high_hz / low_hz).log2()
+    } else {
+        0.0
+    }
+}
+
+/// Per-source stimulus provenance stored alongside quality evidence.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RecordingStimulusEntry {
+    /// Stable RoomConfig source identity.
+    pub source: RecordingSourceIdentity,
+    /// Effective signal configuration used for this source.
+    pub config: EffectiveAcquisitionConfig,
+}
+
 /// Quality evidence persisted next to `recordings.json` without extending
 /// `InlineMeasurement` or RoomConfig serialization.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -56,6 +340,9 @@ pub struct RecordingQualitySidecar {
     /// also detects a same-content session rewrite with different evidence.
     pub session_modified_unix_nanos: u64,
     pub entries: Vec<RecordingQualityEntry>,
+    /// Optional per-source signal settings; absent in older sidecars.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stimuli: Vec<RecordingStimulusEntry>,
 }
 
 impl RecordingQualitySidecar {
@@ -66,6 +353,43 @@ impl RecordingQualitySidecar {
             .find(|entry| &entry.source == source)
             .map(|entry| &entry.quality)
     }
+
+    /// Find the signal settings recorded for one source.
+    pub fn stimulus_for(
+        &self,
+        source: &RecordingSourceIdentity,
+    ) -> Option<&EffectiveAcquisitionConfig> {
+        self.stimuli
+            .iter()
+            .find(|entry| &entry.source == source)
+            .map(|entry| &entry.config)
+    }
+
+    /// Replace or append one source's settings while retaining its neighbors.
+    pub fn upsert_stimulus(&mut self, entry: RecordingStimulusEntry) {
+        if let Some(existing) = self
+            .stimuli
+            .iter_mut()
+            .find(|existing| existing.source == entry.source)
+        {
+            *existing = entry;
+        } else {
+            self.stimuli.push(entry);
+        }
+    }
+
+    /// Replace or append one source's quality while retaining its neighbors.
+    pub fn upsert_quality(&mut self, entry: RecordingQualityEntry) {
+        if let Some(existing) = self
+            .entries
+            .iter_mut()
+            .find(|existing| existing.source == entry.source)
+        {
+            *existing = entry;
+        } else {
+            self.entries.push(entry);
+        }
+    }
 }
 
 /// Atomically save versioned quality evidence beside a canonical session.
@@ -75,6 +399,26 @@ pub fn save_recording_quality_sidecar(
     recordings_json_path: &std::path::Path,
     recordings_json: &[u8],
     entries: Vec<RecordingQualityEntry>,
+) -> std::io::Result<()> {
+    let stimuli = load_recording_quality_sidecar(recordings_json_path, recordings_json)?
+        .map_or_else(Vec::new, |sidecar| sidecar.stimuli);
+    save_recording_quality_sidecar_with_stimuli(
+        recordings_json_path,
+        recordings_json,
+        entries,
+        stimuli,
+    )
+}
+
+/// Atomically save quality findings and per-source stimulus provenance.
+///
+/// The canonical `recordings.json` remains unchanged. Duplicate identities
+/// are rejected independently in the quality and stimulus collections.
+pub fn save_recording_quality_sidecar_with_stimuli(
+    recordings_json_path: &std::path::Path,
+    recordings_json: &[u8],
+    entries: Vec<RecordingQualityEntry>,
+    stimuli: Vec<RecordingStimulusEntry>,
 ) -> std::io::Result<()> {
     let current_session = std::fs::read(recordings_json_path)?;
     if current_session != recordings_json {
@@ -93,11 +437,22 @@ pub fn save_recording_quality_sidecar(
             "quality sidecar contains duplicate source identities",
         ));
     }
+    let mut seen_stimuli = std::collections::HashSet::with_capacity(stimuli.len());
+    if stimuli
+        .iter()
+        .any(|entry| !seen_stimuli.insert(entry.source.clone()))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "quality sidecar contains duplicate stimulus identities",
+        ));
+    }
     let sidecar = RecordingQualitySidecar {
         version: RECORDING_QUALITY_SIDECAR_VERSION,
         session_sha256: recording_session_sha256(recordings_json),
         session_modified_unix_nanos: recording_session_modified_unix_nanos(recordings_json_path)?,
         entries,
+        stimuli,
     };
     let json = serde_json::to_vec_pretty(&sidecar)
         .map_err(|error| std::io::Error::other(format!("serialize quality sidecar: {error}")))?;
@@ -153,6 +508,17 @@ pub fn load_recording_quality_sidecar(
             "quality sidecar contains duplicate source identities",
         ));
     }
+    let mut seen_stimuli = std::collections::HashSet::with_capacity(sidecar.stimuli.len());
+    if sidecar
+        .stimuli
+        .iter()
+        .any(|entry| !seen_stimuli.insert(entry.source.clone()))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "quality sidecar contains duplicate stimulus identities",
+        ));
+    }
     Ok(Some(sidecar))
 }
 
@@ -206,39 +572,108 @@ pub fn recording_quality_entries_for_sources(
     recordings: &[ChannelRecording],
     speaker_names_by_channel: &[String],
 ) -> Vec<RecordingQualityEntry> {
+    recording_source_recordings(recordings, speaker_names_by_channel)
+        .into_iter()
+        .filter_map(|(source, index)| {
+            let recording = &recordings[index];
+            let quality = recording.result.as_ref()?.quality.as_ref()?.clone();
+            Some(RecordingQualityEntry { source, quality })
+        })
+        .collect()
+}
+
+/// Build per-source stimulus entries using the same source ordering as quality entries.
+///
+/// The callback can return a different acquisition snapshot for each source,
+/// which preserves actual per-take gain and timing when only one source is
+/// re-recorded after a setting change.
+pub fn recording_stimulus_entries_for_sources(
+    recordings: &[ChannelRecording],
+    speaker_names_by_channel: &[String],
+    mut config_for_source: impl FnMut(
+        &RecordingSourceIdentity,
+        &ChannelRecording,
+    ) -> Option<EffectiveAcquisitionConfig>,
+) -> Vec<RecordingStimulusEntry> {
+    recording_source_recordings(recordings, speaker_names_by_channel)
+        .into_iter()
+        .filter_map(|(source, index)| {
+            let config = config_for_source(&source, &recordings[index])?;
+            Some(RecordingStimulusEntry { source, config })
+        })
+        .collect()
+}
+
+/// Build source-keyed stimulus entries from snapshots stored on each take.
+pub fn recording_stimulus_entries_from_sources(
+    recordings: &[ChannelRecording],
+    speaker_names_by_channel: &[String],
+) -> Vec<RecordingStimulusEntry> {
+    recording_stimulus_entries_for_sources(recordings, speaker_names_by_channel, |_, recording| {
+        recording
+            .result
+            .as_ref()
+            .and_then(|result| result.stimulus_config.clone())
+    })
+}
+
+/// Restore each source's stimulus snapshot from an exact-session sidecar.
+///
+/// Sources missing from the sidecar keep `None`; no current global settings
+/// are copied onto old measurements.
+pub fn restore_recording_stimuli_from_sidecar(
+    recordings: &mut [ChannelRecording],
+    speaker_names_by_channel: &[String],
+    sidecar: &RecordingQualitySidecar,
+) {
+    let source_recordings = recording_source_recordings(recordings, speaker_names_by_channel);
+    for (source, index) in source_recordings {
+        if let Some(result) = recordings
+            .get_mut(index)
+            .and_then(|recording| recording.result.as_mut())
+        {
+            result.stimulus_config = sidecar.stimulus_for(&source).cloned();
+        }
+    }
+}
+
+fn recording_source_recordings(
+    recordings: &[ChannelRecording],
+    speaker_names_by_channel: &[String],
+) -> Vec<(RecordingSourceIdentity, usize)> {
     use std::collections::BTreeMap;
 
-    let mut entries = Vec::new();
-    let mut grouped: BTreeMap<usize, Vec<&ChannelRecording>> = BTreeMap::new();
-    for recording in recordings {
-        if recording.state != ChannelRecordingState::Done {
+    let mut sources = Vec::new();
+    let mut grouped: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (index, recording) in recordings.iter().enumerate() {
+        if recording.state != ChannelRecordingState::Done || recording.result.is_none() {
             continue;
         }
-        let Some(result) = recording.result.as_ref() else {
-            continue;
-        };
         if let Some(source) = recording.imported_source.as_ref() {
-            if let Some(quality) = result.quality.as_ref() {
-                entries.push(RecordingQualityEntry {
-                    source: source.clone(),
-                    quality: quality.clone(),
-                });
-            }
-        } else if result.wav_path.is_some() || result.csv_path.is_some() {
+            sources.push((source.clone(), index));
+        } else if recording
+            .result
+            .as_ref()
+            .is_some_and(|result| result.wav_path.is_some() || result.csv_path.is_some())
+        {
             grouped
                 .entry(recording.channel_index)
                 .or_default()
-                .push(recording);
+                .push(index);
         }
     }
 
     for (channel_index, mut group) in grouped {
-        group.sort_by_key(|recording| (recording.mic_position_index, recording.mic_index));
+        group.sort_by_key(|index| {
+            let recording = &recordings[*index];
+            (recording.mic_position_index, recording.mic_index)
+        });
         let speaker = speaker_names_by_channel
             .get(channel_index)
             .map(String::as_str)
             .or_else(|| {
-                group.first().map(|recording| {
+                group.first().map(|index| {
+                    let recording = &recordings[*index];
                     recording
                         .channel_name
                         .find(" (")
@@ -250,25 +685,18 @@ pub fn recording_quality_entries_for_sources(
         let Some(speaker) = speaker else {
             continue;
         };
-        for (measurement_index, recording) in group.into_iter().enumerate() {
-            let Some(quality) = recording
-                .result
-                .as_ref()
-                .and_then(|result| result.quality.as_ref())
-            else {
-                continue;
-            };
-            entries.push(RecordingQualityEntry {
-                source: RecordingSourceIdentity {
+        for (measurement_index, index) in group.into_iter().enumerate() {
+            sources.push((
+                RecordingSourceIdentity {
                     speaker: speaker.to_string(),
                     driver_index: None,
                     measurement_index,
                 },
-                quality: quality.clone(),
-            });
+                index,
+            ));
         }
     }
-    entries
+    sources
 }
 
 /// Replace session metadata only after a complete write succeeds.
@@ -1172,7 +1600,38 @@ mod tests {
                 "coherent SNR is unavailable",
             ));
 
-        save_recording_quality_sidecar(
+        let warning_stimulus = effective_acquisition_config(
+            SignalType::Sweep,
+            &capture_signal_params(
+                SignalType::Sweep,
+                20.0,
+                20_000.0,
+                0.5,
+                Some(3.0),
+                Some(2.0),
+                Some(1.0),
+            ),
+            5.0,
+            48_000,
+        )
+        .unwrap();
+        let unknown_stimulus = effective_acquisition_config(
+            SignalType::Sweep,
+            &capture_signal_params(
+                SignalType::Sweep,
+                20.0,
+                20_000.0,
+                0.1,
+                Some(3.0),
+                Some(2.0),
+                Some(1.0),
+            ),
+            5.0,
+            48_000,
+        )
+        .unwrap();
+
+        save_recording_quality_sidecar_with_stimuli(
             &session_path,
             session_bytes,
             vec![
@@ -1185,6 +1644,20 @@ mod tests {
                     quality: unknown.clone(),
                 },
             ],
+            vec![
+                RecordingStimulusEntry {
+                    source: warning_source.clone(),
+                    config: warning_stimulus.clone(),
+                },
+                RecordingStimulusEntry {
+                    source: unknown_source.clone(),
+                    config: unknown_stimulus.clone(),
+                },
+                RecordingStimulusEntry {
+                    source: adjacent_source.clone(),
+                    config: warning_stimulus.clone(),
+                },
+            ],
         )
         .unwrap();
 
@@ -1194,6 +1667,18 @@ mod tests {
         assert_eq!(loaded.quality_for(&warning_source), Some(&warning));
         assert_eq!(loaded.quality_for(&unknown_source), Some(&unknown));
         assert_eq!(loaded.quality_for(&adjacent_source), None);
+        assert_eq!(
+            loaded.stimulus_for(&warning_source),
+            Some(&warning_stimulus)
+        );
+        assert_eq!(
+            loaded.stimulus_for(&unknown_source),
+            Some(&unknown_stimulus)
+        );
+        assert_eq!(
+            loaded.stimulus_for(&adjacent_source),
+            Some(&warning_stimulus)
+        );
         assert_eq!(
             loaded.entries.len(),
             2,
@@ -1237,6 +1722,7 @@ mod tests {
             clarity_c80_db: None,
             spectrogram_db: None,
             quality,
+            stimulus_config: None,
         };
         let make_take =
             |channel_index, channel_name: &str, mic_index, mic_position_index, quality| {
@@ -1277,7 +1763,33 @@ mod tests {
                 Some(quality_summary(true, &[], Some(0.0))),
             ),
         ];
+        let mut recordings = recordings;
+        let stimulus = |amplitude| {
+            effective_acquisition_config(
+                SignalType::Sweep,
+                &capture_signal_params(
+                    SignalType::Sweep,
+                    20.0,
+                    20_000.0,
+                    amplitude,
+                    Some(3.0),
+                    Some(2.0),
+                    Some(1.0),
+                ),
+                5.0,
+                48_000,
+            )
+            .unwrap()
+        };
+        let old_left_config = stimulus(0.5);
+        let retaken_left_config = stimulus(0.25);
+        let right_config = stimulus(0.5);
+        recordings[1].result.as_mut().unwrap().stimulus_config = Some(old_left_config.clone());
+        recordings[2].result.as_mut().unwrap().stimulus_config = Some(retaken_left_config.clone());
+        recordings[3].result.as_mut().unwrap().stimulus_config = Some(right_config.clone());
         let entries = recording_quality_entries_for_sources(&recordings, &["L".into(), "R".into()]);
+        let stimulus_entries =
+            recording_stimulus_entries_from_sources(&recordings, &["L".into(), "R".into()]);
 
         let identity = |speaker: &str, measurement_index| RecordingSourceIdentity {
             speaker: speaker.into(),
@@ -1289,6 +1801,7 @@ mod tests {
             session_sha256: String::new(),
             session_modified_unix_nanos: 0,
             entries,
+            stimuli: Vec::new(),
         };
         assert_eq!(sidecar.quality_for(&identity("L", 0)), None);
         assert_eq!(
@@ -1302,6 +1815,196 @@ mod tests {
         assert_eq!(
             sidecar.quality_for(&identity("R", 0)).unwrap().drift_ppm,
             Some(0.0)
+        );
+        assert!(sidecar.stimuli.is_empty());
+        assert_eq!(stimulus_entries.len(), 3);
+        assert_eq!(
+            stimulus_entries[0].source,
+            identity("L", 1),
+            "missing first-mic evidence must not shift source identity"
+        );
+        assert_eq!(stimulus_entries[0].config, old_left_config);
+        assert_eq!(stimulus_entries[1].config, retaken_left_config);
+        assert_eq!(stimulus_entries[2].config, right_config);
+
+        let mut imported_again = recordings.clone();
+        for recording in &mut imported_again {
+            if let Some(result) = recording.result.as_mut() {
+                result.stimulus_config = None;
+            }
+        }
+        let roundtripped = RecordingQualitySidecar {
+            version: RECORDING_QUALITY_SIDECAR_VERSION,
+            session_sha256: String::new(),
+            session_modified_unix_nanos: 0,
+            entries: Vec::new(),
+            stimuli: stimulus_entries,
+        };
+        restore_recording_stimuli_from_sidecar(
+            &mut imported_again,
+            &["L".into(), "R".into()],
+            &roundtripped,
+        );
+        assert_eq!(
+            imported_again[1].result.as_ref().unwrap().stimulus_config,
+            Some(old_left_config)
+        );
+        assert_eq!(
+            imported_again[2].result.as_ref().unwrap().stimulus_config,
+            Some(retaken_left_config)
+        );
+    }
+
+    #[test]
+    fn effective_acquisition_duration_matches_generated_playback_frames() {
+        let sample_rate = 48_000;
+        let params = capture_signal_params(
+            SignalType::Sweep,
+            20.0,
+            20_000.0,
+            0.5,
+            Some(3.0),
+            Some(2.0),
+            Some(1.0),
+        );
+        let effective =
+            effective_acquisition_config(SignalType::Sweep, &params, 5.0, sample_rate).unwrap();
+        let generated = crate::signal_recorder::prepare_measurement_signal(
+            SignalType::Sweep,
+            &params,
+            5.0,
+            sample_rate,
+        )
+        .unwrap();
+        assert!(!effective.duration_control_applies);
+        assert_eq!(effective.playback_frames, generated.len());
+        assert_eq!(
+            effective.playback_duration_secs,
+            generated.len() as f32 / sample_rate as f32
+        );
+
+        let different_nominal_duration =
+            effective_acquisition_config(SignalType::Sweep, &params, 12.0, sample_rate).unwrap();
+        assert_eq!(
+            effective.playback_frames,
+            different_nominal_duration.playback_frames
+        );
+        assert_ne!(
+            effective.requested_signal_duration_secs,
+            different_nominal_duration.requested_signal_duration_secs
+        );
+
+        let slower_params = capture_signal_params(
+            SignalType::Sweep,
+            20.0,
+            20_000.0,
+            0.5,
+            Some(5.0),
+            Some(2.0),
+            Some(1.0),
+        );
+        let slower =
+            effective_acquisition_config(SignalType::Sweep, &slower_params, 5.0, sample_rate)
+                .unwrap();
+        assert!(slower.playback_frames > effective.playback_frames);
+
+        let legacy_params =
+            capture_signal_params(SignalType::Sweep, 20.0, 20_000.0, 0.5, None, None, None);
+        let legacy =
+            effective_acquisition_config(SignalType::Sweep, &legacy_params, 2.25, sample_rate)
+                .unwrap();
+        assert!(legacy.duration_control_applies);
+        assert_eq!(legacy.generated_frames, 108_000);
+    }
+
+    #[test]
+    fn effective_duration_marks_generic_controls_that_are_ignored() {
+        let sample_rate = 48_000;
+        let tone = effective_acquisition_config(
+            SignalType::Tone,
+            &SignalParams::Tone {
+                freq: 1_000.0,
+                amp: 0.5,
+            },
+            1.5,
+            sample_rate,
+        )
+        .unwrap();
+        assert!(tone.duration_control_applies);
+        assert_eq!(tone.generated_frames, 72_000);
+
+        let noise = effective_acquisition_config(
+            SignalType::PinkNoise,
+            &SignalParams::Noise { amp: 0.25 },
+            2.0,
+            sample_rate,
+        )
+        .unwrap();
+        assert!(noise.duration_control_applies);
+        assert_eq!(noise.generated_frames, 96_000);
+
+        let mls = effective_acquisition_config(
+            SignalType::Mls,
+            &SignalParams::Mls { order: 8, amp: 0.5 },
+            0.0,
+            sample_rate,
+        )
+        .unwrap();
+        assert!(!mls.duration_control_applies);
+        assert_eq!(mls.generated_frames, 255);
+    }
+
+    #[test]
+    fn recording_stimulus_upsert_keeps_neighboring_source_provenance() {
+        let source = |speaker: &str| RecordingSourceIdentity {
+            speaker: speaker.to_string(),
+            driver_index: None,
+            measurement_index: 0,
+        };
+        let config = |amplitude_peak| EffectiveAcquisitionConfig {
+            signal_type: "sweep".into(),
+            sample_rate_hz: 48_000,
+            requested_signal_duration_secs: 5.0,
+            duration_control_applies: false,
+            generated_frames: 480_000,
+            generated_duration_secs: 10.0,
+            playback_padding_frames: 24_000,
+            playback_frames: 504_000,
+            playback_duration_secs: 10.5,
+            amplitude_peak: Some(amplitude_peak),
+            level_dbfs: Some(20.0 * amplitude_peak.log10()),
+            low_frequency_hz: Some(20.0),
+            high_frequency_hz: Some(20_000.0),
+            bass_octave_duration_secs: Some(3.0),
+            pre_silence_secs: Some(2.0),
+            post_silence_secs: Some(1.0),
+        };
+        let mut sidecar = RecordingQualitySidecar {
+            version: RECORDING_QUALITY_SIDECAR_VERSION,
+            session_sha256: String::new(),
+            session_modified_unix_nanos: 0,
+            entries: Vec::new(),
+            stimuli: vec![RecordingStimulusEntry {
+                source: source("L"),
+                config: config(0.5),
+            }],
+        };
+        sidecar.upsert_stimulus(RecordingStimulusEntry {
+            source: source("L"),
+            config: config(0.25),
+        });
+        sidecar.upsert_stimulus(RecordingStimulusEntry {
+            source: source("R"),
+            config: config(0.5),
+        });
+        assert_eq!(sidecar.stimuli.len(), 2);
+        assert_eq!(
+            sidecar.stimulus_for(&source("L")).unwrap().amplitude_peak,
+            Some(0.25)
+        );
+        assert_eq!(
+            sidecar.stimulus_for(&source("R")).unwrap().amplitude_peak,
+            Some(0.5)
         );
     }
 
@@ -1475,6 +2178,7 @@ mod tests {
             clarity_c80_db: None,
             spectrogram_db: None,
             quality: Some(q),
+            stimulus_config: None,
         };
         let warned = mk(warn);
         let clean_res = mk(clean);
@@ -1526,6 +2230,7 @@ mod tests {
             clarity_c80_db: None,
             spectrogram_db: None,
             quality: Some(clean_q),
+            stimulus_config: None,
         });
 
         let mut bad = ChannelRecording::new(1, "FR (Pos 2)".to_string());
@@ -1550,6 +2255,7 @@ mod tests {
             clarity_c80_db: None,
             spectrogram_db: None,
             quality: Some(bad_q),
+            stimulus_config: None,
         });
 
         // Channels without a result yet are not listed.
@@ -1594,6 +2300,7 @@ mod tests {
             clarity_c80_db: None,
             spectrogram_db: None,
             quality: Some(quality_summary(true, &[], None)),
+            stimulus_config: None,
         });
 
         assert!(session_quality_summary(&[stale.clone()]).is_empty());
@@ -1636,6 +2343,7 @@ mod tests {
                 clarity_c80_db: None,
                 spectrogram_db: None,
                 quality: Some(q),
+                stimulus_config: None,
             });
             ch
         };

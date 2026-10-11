@@ -123,6 +123,10 @@ pub struct RecordingResult {
     /// versioned sidecar evidence.
     #[serde(default)]
     pub quality: Option<TakeQualitySummary>,
+    /// Exact signal settings used for this take. `None` for older recordings
+    /// or imported measurements whose stimulus configuration is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stimulus_config: Option<crate::recording_helpers::EffectiveAcquisitionConfig>,
 }
 
 impl RecordingResult {

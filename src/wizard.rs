@@ -1384,6 +1384,7 @@ mod tests {
                 accepted_count: accepted,
                 rejected_count: 0,
             }),
+            stimulus_config: None,
         });
         ch
     }
