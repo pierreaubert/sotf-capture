@@ -21,6 +21,7 @@ mod devices_stub;
 pub mod live_level;
 #[cfg(target_os = "ios")]
 pub use devices_stub as devices;
+pub mod quality;
 pub mod rate_limit;
 pub mod recording_helpers;
 pub mod recording_types;

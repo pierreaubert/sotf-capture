@@ -2566,30 +2566,73 @@ fn check_capture_clipping_ignores_undersized_tail_block() {
 #[test]
 #[cfg(not(target_os = "ios"))]
 fn thd_warning_issue_flags_peak_above_threshold() {
-    let issue =
-        thd_warning_issue(&[20.0, 100.0, 1000.0], &[1.0, 12.3, 0.5], &[0.0, 0.0, 0.0]).unwrap();
+    let issue = thd_warning_issue(
+        &[20.0, 100.0, 1000.0],
+        &[1.0, 12.3, 0.5],
+        &[0.0, 0.0, 0.0],
+        Some((20.0, 1000.0)),
+    )
+    .unwrap();
     assert!(issue.contains("12.3%"), "{issue}");
     assert!(issue.contains("100 Hz"), "{issue}");
     // At or below 10% stays quiet (strictly-above threshold).
-    assert!(thd_warning_issue(&[20.0, 100.0], &[1.0, 10.0], &[0.0, 0.0]).is_none());
+    assert!(
+        thd_warning_issue(
+            &[20.0, 100.0],
+            &[1.0, 10.0],
+            &[0.0, 0.0],
+            Some((20.0, 100.0))
+        )
+        .is_none()
+    );
     // Non-sweep analyses report zeros and never trigger.
-    assert!(thd_warning_issue(&[20.0, 100.0], &[0.0, 0.0], &[0.0, 0.0]).is_none());
+    assert!(thd_warning_issue(&[20.0, 100.0], &[0.0, 0.0], &[0.0, 0.0], None).is_none());
 }
 
 #[test]
 #[cfg(not(target_os = "ios"))]
 fn thd_warning_issue_ignores_nulls_nonfinite_and_shortens_mismatch() {
-    assert!(thd_warning_issue(&[], &[], &[]).is_none());
-    assert!(thd_warning_issue(&[100.0], &[f32::NAN], &[0.0]).is_none());
+    assert!(thd_warning_issue(&[], &[], &[], Some((20.0, 20_000.0))).is_none());
+    assert!(thd_warning_issue(&[100.0], &[f32::NAN], &[0.0], Some((20.0, 20_000.0))).is_none());
     // NaN bins are skipped; the finite peak still fires.
-    let issue = thd_warning_issue(&[50.0, 100.0], &[f32::NAN, 15.0], &[0.0, 0.0]).unwrap();
+    let issue = thd_warning_issue(
+        &[50.0, 100.0],
+        &[f32::NAN, 15.0],
+        &[0.0, 0.0],
+        Some((20.0, 200.0)),
+    )
+    .unwrap();
     assert!(issue.contains("100 Hz"), "{issue}");
     // A huge THD at a deep response null is noise, not distortion: the
     // 50% bin sits 30 dB below the peak and must not fire.
-    assert!(thd_warning_issue(&[100.0, 1000.0], &[1.0, 50.0], &[0.0, -30.0]).is_none());
+    assert!(
+        thd_warning_issue(
+            &[100.0, 1000.0],
+            &[1.0, 50.0],
+            &[0.0, -30.0],
+            Some((20.0, 2000.0))
+        )
+        .is_none()
+    );
     // Only the shared prefix is compared: the 50% peak sits past the end
     // of the shorter grid and must not fire.
-    assert!(thd_warning_issue(&[100.0], &[1.0, 50.0], &[0.0]).is_none());
+    assert!(thd_warning_issue(&[100.0], &[1.0, 50.0], &[0.0], Some((20.0, 20_000.0))).is_none());
+}
+
+#[test]
+#[cfg(not(target_os = "ios"))]
+fn thd_warning_issue_ignores_peaks_outside_the_sweep_band() {
+    // The out-of-band peak is ignored even though it sits at a strong
+    // fundamental bin; only the declared 1–2 kHz measurement band is judged.
+    assert!(
+        thd_warning_issue(
+            &[1_000.0, 2_000.0, 7_977.0],
+            &[1.0, 2.0, 12.3],
+            &[0.0, 0.0, 0.0],
+            Some((1_000.0, 2_000.0))
+        )
+        .is_none()
+    );
 }
 
 #[test]

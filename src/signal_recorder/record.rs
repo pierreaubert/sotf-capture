@@ -1,3 +1,5 @@
+// Rust guideline compliant 2026-02-21
+
 #[cfg(not(target_os = "ios"))]
 use super::consts::CANCELLED_ERR;
 #[cfg(not(target_os = "ios"))]
@@ -1147,6 +1149,24 @@ pub(super) fn analyze_sweep_takes(
         sweep_range,
     )?;
 
+    let single_snr_windows = single_take.then(|| {
+        (
+            active_take_span(&analysis_capture, analysis_reference, &lag_for_quality),
+            pre_silence_window(&analysis_capture, analysis_reference, &lag_for_quality),
+        )
+    });
+    let quality_findings = super::quality::structured_quality_findings(
+        &analysis_capture,
+        &analysis.frequencies,
+        &analysis.thd_percent,
+        &analysis.harmonic_distortion_db,
+        &analysis.spl_db,
+        sweep_range,
+        single_snr_windows.as_ref().map(|(active, _)| *active),
+        single_snr_windows.as_ref().map(|(_, silence)| *silence),
+        single_take,
+    );
+
     // Extended CSV: the FFT-grid curves are log-frequency interpolated onto
     // the analysis grid and appended as `coherence` / `noise_floor_db`
     // columns. Coherence is omitted (not fabricated) when no real multi-take
@@ -1166,12 +1186,14 @@ pub(super) fn analyze_sweep_takes(
     )?;
     log::info!("[{log_tag}] Wrote analysis to {:?}", output_csv_path);
 
-    // High-distortion advisory from the Farina THD curve (sweeps only;
-    // other signals analyze to zero THD and never trigger).
+    // High-distortion advisory from the harmonic-only Farina sweep estimate.
+    // The structured finding below keeps invalid or unavailable estimates
+    // Unknown instead of turning legacy zero-filled arrays into a pass.
     if let Some(issue) = super::quality::thd_warning_issue(
         &analysis.frequencies,
         &analysis.thd_percent,
         &analysis.spl_db,
+        sweep_range,
     ) {
         quality_issues.push(issue);
     }
@@ -1217,6 +1239,7 @@ pub(super) fn analyze_sweep_takes(
     Ok(CaptureAnalysis {
         result: analysis,
         quality,
+        quality_findings,
         drift: first_drift,
         drift_corrected: any_drift_corrected,
         dropped_samples,

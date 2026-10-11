@@ -1,3 +1,5 @@
+// Rust guideline compliant 2026-02-21
+
 use serde::{Deserialize, Serialize};
 
 /// Raw loopback WAV captured for a speaker/position take. This is separate
@@ -35,12 +37,10 @@ pub enum ChannelRecordingState {
 /// Extracted from `crate::signal_recorder::CaptureAnalysis` by
 /// [`crate::recording_helpers::summarize_take_quality`] and stored on
 /// [`RecordingResult`] so the verdict survives from capture completion to
-/// the point where the user reviews it. NOTE (task-9 review B1): this is
-/// **in-memory only** — the session save serializes `InlineMeasurement`
-/// (frequencies/magnitude/phase/paths), which drops the quality summary, so
-/// after save → reload every result comes back with `quality: None` and the
-/// UI renders "no data". `None` on a result means "captured before quality
-/// gating existed" or "loaded from a session file" — never fabricate one.
+/// the point where the user reviews it. Canonical RoomConfig serialization
+/// does not include this value; frontends persist it in the versioned
+/// adjacent quality sidecar. `None` means quality was not measured or no
+/// matching, current sidecar evidence was available — never infer a pass.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TakeQualitySummary {
     /// math-dsp verdict: false when any issue was raised (lag confidence,
@@ -51,6 +51,9 @@ pub struct TakeQualitySummary {
     /// Human-readable issues raised by the quality assessment (engine /
     /// math-dsp wording, English).
     pub issues: Vec<String>,
+    /// Structured metric evidence and policy thresholds from the capture analysis.
+    #[serde(default)]
+    pub findings: Vec<crate::quality::QualityFinding>,
     /// Mean per-bin coherence across accepted takes (repeat captures with
     /// ≥ 4 accepted takes only).
     pub mean_coherence: Option<f32>,
@@ -115,8 +118,9 @@ pub struct RecordingResult {
     pub clarity_c50_db: Option<Vec<f32>>,
     pub clarity_c80_db: Option<Vec<f32>>,
     pub spectrogram_db: Option<Vec<Vec<f32>>>,
-    /// Per-take quality verdict from the engine (Task 9). `None` for results
-    /// captured before quality gating or loaded from older session files.
+    /// Per-take quality verdict from the engine. `None` for results captured
+    /// before quality gating, older sessions, or sessions without matching
+    /// versioned sidecar evidence.
     #[serde(default)]
     pub quality: Option<TakeQualitySummary>,
 }

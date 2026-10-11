@@ -19,6 +19,18 @@ use super::recorder::{NegotiatedInput, RecordedTake, SweepRecorder, check_input_
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+/// Reusable deterministic signal conditions for frontend QA fixtures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FakeAudioProfile {
+    Clean,
+    HighThd,
+    LowSnr,
+    /// Keep audio clean but provide no noise during digital-silence windows,
+    /// so the single-take SNR estimator reports unavailable evidence naturally.
+    UnknownEvidence,
+    Clipping,
+}
+
 /// Configuration for emulated loopback capture.
 #[derive(Debug, Clone)]
 pub struct FakeAudioConfig {
@@ -42,8 +54,14 @@ pub struct FakeAudioConfig {
     pub drift_ppm: f64,
     /// Linear capture gain (converter saturates at ±1.0).
     pub gain: f32,
+    /// Causal room impulse response per hardware input channel (empty is identity).
+    pub channel_impulse_responses: Vec<Vec<f32>>,
+    /// Cubic soft-saturation coefficient applied as `tanh(x + coefficient * x^3)`.
+    pub cubic_distortion: f32,
     /// Approximate RMS of the seeded room-noise floor (0 disables).
     pub noise_rms: f32,
+    /// Optional noise floor applied only to digital-silence windows.
+    pub quiet_window_noise_rms: f32,
     /// Noise seed; each channel adds its index (must be nonzero).
     pub seed: u64,
     /// Noise/silence tail appended after the stimulus, in seconds.
@@ -71,7 +89,10 @@ impl Default for FakeAudioConfig {
             latency_frames: 0,
             drift_ppm: 0.0,
             gain: 1.0,
+            channel_impulse_responses: Vec::new(),
+            cubic_distortion: 0.0,
             noise_rms: 0.0,
+            quiet_window_noise_rms: 0.0,
             seed: 0x9E37_79B9_7F4A_7C15,
             tail_secs: 1.0,
             dropped_samples: 0,
@@ -82,11 +103,42 @@ impl Default for FakeAudioConfig {
     }
 }
 
+impl FakeAudioConfig {
+    /// Build a seeded default configuration for a common capture QA condition.
+    pub fn for_profile(profile: FakeAudioProfile) -> Self {
+        let mut config = Self::default();
+        match profile {
+            FakeAudioProfile::Clean => {
+                config.noise_rms = 0.00001;
+                // A real microphone has a measurable room floor during the
+                // pre-sweep silence. Keep that evidence deterministic and
+                // quiet enough to pass the single-take SNR advisory.
+                config.quiet_window_noise_rms = 0.00001;
+            }
+            FakeAudioProfile::HighThd => {
+                config.noise_rms = 0.00001;
+                config.cubic_distortion = 4.0;
+            }
+            FakeAudioProfile::LowSnr => {
+                config.latency_frames = 4_800;
+                config.quiet_window_noise_rms = 0.2;
+            }
+            FakeAudioProfile::UnknownEvidence => config.noise_rms = 0.0,
+            FakeAudioProfile::Clipping => {
+                config.noise_rms = 0.00001;
+                config.gain = 2.0;
+            }
+        }
+        config
+    }
+}
+
 /// Stimulus published by [`FakePlayback`] for [`FakeRecorder`].
 #[derive(Debug, Default)]
 struct WireState {
     stimulus: Vec<f32>,
     sweep_rate: u32,
+    play_count: u64,
     output_channel: u16,
     output_device: Option<String>,
     played: bool,
@@ -115,6 +167,32 @@ impl VirtualWire {
             state: Arc::new(Mutex::new(WireState::default())),
             config,
         }
+    }
+
+    /// Create a wire with one of the standard deterministic QA conditions.
+    pub fn for_profile(profile: FakeAudioProfile) -> Self {
+        Self::new(FakeAudioConfig::for_profile(profile))
+    }
+
+    /// Set a room impulse response for one hardware input channel.
+    pub fn with_channel_impulse_response(
+        mut self,
+        channel: usize,
+        impulse_response: Vec<f32>,
+    ) -> Self {
+        if self.config.channel_impulse_responses.len() <= channel {
+            self.config
+                .channel_impulse_responses
+                .resize_with(channel + 1, Vec::new);
+        }
+        self.config.channel_impulse_responses[channel] = impulse_response;
+        self
+    }
+
+    /// Add controlled cubic distortion before converter saturation.
+    pub fn with_cubic_distortion(mut self, coefficient: f32) -> Self {
+        self.config.cubic_distortion = coefficient;
+        self
     }
 
     /// Build the output side of this wire.
@@ -202,6 +280,7 @@ impl SweepPlayback for FakePlayback {
         self.rendered_frames = self.total_frames;
         state.stimulus = stimulus;
         state.sweep_rate = sweep_rate;
+        state.play_count = state.play_count.wrapping_add(1);
         state.output_channel = channel;
         state.output_device = resolved;
         state.played = true;
@@ -248,16 +327,18 @@ impl FakeRecorder {
         (self.wire.config.tail_secs.max(0.0) * sample_rate as f32).round() as usize
     }
 
-    /// Render one channel: resample, drift-warp, latency, gain, noise, tail.
+    /// Render one channel through rate conversion, room response, gain, distortion, and noise.
     fn render_channel(
         &self,
         capture: &FakeCapture,
         channel_index: usize,
     ) -> Result<Vec<f32>, String> {
         let config = &self.wire.config;
-        let (stimulus, sweep_rate) = match self.wire.state.lock() {
-            Ok(state) if state.played => (state.stimulus.clone(), state.sweep_rate),
-            _ => (Vec::new(), capture.sample_rate),
+        let (stimulus, sweep_rate, play_count) = match self.wire.state.lock() {
+            Ok(state) if state.played => {
+                (state.stimulus.clone(), state.sweep_rate, state.play_count)
+            }
+            _ => (Vec::new(), capture.sample_rate, 0),
         };
         let mut signal = if stimulus.is_empty() || sweep_rate == capture.sample_rate {
             stimulus
@@ -273,31 +354,64 @@ impl FakeRecorder {
             signal = vec![0.0; frames];
         } else {
             signal = warp_drift(&signal, config.drift_ppm);
-            if config.latency_frames > 0 {
-                let mut delayed = vec![0.0; config.latency_frames];
-                delayed.append(&mut signal);
-                signal = delayed;
-            }
             signal.extend(std::iter::repeat_n(
                 0.0,
                 self.tail_frames(capture.sample_rate),
             ));
+        }
+        if let Some(impulse_response) = config
+            .channel_impulse_responses
+            .get(channel_index)
+            .filter(|response| !response.is_empty())
+        {
+            if impulse_response.iter().any(|tap| !tap.is_finite()) {
+                return Err(format!(
+                    "Fake room impulse response for input channel {channel_index} contains non-finite samples"
+                ));
+            }
+            signal = convolve_causal(&signal, impulse_response);
+        }
+        if config.latency_frames > 0 {
+            let mut delayed = vec![0.0; config.latency_frames];
+            delayed.append(&mut signal);
+            signal = delayed;
         }
         if config.gain != 1.0 {
             for sample in &mut signal {
                 *sample *= config.gain;
             }
         }
+        if config.cubic_distortion != 0.0 {
+            if !config.cubic_distortion.is_finite() {
+                return Err("Fake cubic distortion coefficient must be finite".to_string());
+            }
+            for sample in &mut signal {
+                let input = *sample;
+                *sample = (input + config.cubic_distortion * input.powi(3)).tanh();
+            }
+        }
         // Converter saturation ahead of the noise floor, as in hardware.
         for sample in &mut signal {
             *sample = sample.clamp(-1.0, 1.0);
         }
-        if config.noise_rms > 0.0 {
-            let mut rng = XorShift64(config.seed.wrapping_add(channel_index as u64).max(1));
+        if config.noise_rms > 0.0 || config.quiet_window_noise_rms > 0.0 {
+            // Keep every run reproducible while giving consecutive repeated
+            // sweeps independent room-noise realizations for coherence/SNR.
+            let seed = config
+                .seed
+                .wrapping_add(channel_index as u64)
+                .wrapping_add(play_count.wrapping_mul(0xD1B5_4A32_D192_ED03));
+            let mut rng = XorShift64(seed.max(1));
             // Uniform(-1, 1) has RMS 1/sqrt(3); scale to the target RMS.
             let amplitude = config.noise_rms * 3.0_f32.sqrt();
+            let quiet_amplitude = config.quiet_window_noise_rms * 3.0_f32.sqrt();
             for sample in &mut signal {
-                *sample = (*sample + rng.next_unit() * amplitude).clamp(-1.0, 1.0);
+                let noise = if sample.abs() <= f32::EPSILON {
+                    quiet_amplitude
+                } else {
+                    amplitude
+                };
+                *sample = (*sample + rng.next_unit() * noise).clamp(-1.0, 1.0);
             }
         }
         Ok(signal)
@@ -377,6 +491,18 @@ impl SweepRecorder for FakeRecorder {
         (state.stimulus.len() as f64 * f64::from(capture.sample_rate) / f64::from(state.sweep_rate))
             .ceil() as usize
             + self.wire.config.latency_frames
+            + capture
+                .channels
+                .iter()
+                .filter_map(|channel| {
+                    self.wire
+                        .config
+                        .channel_impulse_responses
+                        .get(usize::from(*channel))
+                })
+                .map(|response| response.len().saturating_sub(1))
+                .max()
+                .unwrap_or(0)
             + self.tail_frames(capture.sample_rate)
     }
 
@@ -391,8 +517,8 @@ impl SweepRecorder for FakeRecorder {
             return Err(failure.clone());
         }
         let mut recorded_per_channel = Vec::with_capacity(capture.channels.len());
-        for channel_index in 0..capture.channels.len() {
-            recorded_per_channel.push(self.render_channel(&capture, channel_index)?);
+        for &input_channel in &capture.channels {
+            recorded_per_channel.push(self.render_channel(&capture, usize::from(input_channel))?);
         }
         let dropped_samples = self.wire.config.dropped_samples;
         if dropped_samples > 0 {
@@ -433,6 +559,21 @@ fn warp_drift(samples: &[f32], drift_ppm: f64) -> Vec<f32> {
             a + (b - a) * frac
         })
         .collect()
+}
+
+/// Apply a causal room response while retaining the response's full decay.
+fn convolve_causal(signal: &[f32], impulse_response: &[f32]) -> Vec<f32> {
+    if signal.is_empty() || impulse_response.is_empty() {
+        return signal.to_vec();
+    }
+    let output_len = signal.len() + impulse_response.len() - 1;
+    let mut output = vec![0.0; output_len];
+    for (sample_index, &sample) in signal.iter().enumerate() {
+        for (tap_index, &tap) in impulse_response.iter().enumerate() {
+            output[sample_index + tap_index] += sample * tap;
+        }
+    }
+    output
 }
 
 /// Deterministic 64-bit xorshift (test noise needs no RNG dependency).

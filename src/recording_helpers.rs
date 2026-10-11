@@ -8,9 +8,14 @@
 //! [`crate::wizard::RecordingScreenModel::build_recording_configuration`]
 //! next to the other save-time helpers.
 
+// Rust guideline compliant 2026-02-21
+
+use crate::quality::{
+    QualityFinding, QualityMethod, QualityMetric, QualityStatus, QualityUnit, ThresholdComparison,
+};
 use crate::recording_types::{
     ChannelRecording, ChannelRecordingState, RecordingResult, RecordingSignalType,
-    TakeQualitySummary,
+    RecordingSourceIdentity, TakeQualitySummary,
 };
 use crate::signal_recorder::{
     CaptureAnalysis, DEFAULT_MLS_ORDER, MIN_REPEAT_SWEEPS, SignalParams, SignalType,
@@ -23,6 +28,248 @@ use crate::signal_recorder::{
 /// so every frontend must save the session as `<dir>/recordings.json`
 /// regardless of the user-chosen session name.
 pub const RECORDINGS_FILENAME: &str = "recordings.json";
+
+/// Adjacent, versioned sidecar for quality evidence associated with
+/// [`RECORDINGS_FILENAME`]. The canonical RoomConfig remains unchanged.
+pub const RECORDING_QUALITY_FILENAME: &str = "recording-quality.json";
+
+/// Current version of the recording quality sidecar schema.
+pub const RECORDING_QUALITY_SIDECAR_VERSION: u32 = 1;
+
+/// One saved source and the measured quality evidence for that take.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RecordingQualityEntry {
+    /// Stable RoomConfig identity, independent of display ordering.
+    pub source: RecordingSourceIdentity,
+    pub quality: TakeQualitySummary,
+}
+
+/// Quality evidence persisted next to `recordings.json` without extending
+/// `InlineMeasurement` or RoomConfig serialization.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RecordingQualitySidecar {
+    pub version: u32,
+    /// SHA-256 of the exact `recordings.json` bytes. Stale sidecars are
+    /// ignored if the session was replaced without a matching evidence write.
+    pub session_sha256: String,
+    /// Filesystem write timestamp of the exact canonical file version. This
+    /// also detects a same-content session rewrite with different evidence.
+    pub session_modified_unix_nanos: u64,
+    pub entries: Vec<RecordingQualityEntry>,
+}
+
+impl RecordingQualitySidecar {
+    /// Find evidence for a source, if the sidecar contains that exact source.
+    pub fn quality_for(&self, source: &RecordingSourceIdentity) -> Option<&TakeQualitySummary> {
+        self.entries
+            .iter()
+            .find(|entry| &entry.source == source)
+            .map(|entry| &entry.quality)
+    }
+}
+
+/// Atomically save versioned quality evidence beside a canonical session.
+/// Include every source that has evidence; an empty entry list deliberately
+/// replaces an old sidecar rather than allowing stale results to survive.
+pub fn save_recording_quality_sidecar(
+    recordings_json_path: &std::path::Path,
+    recordings_json: &[u8],
+    entries: Vec<RecordingQualityEntry>,
+) -> std::io::Result<()> {
+    let current_session = std::fs::read(recordings_json_path)?;
+    if current_session != recordings_json {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "recordings.json changed before its quality sidecar was written",
+        ));
+    }
+    let mut seen = std::collections::HashSet::with_capacity(entries.len());
+    if entries
+        .iter()
+        .any(|entry| !seen.insert(entry.source.clone()))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "quality sidecar contains duplicate source identities",
+        ));
+    }
+    let sidecar = RecordingQualitySidecar {
+        version: RECORDING_QUALITY_SIDECAR_VERSION,
+        session_sha256: recording_session_sha256(recordings_json),
+        session_modified_unix_nanos: recording_session_modified_unix_nanos(recordings_json_path)?,
+        entries,
+    };
+    let json = serde_json::to_vec_pretty(&sidecar)
+        .map_err(|error| std::io::Error::other(format!("serialize quality sidecar: {error}")))?;
+    let path = recording_quality_sidecar_path(recordings_json_path);
+    save_recording_session_json(&path, &json)
+}
+
+/// Load the adjacent sidecar for these exact session bytes.
+///
+/// Missing, unsupported-version, or mismatched sidecars return `Ok(None)`;
+/// callers must leave quality as `None` in those cases rather than infer a
+/// clean result. Malformed sidecar data returns `InvalidData` so the caller
+/// can surface or log the damaged evidence file.
+pub fn load_recording_quality_sidecar(
+    recordings_json_path: &std::path::Path,
+    recordings_json: &[u8],
+) -> std::io::Result<Option<RecordingQualitySidecar>> {
+    let current_session = match std::fs::read(recordings_json_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if current_session != recordings_json {
+        return Ok(None);
+    }
+    let path = recording_quality_sidecar_path(recordings_json_path);
+    let json = match std::fs::read(path) {
+        Ok(json) => json,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let sidecar: RecordingQualitySidecar = serde_json::from_slice(&json).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("parse recording quality sidecar: {error}"),
+        )
+    })?;
+    if sidecar.version != RECORDING_QUALITY_SIDECAR_VERSION
+        || sidecar.session_sha256 != recording_session_sha256(recordings_json)
+        || recording_session_modified_unix_nanos(recordings_json_path).ok()
+            != Some(sidecar.session_modified_unix_nanos)
+    {
+        return Ok(None);
+    }
+    let mut seen = std::collections::HashSet::with_capacity(sidecar.entries.len());
+    if sidecar
+        .entries
+        .iter()
+        .any(|entry| !seen.insert(entry.source.clone()))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "quality sidecar contains duplicate source identities",
+        ));
+    }
+    Ok(Some(sidecar))
+}
+
+fn recording_quality_sidecar_path(recordings_json_path: &std::path::Path) -> std::path::PathBuf {
+    recordings_json_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(RECORDING_QUALITY_FILENAME)
+}
+
+fn recording_session_sha256(recordings_json: &[u8]) -> String {
+    use sha2::Digest as _;
+    use std::fmt::Write as _;
+
+    let digest = sha2::Sha256::digest(recordings_json);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
+}
+
+fn recording_session_modified_unix_nanos(path: &std::path::Path) -> std::io::Result<u64> {
+    use std::time::UNIX_EPOCH;
+
+    std::fs::metadata(path)?
+        .modified()?
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid recordings.json timestamp: {error}"),
+            )
+        })?
+        .as_nanos()
+        .try_into()
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "recordings.json timestamp exceeds sidecar format",
+            )
+        })
+}
+
+/// Build sidecar entries using the same identity ordering as
+/// `build_speakers_from_recordings` in sotf-player. `speaker_names_by_channel`
+/// must be the channel-name list supplied to that builder. Imported rows
+/// retain their original source identity instead of being renumbered.
+pub fn recording_quality_entries_for_sources(
+    recordings: &[ChannelRecording],
+    speaker_names_by_channel: &[String],
+) -> Vec<RecordingQualityEntry> {
+    use std::collections::BTreeMap;
+
+    let mut entries = Vec::new();
+    let mut grouped: BTreeMap<usize, Vec<&ChannelRecording>> = BTreeMap::new();
+    for recording in recordings {
+        if recording.state != ChannelRecordingState::Done {
+            continue;
+        }
+        let Some(result) = recording.result.as_ref() else {
+            continue;
+        };
+        if let Some(source) = recording.imported_source.as_ref() {
+            if let Some(quality) = result.quality.as_ref() {
+                entries.push(RecordingQualityEntry {
+                    source: source.clone(),
+                    quality: quality.clone(),
+                });
+            }
+        } else if result.wav_path.is_some() || result.csv_path.is_some() {
+            grouped
+                .entry(recording.channel_index)
+                .or_default()
+                .push(recording);
+        }
+    }
+
+    for (channel_index, mut group) in grouped {
+        group.sort_by_key(|recording| (recording.mic_position_index, recording.mic_index));
+        let speaker = speaker_names_by_channel
+            .get(channel_index)
+            .map(String::as_str)
+            .or_else(|| {
+                group.first().map(|recording| {
+                    recording
+                        .channel_name
+                        .find(" (")
+                        .map_or(recording.channel_name.as_str(), |position| {
+                            &recording.channel_name[..position]
+                        })
+                })
+            });
+        let Some(speaker) = speaker else {
+            continue;
+        };
+        for (measurement_index, recording) in group.into_iter().enumerate() {
+            let Some(quality) = recording
+                .result
+                .as_ref()
+                .and_then(|result| result.quality.as_ref())
+            else {
+                continue;
+            };
+            entries.push(RecordingQualityEntry {
+                source: RecordingSourceIdentity {
+                    speaker: speaker.to_string(),
+                    driver_index: None,
+                    measurement_index,
+                },
+                quality: quality.clone(),
+            });
+        }
+    }
+    entries
+}
 
 /// Replace session metadata only after a complete write succeeds.
 /// A failed write leaves the previous saved session intact.
@@ -270,9 +517,14 @@ pub fn nudge_num_sweeps(current: u16, delta: i32) -> u16 {
 /// as "0 ppm" (Task-7 review carry-forward).
 pub fn summarize_take_quality(capture: &CaptureAnalysis) -> TakeQualitySummary {
     TakeQualitySummary {
-        trustworthy: capture.quality.trustworthy,
+        trustworthy: capture.quality.trustworthy
+            && capture
+                .quality_findings
+                .iter()
+                .all(|finding| finding.status == QualityStatus::Pass),
         score: capture.quality.score,
         issues: capture.quality.issues.clone(),
+        findings: capture.quality_findings.clone(),
         mean_coherence: capture.quality.mean_coherence,
         median_snr_db: capture.quality.median_snr_db,
         clip_fraction: capture.quality.clipping.fraction,
@@ -324,7 +576,91 @@ pub fn take_verdict_text(q: &TakeQualitySummary) -> String {
             q.accepted_count + q.rejected_count
         ));
     }
+    let evidence = q
+        .findings
+        .iter()
+        .filter(|finding| q.trustworthy || finding.status != QualityStatus::Pass)
+        .map(format_quality_finding)
+        .collect::<Vec<_>>();
+    if !evidence.is_empty() {
+        parts.push(format!("quality evidence: {}", evidence.join(" | ")));
+    }
     parts.join(", ")
+}
+
+fn format_quality_finding(finding: &QualityFinding) -> String {
+    let mut parts = vec![format!(
+        "{} {}",
+        quality_metric_label(finding.metric),
+        match finding.status {
+            QualityStatus::Pass => "pass",
+            QualityStatus::Warning => "warning",
+            QualityStatus::Unknown => "unknown",
+        }
+    )];
+    if let Some(measured) = finding.measured {
+        parts.push(format!(
+            "{measured:.2} {}",
+            quality_unit_label(finding.unit)
+        ));
+    }
+    parts.push(quality_method_label(finding.method).to_string());
+    if let Some(threshold) = finding.threshold {
+        parts.push(format!(
+            "threshold {} {:.2} {}",
+            threshold_comparison_label(threshold.comparison),
+            threshold.value,
+            quality_unit_label(finding.unit)
+        ));
+    }
+    if let Some(band) = finding.band {
+        parts.push(format!("{:.0}–{:.0} Hz", band.low_hz, band.high_hz));
+    }
+    let mut text = format!("{} ({})", parts[0], parts[1..].join(", "));
+    if let Some(reason) = finding.unknown_reason.as_deref() {
+        text.push_str(&format!("; reason: {reason}"));
+    }
+    if let Some(recommendation) = finding.recommendation.as_deref() {
+        text.push_str(&format!("; next: {recommendation}"));
+    }
+    text
+}
+
+fn quality_metric_label(metric: QualityMetric) -> &'static str {
+    match metric {
+        QualityMetric::TotalHarmonicDistortion => "THD",
+        QualityMetric::BroadbandSnr => "broadband SNR",
+        QualityMetric::BandSnr => "band SNR",
+        QualityMetric::Clipping => "clipping",
+        QualityMetric::TimingMarkers => "timing markers",
+    }
+}
+
+fn quality_unit_label(unit: QualityUnit) -> &'static str {
+    match unit {
+        QualityUnit::Percent => "%",
+        QualityUnit::Decibels => "dB",
+        QualityUnit::Samples => "samples",
+        QualityUnit::Count => "count",
+    }
+}
+
+fn quality_method_label(method: QualityMethod) -> &'static str {
+    match method {
+        QualityMethod::FarinaHarmonicImpulseResponse => "Farina harmonic IR",
+        QualityMethod::BroadbandPowerRatio => "active/silent-window power ratio",
+        QualityMethod::NoiseSubtractedBandPowerRatio => "noise-subtracted band power ratio",
+        QualityMethod::FullScaleSampleCount => "full-scale sample count",
+        QualityMethod::TimingMarkerFit => "timing-marker fit",
+    }
+}
+
+fn threshold_comparison_label(comparison: ThresholdComparison) -> &'static str {
+    match comparison {
+        ThresholdComparison::AtMost => "≤",
+        ThresholdComparison::AtLeast => "≥",
+        ThresholdComparison::EqualTo => "=",
+    }
 }
 
 /// Compact per-channel quality cell for channel-list tables.
@@ -416,11 +752,11 @@ pub fn session_quality_lines(
             let (mut line, kind) = match quality {
                 Some(q) if q.trustworthy => (
                     format!(
-                        "{}: OK (score {:.2}, {}/{} sweeps)",
+                        "{}: OK ({}/{} sweeps) — {}",
                         c.channel_name,
-                        q.score,
                         q.accepted_count,
-                        q.accepted_count + q.rejected_count
+                        q.accepted_count + q.rejected_count,
+                        take_verdict_text(q),
                     ),
                     SessionQualityLineKind::Ok,
                 ),
@@ -761,6 +1097,7 @@ mod tests {
             trustworthy,
             score: 0.42,
             issues: issues.iter().map(|s| s.to_string()).collect(),
+            findings: Vec::new(),
             mean_coherence: Some(0.71),
             median_snr_db: Some(18.2),
             clip_fraction: 0.003,
@@ -770,6 +1107,202 @@ mod tests {
             accepted_count: 4,
             rejected_count: 1,
         }
+    }
+
+    #[test]
+    fn recording_quality_sidecar_roundtrips_warning_and_unknown_by_source() {
+        use crate::quality::{
+            QualityBand, QualityFinding, QualityMethod, QualityMetric, QualityPolicy,
+            QualityStatus, QualityThreshold, QualityUnit, ThresholdComparison,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let session_path = directory.path().join(RECORDINGS_FILENAME);
+        let session_bytes = br#"{"speakers":{"Left":{},"Right":{}}}"#;
+        save_recording_session_json(&session_path, session_bytes).unwrap();
+        let warning_source = RecordingSourceIdentity {
+            speaker: "Left".into(),
+            driver_index: None,
+            measurement_index: 0,
+        };
+        let unknown_source = RecordingSourceIdentity {
+            speaker: "Left".into(),
+            driver_index: None,
+            measurement_index: 1,
+        };
+        let adjacent_source = RecordingSourceIdentity {
+            speaker: "Right".into(),
+            driver_index: None,
+            measurement_index: 0,
+        };
+        let mut warning = quality_summary(false, &["high harmonic distortion"], None);
+        warning.findings.push(QualityFinding {
+            policy: QualityPolicy::SweepAnalysis,
+            metric: QualityMetric::TotalHarmonicDistortion,
+            status: QualityStatus::Warning,
+            measured: Some(12.5),
+            unit: QualityUnit::Percent,
+            band: Some(QualityBand {
+                low_hz: 100.0,
+                high_hz: 20_000.0,
+            }),
+            method: QualityMethod::FarinaHarmonicImpulseResponse,
+            threshold: Some(QualityThreshold {
+                comparison: ThresholdComparison::AtMost,
+                value: 10.0,
+            }),
+            unknown_reason: None,
+            recommendation: Some("lower playback level and repeat".into()),
+            message: "THD exceeds advisory threshold".into(),
+        });
+        let mut unknown = quality_summary(false, &["SNR evidence unavailable"], None);
+        unknown
+            .findings
+            .push(QualityFinding::unknown_with_threshold(
+                QualityPolicy::CoherentCapture,
+                QualityMetric::BroadbandSnr,
+                QualityUnit::Decibels,
+                QualityMethod::BroadbandPowerRatio,
+                QualityThreshold {
+                    comparison: ThresholdComparison::AtLeast,
+                    value: 30.0,
+                },
+                "the quiet window is digital silence",
+                Some("capture a valid quiet interval".into()),
+                "coherent SNR is unavailable",
+            ));
+
+        save_recording_quality_sidecar(
+            &session_path,
+            session_bytes,
+            vec![
+                RecordingQualityEntry {
+                    source: warning_source.clone(),
+                    quality: warning.clone(),
+                },
+                RecordingQualityEntry {
+                    source: unknown_source.clone(),
+                    quality: unknown.clone(),
+                },
+            ],
+        )
+        .unwrap();
+
+        let loaded = load_recording_quality_sidecar(&session_path, session_bytes)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.quality_for(&warning_source), Some(&warning));
+        assert_eq!(loaded.quality_for(&unknown_source), Some(&unknown));
+        assert_eq!(loaded.quality_for(&adjacent_source), None);
+        assert_eq!(
+            loaded.entries.len(),
+            2,
+            "neighboring source is retained separately"
+        );
+        let changed_session = br#"{"updated":true}"#;
+        save_recording_session_json(&session_path, changed_session).unwrap();
+        assert_eq!(
+            load_recording_quality_sidecar(&session_path, br#"{"updated":true}"#).unwrap(),
+            None,
+            "stale quality must not attach after the canonical session changes"
+        );
+
+        let legacy_directory = tempfile::tempdir().unwrap();
+        let missing_session = legacy_directory.path().join(RECORDINGS_FILENAME);
+        save_recording_session_json(&missing_session, session_bytes).unwrap();
+        assert_eq!(
+            load_recording_quality_sidecar(&missing_session, session_bytes).unwrap(),
+            None,
+            "legacy sessions without a sidecar retain no inferred quality"
+        );
+    }
+
+    #[test]
+    fn quality_entries_follow_saved_speaker_mic_position_order_without_shifting_missing_quality() {
+        let result = |channel, name: &str, quality| RecordingResult {
+            channel,
+            sample_rate_hz: Some(48_000),
+            wav_path: Some(format!("{name}.wav")),
+            csv_path: Some(format!("{name}.csv")),
+            frequencies: vec![100.0],
+            magnitude_db: vec![0.0],
+            phase_deg: vec![0.0],
+            impulse_response: None,
+            impulse_time_ms: None,
+            thd_percent: None,
+            harmonic_distortion_db: None,
+            excess_group_delay_ms: None,
+            rt60_ms: None,
+            clarity_c50_db: None,
+            clarity_c80_db: None,
+            spectrogram_db: None,
+            quality,
+        };
+        let make_take =
+            |channel_index, channel_name: &str, mic_index, mic_position_index, quality| {
+                let mut take = ChannelRecording::with_mic_position(
+                    channel_index,
+                    channel_name.into(),
+                    mic_index,
+                    mic_position_index,
+                );
+                take.state = ChannelRecordingState::Done;
+                take.result = Some(result(channel_index, channel_name, quality));
+                take
+            };
+
+        // Save order is position first, then mic, matching the RoomConfig
+        // builder. The first source deliberately has no quality evidence.
+        let recordings = vec![
+            make_take(0, "L (Pos 1 / Mic 1)", 0, 0, None),
+            make_take(
+                0,
+                "L (Pos 1 / Mic 2)",
+                1,
+                0,
+                Some(quality_summary(false, &["high THD"], None)),
+            ),
+            make_take(
+                0,
+                "L (Pos 2 / Mic 1)",
+                0,
+                1,
+                Some(quality_summary(false, &["SNR unavailable"], None)),
+            ),
+            make_take(
+                1,
+                "R (Pos 1 / Mic 1)",
+                0,
+                0,
+                Some(quality_summary(true, &[], Some(0.0))),
+            ),
+        ];
+        let entries = recording_quality_entries_for_sources(&recordings, &["L".into(), "R".into()]);
+
+        let identity = |speaker: &str, measurement_index| RecordingSourceIdentity {
+            speaker: speaker.into(),
+            driver_index: None,
+            measurement_index,
+        };
+        let sidecar = RecordingQualitySidecar {
+            version: RECORDING_QUALITY_SIDECAR_VERSION,
+            session_sha256: String::new(),
+            session_modified_unix_nanos: 0,
+            entries,
+        };
+        assert_eq!(sidecar.quality_for(&identity("L", 0)), None);
+        assert_eq!(
+            sidecar.quality_for(&identity("L", 1)).unwrap().issues,
+            vec!["high THD"]
+        );
+        assert_eq!(
+            sidecar.quality_for(&identity("L", 2)).unwrap().issues,
+            vec!["SNR unavailable"]
+        );
+        assert_eq!(
+            sidecar.quality_for(&identity("R", 0)).unwrap().drift_ppm,
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -783,6 +1316,120 @@ mod tests {
         assert!(text.contains("clipped 0.30%"), "{text}");
         assert!(text.contains("drift -45 ppm"), "{text}");
         assert!(text.contains("4/5 takes accepted"), "{text}");
+    }
+
+    #[test]
+    fn take_verdict_text_explains_warning_and_unknown_evidence() {
+        use crate::quality::{
+            QualityBand, QualityFinding, QualityMethod, QualityMetric, QualityPolicy,
+            QualityStatus, QualityThreshold, QualityUnit, ThresholdComparison,
+        };
+
+        let mut q = quality_summary(false, &["high harmonic distortion"], None);
+        q.findings = vec![
+            QualityFinding {
+                policy: QualityPolicy::SweepAnalysis,
+                metric: QualityMetric::TotalHarmonicDistortion,
+                status: QualityStatus::Warning,
+                measured: Some(12.5),
+                unit: QualityUnit::Percent,
+                band: Some(QualityBand {
+                    low_hz: 100.0,
+                    high_hz: 20_000.0,
+                }),
+                method: QualityMethod::FarinaHarmonicImpulseResponse,
+                threshold: Some(QualityThreshold {
+                    comparison: ThresholdComparison::AtMost,
+                    value: 10.0,
+                }),
+                unknown_reason: None,
+                recommendation: Some("reduce playback level and repeat".into()),
+                message: "harmonic distortion exceeded the limit".into(),
+            },
+            QualityFinding {
+                policy: QualityPolicy::CoherentCapture,
+                metric: QualityMetric::BroadbandSnr,
+                status: QualityStatus::Unknown,
+                measured: None,
+                unit: QualityUnit::Decibels,
+                band: None,
+                method: QualityMethod::BroadbandPowerRatio,
+                threshold: Some(QualityThreshold {
+                    comparison: ThresholdComparison::AtLeast,
+                    value: 30.0,
+                }),
+                unknown_reason: Some("the silent window is digital silence".into()),
+                recommendation: Some("check the input noise-floor path".into()),
+                message: "SNR unavailable".into(),
+            },
+            QualityFinding {
+                policy: QualityPolicy::SweepAnalysis,
+                metric: QualityMetric::Clipping,
+                status: QualityStatus::Pass,
+                measured: Some(0.0),
+                unit: QualityUnit::Count,
+                band: None,
+                method: QualityMethod::FullScaleSampleCount,
+                threshold: None,
+                unknown_reason: None,
+                recommendation: None,
+                message: "no clipping detected".into(),
+            },
+        ];
+
+        let text = take_verdict_text(&q);
+        assert!(text.contains("THD warning"), "{text}");
+        assert!(text.contains("12.50 %"), "{text}");
+        assert!(text.contains("Farina harmonic IR"), "{text}");
+        assert!(text.contains("threshold ≤ 10.00 %"), "{text}");
+        assert!(text.contains("100–20000 Hz"), "{text}");
+        assert!(text.contains("reduce playback level and repeat"), "{text}");
+        assert!(text.contains("broadband SNR unknown"), "{text}");
+        assert!(text.contains("threshold ≥ 30.00 dB"), "{text}");
+        assert!(
+            text.contains("the silent window is digital silence"),
+            "{text}"
+        );
+        assert!(text.contains("check the input noise-floor path"), "{text}");
+        assert!(!text.contains("clipping pass"), "{text}");
+        assert!(
+            text.contains("high harmonic distortion"),
+            "legacy issue was lost: {text}"
+        );
+    }
+
+    #[test]
+    fn clean_take_verdict_includes_passing_metric_evidence() {
+        use crate::quality::{
+            QualityFinding, QualityMethod, QualityMetric, QualityPolicy, QualityStatus,
+            QualityThreshold, QualityUnit, ThresholdComparison,
+        };
+
+        let mut quality = quality_summary(true, &[], None);
+        quality.findings.push(QualityFinding {
+            policy: QualityPolicy::SweepAnalysis,
+            metric: QualityMetric::TotalHarmonicDistortion,
+            status: QualityStatus::Pass,
+            measured: Some(1.25),
+            unit: QualityUnit::Percent,
+            band: None,
+            method: QualityMethod::FarinaHarmonicImpulseResponse,
+            threshold: Some(QualityThreshold {
+                comparison: ThresholdComparison::AtMost,
+                value: 10.0,
+            }),
+            unknown_reason: None,
+            recommendation: None,
+            message: "THD below advisory threshold".into(),
+        });
+
+        let text = take_verdict_text(&quality);
+        assert!(text.contains("THD pass"), "{text}");
+        assert!(text.contains("1.25 %"), "{text}");
+        assert!(text.contains("Farina harmonic IR"), "{text}");
+        assert!(text.contains("threshold ≤ 10.00 %"), "{text}");
+        assert!(text.contains("coherence 0.71"), "{text}");
+        assert!(text.contains("SNR 18.2 dB"), "{text}");
     }
 
     #[test]
@@ -910,7 +1557,11 @@ mod tests {
 
         let lines = session_quality_summary(&[clean, bad, pending]);
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].starts_with("FL: OK (score 0.95"), "{}", lines[0]);
+        assert!(
+            lines[0].starts_with("FL: OK (4/4 sweeps) — score 0.95"),
+            "{}",
+            lines[0]
+        );
         assert!(lines[0].contains("4/4 sweeps"), "{}", lines[0]);
         assert!(lines[1].starts_with("FR (Pos 2): REVIEW"), "{}", lines[1]);
         assert!(lines[1].contains("clipping detected"), "{}", lines[1]);
@@ -1044,6 +1695,7 @@ mod tests {
         let capture = CaptureAnalysis {
             result,
             quality: report,
+            quality_findings: Vec::new(),
             drift: Some(ClockDriftEstimate {
                 ppm: -45.0,
                 start_lag_samples: 10,
@@ -1069,10 +1721,25 @@ mod tests {
         assert_eq!(q.accepted_count, 3);
         assert_eq!(q.rejected_count, 1);
 
+        let mut capture_with_unknown = capture;
+        capture_with_unknown.quality.trustworthy = true;
+        capture_with_unknown.quality_findings = vec![crate::quality::QualityFinding::unknown(
+            crate::quality::QualityPolicy::SingleTake,
+            crate::quality::QualityMetric::BroadbandSnr,
+            crate::quality::QualityUnit::Decibels,
+            crate::quality::QualityMethod::BroadbandPowerRatio,
+            "the pre-silence window is digital silence",
+            Some("check the input noise-floor path".into()),
+            "SNR could not be measured",
+        )];
+        let q = summarize_take_quality(&capture_with_unknown);
+        assert!(!q.trustworthy, "unknown required evidence must need review");
+        assert_eq!(q.findings, capture_with_unknown.quality_findings);
+
         // Drift unavailable stays None — never collapses to 0 ppm.
         let capture_no_drift = CaptureAnalysis {
             drift: None,
-            ..capture
+            ..capture_with_unknown
         };
         assert_eq!(summarize_take_quality(&capture_no_drift).drift_ppm, None);
     }

@@ -1,5 +1,7 @@
 //! Canonical RoomEQ recording export with ordered per-microphone clock evidence.
 
+// Rust guideline compliant 2026-02-21
+
 use super::clock::CaptureClockBasis;
 use super::clock::io::ClockProcessedManifest;
 use super::{CalibrationOrientation, CaptureGeometry};
@@ -528,6 +530,7 @@ mod tests {
                     high_hz: 20000.0,
                 }),
                 issues: Vec::new(),
+                quality_findings: Vec::new(),
             }),
         }
     }

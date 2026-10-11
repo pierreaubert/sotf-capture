@@ -14,6 +14,13 @@
 //! - the per-take quality report ([`build_capture_quality`]) carried back to
 //!   callers inside [`CaptureAnalysis`].
 
+// Rust guideline compliant 2026-02-21
+
+use crate::quality::{
+    QualityBand, QualityFinding, QualityMethod, QualityMetric, QualityPolicy, QualityStatus,
+    QualityThreshold, QualityUnit, SINGLE_TAKE_SNR_THRESHOLD_DB, THD_WARNING_THRESHOLD_PERCENT,
+    ThresholdComparison,
+};
 use math_audio_dsp::analysis::AnalysisResult;
 use math_audio_dsp::analysis::ClockDriftEstimate;
 use math_audio_dsp::analysis::MeasurementQualityReport;
@@ -42,6 +49,8 @@ pub struct CaptureAnalysis {
     /// issues). `trustworthy == false` is advisory: the capture still
     /// succeeded; callers decide whether to confirm with the user.
     pub quality: MeasurementQualityReport,
+    /// Structured capture evidence; unavailable estimates remain unknown.
+    pub quality_findings: Vec<QualityFinding>,
     /// Estimated relative playback/capture clock drift, when the estimation
     /// itself succeeded (regardless of whether it was acted upon). For
     /// repeat captures this is the first ACCEPTED take's estimate (all takes
@@ -206,20 +215,18 @@ pub(super) fn check_lag_lock(lag: &LagEstimate, log_tag: &str) -> Result<(), Str
     Ok(())
 }
 
-/// Peak THD+N (%) above which a take gets a high-distortion quality
-/// issue. THD this high means the playback chain is driven far outside
-/// linear behavior (or the mic preamp is saturating without hard
-/// clipping); the deconvolved response around the peak is suspect.
-/// Non-sweep analyses report zero THD and never trigger this.
+/// Peak Farina harmonic-only THD (%) above which a sweep gets a warning.
+/// Broadband residual noise is not included, so this is not THD+N.
+/// The threshold warns when the deconvolved response may be nonlinear.
 #[cfg(not(target_os = "ios"))]
-pub(super) const THD_WARN_PERCENT: f32 = 10.0;
+pub(super) const THD_WARN_PERCENT: f32 = THD_WARNING_THRESHOLD_PERCENT as f32;
 
 /// Broadband SNR (dB) below which a single take gets a low-SNR quality
 /// issue. Repeat captures get the finer spectral assessment from math-dsp
 /// instead (`minimum_median_snr_db`, same 10 dB default); single takes
 /// supply no measured/noise pair, so broadband RMS stands in.
 #[cfg(not(target_os = "ios"))]
-pub(super) const SNR_WARN_DB: f32 = 10.0;
+pub(super) const SNR_WARN_DB: f32 = SINGLE_TAKE_SNR_THRESHOLD_DB as f32;
 
 /// Bins whose fundamental sits more than this far below the response peak
 /// are excluded from the THD verdict: where the room (or the excitation)
@@ -233,14 +240,33 @@ const THD_FUNDAMENTAL_GATE_DB: f32 = 20.0;
 /// [`THD_FUNDAMENTAL_GATE_DB`] of the response peak count — THD at a deep
 /// null or past the excited band is noise, not distortion. Returns `None`
 /// for empty input, when no bin has a usable fundamental, or when every
-/// counted bin is at/below the threshold. The three slices pair by index;
+/// counted bin is at/below the threshold. This estimates harmonic energy
+/// from separated second through fifth harmonic impulse responses; it does
+/// not include broadband noise. The three slices pair by index;
 /// length mismatches shorten the comparison to the shared prefix.
 #[cfg(not(target_os = "ios"))]
 pub(super) fn thd_warning_issue(
     frequencies: &[f32],
     thd_percent: &[f32],
     fundamental_db: &[f32],
+    sweep_range: Option<(f32, f32)>,
 ) -> Option<String> {
+    let (peak_freq, peak_thd) = thd_peak(frequencies, thd_percent, fundamental_db, sweep_range)?;
+    if peak_thd > THD_WARN_PERCENT {
+        Some(format!(
+            "high distortion: peak THD {peak_thd:.1}% at {peak_freq:.0} Hz exceeds {THD_WARN_PERCENT:.0}% — lower the playback level and re-run"
+        ))
+    } else {
+        None
+    }
+}
+
+fn thd_peak(
+    frequencies: &[f32],
+    thd_percent: &[f32],
+    fundamental_db: &[f32],
+    sweep_range: Option<(f32, f32)>,
+) -> Option<(f32, f32)> {
     let peak_fundamental = fundamental_db
         .iter()
         .copied()
@@ -251,17 +277,16 @@ pub(super) fn thd_warning_issue(
         .iter()
         .zip(thd_percent.iter())
         .zip(fundamental_db.iter())
+        .filter(|((frequency, _), _)| {
+            frequency.is_finite()
+                && sweep_range
+                    .is_none_or(|(low_hz, high_hz)| **frequency >= low_hz && **frequency <= high_hz)
+        })
         .filter(|((_, thd), _)| thd.is_finite())
         .filter(|((_, _), fundamental)| **fundamental >= floor)
         .max_by(|((_, left), _), ((_, right), _)| left.total_cmp(right))
         .map(|((frequency, thd), _)| (*frequency, *thd))?;
-    if peak_thd > THD_WARN_PERCENT {
-        Some(format!(
-            "high distortion: peak THD {peak_thd:.1}% at {peak_freq:.0} Hz exceeds {THD_WARN_PERCENT:.0}% — lower the playback level and re-run"
-        ))
-    } else {
-        None
-    }
+    (peak_freq.is_finite() && peak_thd.is_finite()).then_some((peak_freq, peak_thd))
 }
 
 /// Advisory issue when the broadband SNR of a single take falls below
@@ -273,6 +298,17 @@ pub(super) fn thd_warning_issue(
 /// finite and at/above the threshold.
 #[cfg(not(target_os = "ios"))]
 pub(super) fn snr_warning_issue(active: &[f32], silence: &[f32]) -> Option<String> {
+    let snr_db = broadband_snr_db(active, silence)?;
+    if snr_db < f64::from(SNR_WARN_DB) {
+        Some(format!(
+            "low SNR: broadband SNR {snr_db:.1} dB is below {SNR_WARN_DB:.1} dB — raise the playback level or reduce background noise"
+        ))
+    } else {
+        None
+    }
+}
+
+fn broadband_snr_db(active: &[f32], silence: &[f32]) -> Option<f64> {
     fn rms(samples: &[f32]) -> f64 {
         if samples.is_empty() {
             return 0.0;
@@ -289,13 +325,161 @@ pub(super) fn snr_warning_issue(active: &[f32], silence: &[f32]) -> Option<Strin
         return None;
     }
     let snr_db = 20.0 * (signal / noise).log10();
-    if snr_db.is_finite() && snr_db < f64::from(SNR_WARN_DB) {
-        Some(format!(
-            "low SNR: broadband SNR {snr_db:.1} dB is below {SNR_WARN_DB:.1} dB — raise the playback level or reduce background noise"
-        ))
-    } else {
-        None
+    snr_db.is_finite().then_some(snr_db)
+}
+
+/// Build typed findings using the same estimator inputs and thresholds as the legacy verdict.
+#[cfg(not(target_os = "ios"))]
+pub(super) fn structured_quality_findings(
+    recorded: &[f32],
+    frequencies: &[f32],
+    thd_percent: &[f32],
+    harmonic_distortion_db: &[Vec<f32>],
+    fundamental_db: &[f32],
+    sweep_range: Option<(f32, f32)>,
+    active: Option<&[f32]>,
+    silence: Option<&[f32]>,
+    single_take: bool,
+) -> Vec<QualityFinding> {
+    let mut findings = Vec::new();
+    let clipped_samples = recorded.iter().filter(|sample| sample.abs() >= 1.0).count();
+    if clipped_samples > 0 {
+        findings.push(QualityFinding {
+            policy: QualityPolicy::SweepAnalysis,
+            metric: QualityMetric::Clipping,
+            status: QualityStatus::Warning,
+            measured: Some(clipped_samples as f64),
+            unit: QualityUnit::Count,
+            band: None,
+            method: QualityMethod::FullScaleSampleCount,
+            threshold: Some(QualityThreshold {
+                comparison: ThresholdComparison::EqualTo,
+                value: 0.0,
+            }),
+            unknown_reason: None,
+            recommendation: Some("reduce playback or input gain".into()),
+            message: format!("{clipped_samples} captured samples reached full scale"),
+        });
     }
+    let band = sweep_range.map(|(low_hz, high_hz)| QualityBand {
+        low_hz: f64::from(low_hz),
+        high_hz: f64::from(high_hz),
+    });
+    let thd_available = sweep_range.is_some()
+        && harmonic_distortion_db.len() >= 4
+        && harmonic_distortion_db
+            .iter()
+            .take(4)
+            .all(|curve| curve.len() == frequencies.len() && curve.iter().all(|v| v.is_finite()))
+        && harmonic_distortion_db
+            .iter()
+            .take(4)
+            .any(|curve| curve.iter().any(|value| *value > -120.0));
+    if !thd_available {
+        let mut finding = QualityFinding::unknown_with_threshold(
+            QualityPolicy::SweepAnalysis,
+            QualityMetric::TotalHarmonicDistortion,
+            QualityUnit::Percent,
+            QualityMethod::FarinaHarmonicImpulseResponse,
+            QualityThreshold {
+                comparison: ThresholdComparison::AtMost,
+                value: THD_WARNING_THRESHOLD_PERCENT,
+            },
+            "valid log-sweep harmonic impulse responses were not available",
+            Some("use a valid swept-sine capture for harmonic distortion analysis".into()),
+            "harmonic distortion is unavailable; no THD value was measured",
+        );
+        finding.band = band;
+        findings.push(finding);
+    } else if let Some((frequency, thd)) =
+        thd_peak(frequencies, thd_percent, fundamental_db, sweep_range)
+    {
+        let pass = thd <= THD_WARN_PERCENT;
+        findings.push(QualityFinding {
+            policy: QualityPolicy::SweepAnalysis,
+            metric: QualityMetric::TotalHarmonicDistortion,
+            status: if pass { QualityStatus::Pass } else { QualityStatus::Warning },
+            measured: Some(f64::from(thd)),
+            unit: QualityUnit::Percent,
+            band,
+            method: QualityMethod::FarinaHarmonicImpulseResponse,
+            threshold: Some(QualityThreshold {
+                comparison: ThresholdComparison::AtMost,
+                value: THD_WARNING_THRESHOLD_PERCENT,
+            }),
+            unknown_reason: None,
+            recommendation: (!pass).then(|| "lower playback level and re-run".into()),
+            message: format!(
+                "peak harmonic distortion {thd:.1}% at {frequency:.0} Hz {} the {:.0}% advisory threshold",
+                if pass { "meets" } else { "exceeds" }, THD_WARNING_THRESHOLD_PERCENT
+            ),
+        });
+    } else {
+        let mut finding = QualityFinding::unknown_with_threshold(
+            QualityPolicy::SweepAnalysis,
+            QualityMetric::TotalHarmonicDistortion,
+            QualityUnit::Percent,
+            QualityMethod::FarinaHarmonicImpulseResponse,
+            QualityThreshold {
+                comparison: ThresholdComparison::AtMost,
+                value: THD_WARNING_THRESHOLD_PERCENT,
+            },
+            "no usable fundamental bins were available above the response gate",
+            Some("check sweep level and response coverage, then repeat".into()),
+            "harmonic distortion is unavailable in the usable response band",
+        );
+        finding.band = band;
+        findings.push(finding);
+    }
+
+    if single_take {
+        match active
+            .zip(silence)
+            .and_then(|(active, silence)| broadband_snr_db(active, silence))
+        {
+            Some(snr) => {
+                let pass = snr >= SINGLE_TAKE_SNR_THRESHOLD_DB;
+                findings.push(QualityFinding {
+                    policy: QualityPolicy::SingleTake,
+                    metric: QualityMetric::BroadbandSnr,
+                    status: if pass {
+                        QualityStatus::Pass
+                    } else {
+                        QualityStatus::Warning
+                    },
+                    measured: Some(snr),
+                    unit: QualityUnit::Decibels,
+                    band: None,
+                    method: QualityMethod::BroadbandPowerRatio,
+                    threshold: Some(QualityThreshold {
+                        comparison: ThresholdComparison::AtLeast,
+                        value: SINGLE_TAKE_SNR_THRESHOLD_DB,
+                    }),
+                    unknown_reason: None,
+                    recommendation: (!pass)
+                        .then(|| "raise playback level or reduce background noise".into()),
+                    message: format!(
+                        "single-take broadband SNR {snr:.1} dB {} the 10 dB advisory threshold",
+                        if pass { "meets" } else { "is below" }
+                    ),
+                });
+            }
+            None => findings.push(QualityFinding::unknown_with_threshold(
+                QualityPolicy::SingleTake,
+                QualityMetric::BroadbandSnr,
+                QualityUnit::Decibels,
+                QualityMethod::BroadbandPowerRatio,
+                QualityThreshold {
+                    comparison: ThresholdComparison::AtLeast,
+                    value: SINGLE_TAKE_SNR_THRESHOLD_DB,
+                },
+                "quiet or active signal window is unavailable, silent, or non-finite",
+                Some("capture a quiet pre-sweep interval and a valid sweep".into()),
+                "single-take broadband SNR is unavailable",
+            )),
+        }
+    }
+    findings
 }
 
 /// Build the per-take quality report.
