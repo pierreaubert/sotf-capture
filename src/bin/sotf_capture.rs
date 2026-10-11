@@ -243,6 +243,10 @@ enum Command {
         output: PathBuf,
     },
     /// Clock-process a saved raw session without opening audio devices.
+    ///
+    /// Single-plan discipline: subs and mains for joint optimization
+    /// must come from one plan/process run with identical response
+    /// grids, or downstream GD-Opt skips joint optimization.
     PlanProcess {
         /// Path to the immutable capture-raw.json journal.
         #[arg(long)]
@@ -837,6 +841,11 @@ fn plan_process(
             ir_microphone,
         },
     )?;
+    for stage in &report.pending_processing {
+        if let Some(warning) = stage.strip_prefix("joint_optimization:") {
+            eprintln!("warning: joint optimization blocked:{warning}");
+        }
+    }
     println!(
         "{}",
         sotf_capture::capture_session::clock::io::timing_reference_summary(&report)

@@ -197,6 +197,12 @@ pub fn process_capture_session(
 }
 
 /// Offline projection controls for processed capture bundles.
+///
+/// Single-plan discipline: subs and mains for joint optimization must
+/// come from one plan/process run. RoomEQ GD-Opt requires exact
+/// response-grid equality across channels and skips otherwise; process
+/// time records a `joint_optimization` warning when the analyzed takes
+/// in this run diverge.
 #[derive(Debug, Clone, Default)]
 pub struct ProcessOptions {
     /// Explicit take IDs; empty keeps legacy single-repeat behavior.
@@ -510,6 +516,11 @@ pub fn process_capture_session_with_options(
             analysis: Some(analysis),
         });
     }
+    if let Some(warning) = joint_response_grid_warning(output_directory, &result.takes) {
+        result
+            .pending_processing
+            .push(format!("joint_optimization: {warning}"));
+    }
     result.reflection_reports =
         crate::capture_session::reflections::analyze_sources(&result, output_directory);
     result
@@ -561,6 +572,92 @@ pub fn process_capture_session_with_options(
         )?;
     }
     Ok(result)
+}
+
+/// Frequency grid of a written response CSV, if the file parses.
+///
+/// Reads only the first column (`frequency_hz`), skipping the header
+/// row. Returns `None` for missing, unreadable, header-only, or
+/// non-finite grids; the joint-grid check skips such takes instead of
+/// failing the run, since the take's own analysis issues already
+/// explain why it is unusable.
+pub(super) fn response_grid_csv(path: &Path) -> Option<Vec<f64>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut grid = Vec::new();
+    for line in text.lines().skip(1) {
+        let cell = line.split(',').next()?.trim();
+        if cell.is_empty() {
+            continue;
+        }
+        let frequency: f64 = cell.parse().ok()?;
+        if !frequency.is_finite() {
+            return None;
+        }
+        grid.push(frequency);
+    }
+    (!grid.is_empty()).then_some(grid)
+}
+
+/// First grid mismatch across take response grids, if any.
+///
+/// Compares every grid against the first exactly, bin for bin: joint
+/// GD-Opt optimization requires identical grids and skips otherwise.
+/// Returns `None` for fewer than two grids or a fully matching set.
+pub(super) fn first_grid_mismatch(grids: &[(&str, Vec<f64>)]) -> Option<String> {
+    let (first_id, first_grid) = grids.first()?;
+    for (take_id, grid) in &grids[1..] {
+        if grid.len() != first_grid.len() {
+            return Some(format!(
+                "response grids differ across takes ({first_id} vs {take_id}: {} vs {} bins)",
+                first_grid.len(),
+                grid.len()
+            ));
+        }
+        if *grid != *first_grid {
+            let bin = grid
+                .iter()
+                .zip(first_grid.iter())
+                .position(|(a, b)| a != b)
+                .unwrap_or(0);
+            return Some(format!(
+                "response grids differ across takes ({first_id} vs {take_id}: first difference at bin {bin})"
+            ));
+        }
+    }
+    None
+}
+
+/// Joint-optimization grid warning for one process run, if any.
+///
+/// Collects the phase-response grids of every analyzed take and
+/// requires exact equality: subs and mains for joint optimization
+/// must come from one plan/process run with identical grids, and
+/// RoomEQ GD-Opt skips joint optimization otherwise. Takes without a
+/// readable phase response are skipped, since their own analysis
+/// issues already cover them; fewer than two comparable takes needs
+/// no warning.
+fn joint_response_grid_warning(
+    output_directory: &Path,
+    takes: &[ClockProcessedTake],
+) -> Option<String> {
+    let mut grids = Vec::new();
+    for take in takes {
+        let Some(analysis) = take.analysis.as_ref() else {
+            continue;
+        };
+        let Some(common) = analysis.common_reference.as_ref() else {
+            continue;
+        };
+        let Some(grid) = response_grid_csv(&output_directory.join(&common.response_file)) else {
+            continue;
+        };
+        grids.push((take.raw.take_id.as_str(), grid));
+    }
+    first_grid_mismatch(&grids).map(|mismatch| {
+        format!(
+            "{mismatch}; subs+mains for joint optimization must come from one plan/process run with identical grids, GD-Opt will skip"
+        )
+    })
 }
 
 fn normalize_legacy_take_ids(manifest: &mut RawCaptureManifest) -> Result<(), String> {

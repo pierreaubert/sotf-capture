@@ -834,3 +834,69 @@ fn raw_take_repeat_index_must_belong_to_the_plan() {
     );
     assert!(!output.exists());
 }
+
+fn write_response_csv(dir: &std::path::Path, name: &str, freqs: &[f64]) -> std::path::PathBuf {
+    let path = dir.join(name);
+    let mut text = String::from("frequency_hz,spl_db,phase_deg\n");
+    for frequency in freqs {
+        text.push_str(&format!("{frequency},80.0,0.0\n"));
+    }
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+#[test]
+fn response_grid_csv_reads_first_column_and_skips_header() {
+    let root = tempfile::tempdir().unwrap();
+    let path = write_response_csv(root.path(), "take-000-phase.csv", &[20.0, 30.0, 40.0]);
+    assert_eq!(io::response_grid_csv(&path), Some(vec![20.0, 30.0, 40.0]));
+}
+
+#[test]
+fn response_grid_csv_skips_blank_lines_and_rejects_bad_grids() {
+    let root = tempfile::tempdir().unwrap();
+    let bad = root.path().join("bad.csv");
+    std::fs::write(&bad, "frequency_hz,spl_db,phase_deg\n20,80,0\nNaN,80,0\n").unwrap();
+    assert_eq!(io::response_grid_csv(&bad), None);
+    let empty = root.path().join("empty.csv");
+    std::fs::write(&empty, "frequency_hz,spl_db,phase_deg\n").unwrap();
+    assert_eq!(io::response_grid_csv(&empty), None);
+    assert_eq!(
+        io::response_grid_csv(&root.path().join("missing.csv")),
+        None
+    );
+}
+
+#[test]
+fn first_grid_mismatch_accepts_matching_single_and_empty_sets() {
+    assert_eq!(io::first_grid_mismatch(&[]), None);
+    assert_eq!(
+        io::first_grid_mismatch(&[("take-000", vec![20.0, 30.0])]),
+        None
+    );
+    assert_eq!(
+        io::first_grid_mismatch(&[
+            ("take-000", vec![20.0, 30.0]),
+            ("take-001", vec![20.0, 30.0]),
+        ]),
+        None
+    );
+}
+
+#[test]
+fn first_grid_mismatch_reports_length_and_value_divergence() {
+    let lengths =
+        io::first_grid_mismatch(&[("take-000", vec![20.0, 30.0]), ("take-001", vec![20.0])])
+            .expect("length mismatch must report");
+    assert!(
+        lengths.contains("take-000") && lengths.contains("take-001"),
+        "{lengths}"
+    );
+    assert!(lengths.contains("2 vs 1"), "{lengths}");
+    let values = io::first_grid_mismatch(&[
+        ("take-000", vec![20.0, 30.0]),
+        ("take-001", vec![20.0, 31.0]),
+    ])
+    .expect("value mismatch must report");
+    assert!(values.contains("bin 1"), "{values}");
+}
