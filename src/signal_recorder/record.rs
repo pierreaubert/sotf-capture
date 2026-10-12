@@ -1,3 +1,5 @@
+// Rust guideline compliant 2026-02-21
+
 #[cfg(not(target_os = "ios"))]
 use super::consts::CANCELLED_ERR;
 #[cfg(not(target_os = "ios"))]
@@ -18,8 +20,14 @@ use super::write::write_wav_file;
 #[cfg(not(target_os = "ios"))]
 use super::write::{interpolate_log_frequency_grid, write_analysis_csv_extended};
 #[cfg(not(target_os = "ios"))]
+use crate::quality::{
+    QualityFinding, QualityMethod, QualityMetric, QualityPolicy, QualityThreshold, QualityUnit,
+    ThresholdComparison,
+};
+#[cfg(not(target_os = "ios"))]
 use math_audio_dsp::analysis::{
-    ClockDriftEstimate, LagEstimate, MicrophoneCompensation, analyze_recording,
+    ClockDriftEstimate, LagEstimate, MeasurementQualityConfig, MicrophoneCompensation,
+    analyze_recording,
 };
 use std::path::{Path, PathBuf};
 
@@ -1073,6 +1081,7 @@ pub(super) fn analyze_sweep_takes(
     let mut measured_grid: Option<(Vec<f32>, Vec<f32>)> = None;
     #[allow(clippy::needless_late_init)]
     let noise_floor_grid: Option<(Vec<f32>, Vec<f32>)>;
+    let noise_floor_unknown_reason: Option<&'static str>;
 
     if single_take {
         lag_for_quality =
@@ -1086,7 +1095,15 @@ pub(super) fn analyze_sweep_takes(
         relevant_takes = vec![0];
 
         let silence = pre_silence_window(&analysis_capture, analysis_reference, &lag_for_quality);
-        noise_floor_grid = (silence.len() >= MIN_NOISE_FLOOR_WINDOW_SAMPLES).then(|| {
+        let valid_noise_window = silence.len() >= MIN_NOISE_FLOOR_WINDOW_SAMPLES;
+        noise_floor_unknown_reason = if !valid_noise_window {
+            Some("a valid quiet window was unavailable for noise measurement")
+        } else if silence.iter().all(|sample| *sample == 0.0) {
+            Some("the valid quiet window contains only exact digital zeros")
+        } else {
+            None
+        };
+        noise_floor_grid = noise_floor_unknown_reason.is_none().then(|| {
             let values = math_audio_dsp::analysis::estimate_noise_floor_db_from_silence(
                 silence,
                 analysis_sample_rate,
@@ -1181,7 +1198,15 @@ pub(super) fn analyze_sweep_takes(
             &averaged.lag_estimates,
             accepted,
         );
-        noise_floor_grid = (silence.len() >= MIN_NOISE_FLOOR_WINDOW_SAMPLES).then(|| {
+        let valid_noise_window = silence.len() >= MIN_NOISE_FLOOR_WINDOW_SAMPLES;
+        noise_floor_unknown_reason = if !valid_noise_window {
+            Some("a valid quiet window was unavailable for noise measurement")
+        } else if silence.iter().all(|sample| *sample == 0.0) {
+            Some("the valid quiet window contains only exact digital zeros")
+        } else {
+            None
+        };
+        noise_floor_grid = noise_floor_unknown_reason.is_none().then(|| {
             let values = math_audio_dsp::analysis::estimate_noise_floor_db_from_silence(
                 silence,
                 analysis_sample_rate,
@@ -1264,6 +1289,46 @@ pub(super) fn analyze_sweep_takes(
         sweep_range,
     )?;
 
+    let single_snr_windows = single_take.then(|| {
+        (
+            active_take_span(&analysis_capture, analysis_reference, &lag_for_quality),
+            pre_silence_window(&analysis_capture, analysis_reference, &lag_for_quality),
+        )
+    });
+    let mut quality_findings = super::quality::structured_quality_findings(
+        &analysis_capture,
+        &analysis.frequencies,
+        &analysis.thd_percent,
+        &analysis.harmonic_distortion_db,
+        &analysis.spl_db,
+        sweep_range,
+        single_snr_windows.as_ref().map(|(active, _)| *active),
+        single_snr_windows.as_ref().map(|(_, silence)| *silence),
+        single_take,
+    );
+    if !single_take && let Some(unknown_reason) = noise_floor_unknown_reason {
+        let threshold_db = f64::from(MeasurementQualityConfig::default().minimum_median_snr_db);
+        let message =
+            "repeat-capture SNR is unavailable: the quiet window contains only digital silence";
+        quality_findings.push(QualityFinding::unknown_with_threshold(
+            QualityPolicy::SweepAnalysis,
+            QualityMetric::BroadbandSnr,
+            QualityUnit::Decibels,
+            QualityMethod::NoiseSubtractedBandPowerRatio,
+            QualityThreshold {
+                comparison: ThresholdComparison::AtLeast,
+                value: threshold_db,
+            },
+            unknown_reason,
+            Some(
+                "capture a quiet interval with measurable room or microphone noise, then repeat"
+                    .into(),
+            ),
+            message,
+        ));
+        quality_issues.push(message.into());
+    }
+
     // Extended CSV: the FFT-grid curves are log-frequency interpolated onto
     // the analysis grid and appended as `coherence` / `noise_floor_db`
     // columns. Coherence is omitted (not fabricated) when no real multi-take
@@ -1283,12 +1348,14 @@ pub(super) fn analyze_sweep_takes(
     )?;
     log::info!("[{log_tag}] Wrote analysis to {:?}", output_csv_path);
 
-    // High-distortion advisory from the Farina THD curve (sweeps only;
-    // other signals analyze to zero THD and never trigger).
+    // High-distortion advisory from the harmonic-only Farina sweep estimate.
+    // The structured finding below keeps invalid or unavailable estimates
+    // Unknown instead of turning legacy zero-filled arrays into a pass.
     if let Some(issue) = super::quality::thd_warning_issue(
         &analysis.frequencies,
         &analysis.thd_percent,
         &analysis.spl_db,
+        sweep_range,
     ) {
         quality_issues.push(issue);
     }
@@ -1334,6 +1401,7 @@ pub(super) fn analyze_sweep_takes(
     Ok(CaptureAnalysis {
         result: analysis,
         quality,
+        quality_findings,
         drift: first_drift,
         drift_corrected: any_drift_corrected,
         dropped_samples,

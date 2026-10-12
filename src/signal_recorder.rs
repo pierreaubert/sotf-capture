@@ -35,7 +35,7 @@ mod write;
 
 pub use consts::*;
 #[cfg(all(not(target_os = "ios"), any(test, feature = "test-util")))]
-pub use fake::{FakeAudioConfig, FakePlayback, FakeRecorder, VirtualWire};
+pub use fake::{FakeAudioConfig, FakeAudioProfile, FakePlayback, FakeRecorder, VirtualWire};
 pub use generate::*;
 pub use misc::*;
 #[cfg(not(target_os = "ios"))]

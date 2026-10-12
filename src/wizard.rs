@@ -4,6 +4,8 @@
 //! results, save metadata) lives here; view state (dropdowns, focus flags, edit
 //! buffers) stays in `app-gpui` / `app-tui`.
 
+// Rust guideline compliant 2026-02-21
+
 use crate::recording_helpers::{DEFAULT_SWEEP_END_FREQ, DEFAULT_SWEEP_START_FREQ};
 use crate::recording_types::{
     BassAnchorCaptureState, CalibrationData, ChannelRecording, ChannelRecordingState,
@@ -1372,6 +1374,7 @@ mod tests {
                 trustworthy: true,
                 score: 0.9,
                 issues: vec![],
+                findings: vec![],
                 mean_coherence: None,
                 median_snr_db: None,
                 clip_fraction: 0.0,
@@ -1381,6 +1384,7 @@ mod tests {
                 accepted_count: accepted,
                 rejected_count: 0,
             }),
+            stimulus_config: None,
         });
         ch
     }

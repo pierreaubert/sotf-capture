@@ -224,14 +224,22 @@ pub fn write_analysis_csv_extended(
             spl -= comp.interpolate_at(freq);
         }
         let phase = result.phase_deg[i];
-        let thd = result.thd_percent.get(i).copied().unwrap_or(0.0);
+        // An absent or short THD vector means that distortion was not
+        // measured at this frequency. Write an explicit NaN marker instead
+        // of fabricating a clean 0% result; the shared CSV reader accepts
+        // it and downstream finite-value checks can keep it unavailable.
+        let thd = result
+            .thd_percent
+            .get(i)
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "NaN".to_string());
         let rt60 = result.rt60_ms.get(i).copied().unwrap_or(0.0);
         let c50 = result.clarity_c50_db.get(i).copied().unwrap_or(0.0);
         let c80 = result.clarity_c80_db.get(i).copied().unwrap_or(0.0);
         let gd = result.excess_group_delay_ms.get(i).copied().unwrap_or(0.0);
 
         let mut row =
-            format!("{freq:.6},{spl:.3},{phase:.6},{thd:.6},{rt60:.3},{c50:.3},{c80:.3},{gd:.6}");
+            format!("{freq:.6},{spl:.3},{phase:.6},{thd},{rt60:.3},{c50:.3},{c80:.3},{gd:.6}");
         if let Some(values) = coherence {
             row.push_str(&format!(",{:.4}", values[i]));
         }
@@ -242,4 +250,48 @@ pub fn write_analysis_csv_extended(
     }
 
     Ok(())
+}
+
+#[cfg(all(test, not(target_os = "ios")))]
+mod tests {
+    use super::write_analysis_csv_extended;
+    use math_audio_dsp::analysis::AnalysisResult;
+
+    #[test]
+    fn csv_marks_unavailable_thd_nan_and_preserves_measured_values() {
+        let mut result = AnalysisResult {
+            frequencies: vec![100.0, 200.0],
+            spl_db: vec![0.0, 1.0],
+            phase_deg: vec![0.0, 0.0],
+            estimated_lag_samples: 0,
+            impulse_response: vec![],
+            impulse_time_ms: vec![],
+            excess_group_delay_ms: vec![],
+            thd_percent: vec![2.5],
+            harmonic_distortion_db: vec![],
+            rt60_ms: vec![],
+            clarity_c50_db: vec![],
+            clarity_c80_db: vec![],
+            spectrogram_db: vec![],
+        };
+        let output = tempfile::NamedTempFile::new().unwrap();
+
+        write_analysis_csv_extended(&result, output.path(), None, None, None).unwrap();
+        let csv = std::fs::read_to_string(output.path()).unwrap();
+        let rows: Vec<_> = csv.lines().collect();
+        assert_eq!(rows[1].split(',').nth(3), Some("2.500000"));
+        assert_eq!(rows[2].split(',').nth(3), Some("NaN"));
+
+        let roundtrip = math_audio_dsp::analysis::read_analysis_csv(output.path()).unwrap();
+        assert!(roundtrip.thd_percent[1].is_nan());
+
+        result.thd_percent.clear();
+        write_analysis_csv_extended(&result, output.path(), None, None, None).unwrap();
+        let csv = std::fs::read_to_string(output.path()).unwrap();
+        assert!(
+            csv.lines()
+                .skip(1)
+                .all(|row| row.split(',').nth(3) == Some("NaN"))
+        );
+    }
 }

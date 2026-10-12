@@ -215,6 +215,8 @@ fn fake_drift_stretches_the_capture() {
 fn fake_noise_is_deterministic_and_per_channel() {
     let config = FakeAudioConfig {
         noise_rms: 0.01,
+        // Silent stimulus renders through the quiet window.
+        quiet_window_noise_rms: 0.01,
         seed: 1234,
         tail_secs: 0.0,
         ..FakeAudioConfig::default()
@@ -238,6 +240,41 @@ fn fake_noise_is_deterministic_and_per_channel() {
     // Same seed, different channel index: independent noise streams.
     assert_ne!(first[0], first[1]);
     assert!(first[0].iter().any(|s| s.abs() > 0.005));
+}
+
+#[test]
+fn fake_noise_uses_quiet_level_on_silent_samples() {
+    // The two-knob noise model: silent samples render at
+    // quiet_window_noise_rms, the rest at noise_rms.
+    let config = FakeAudioConfig {
+        noise_rms: 0.02,
+        quiet_window_noise_rms: 0.001,
+        seed: 1234,
+        tail_secs: 0.0,
+        ..FakeAudioConfig::default()
+    };
+    let render = |stimulus: Vec<f32>| {
+        let wire = VirtualWire::new(config.clone());
+        let mut playback = wire.playback("fake");
+        let mut recorder = wire.recorder("fake");
+        let temp_wav = super::write::write_temp_wav(&stimulus, SAMPLE_RATE, 1).unwrap();
+        playback
+            .start(temp_wav.path(), None, 0, SAMPLE_RATE)
+            .unwrap();
+        recorder.start(None, &[0], SAMPLE_RATE, 0.1).unwrap();
+        recorder.stop().unwrap().recorded_per_channel
+    };
+
+    let loud = render(vec![0.25_f32; 4_800]);
+    assert!(
+        loud[0].iter().any(|s| (s - 0.25).abs() > 0.01),
+        "active samples must carry noise_rms-level noise"
+    );
+    let quiet = render(vec![0.0_f32; 4_800]);
+    assert!(
+        quiet[0].iter().all(|s| s.abs() < 0.005),
+        "silent samples must carry quiet-level noise only"
+    );
 }
 
 #[test]
