@@ -13,6 +13,8 @@ clippy:
 dev:
     {{cargo}} build --workspace
 
+alias build := prod
+
 prod:
     {{cargo}} build --workspace --release
 
@@ -20,8 +22,8 @@ fmt:
     {{cargo}} fmt --all -- --check
 
 test:
-    {{cargo}} test --all --workspace --all-targets -- --check
+    {{cargo}} test --all --workspace --all-features --all-targets -- --check
 
 ntest:
-    {{cargo}} nextest run
+    {{cargo}} nextest run --workspace --all-features --all-targets
     

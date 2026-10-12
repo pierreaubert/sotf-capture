@@ -193,6 +193,98 @@ fn save_manifest(directory: &Path, manifest: &RawCaptureManifest) -> Result<(), 
 /// not already exist; existing recordings are never overwritten. Run on a worker
 /// thread. Cancellation retains complete sources with an explicit cancelled state.
 ///
+/// Probe every plan microphone awake before the take loop.
+///
+/// One wake request exercises all input streams plus the output stream on the
+/// first source channel; every mic must lag-lock the burst before the session
+/// proceeds. Retries inside `budget`, then proceeds anyway: a sleeping chain
+/// usually answers within one or two bursts, while a truly dead chain fails
+/// fast on the first real take with the backend error. Returns `Err` only on
+/// cancellation.
+fn wake_session_chain(
+    capture: &mut impl FnMut(MultiCaptureRequest, &CancelFlag) -> Result<MultiCaptureResult, String>,
+    session: &ValidatedCaptureSession,
+    cancel: &CancelFlag,
+    budget: std::time::Duration,
+) -> Result<(), String> {
+    use crate::signal_recorder::wake::{WAKE_ERROR_BACKOFF_MS, WAKE_TAIL_SECS, wake_burst_samples};
+    use std::thread::sleep;
+    use std::time::Instant;
+
+    let rate = session.plan().sample_rate_hz;
+    let burst = wake_burst_samples(rate);
+    let Some(first_source) = session.plan().sources.first() else {
+        return Ok(());
+    };
+    let inputs: Vec<CaptureInput> = session
+        .plan()
+        .microphones
+        .iter()
+        .map(|mic| CaptureInput {
+            device: mic.device.clone(),
+            channel: mic.input_channel,
+        })
+        .collect();
+    if burst.is_empty() || inputs.is_empty() {
+        return Ok(());
+    }
+    let mut stimulus = burst.clone();
+    stimulus.extend(std::iter::repeat_n(
+        0.0,
+        (WAKE_TAIL_SECS * f64::from(rate)).ceil() as usize,
+    ));
+    let minimum =
+        math_audio_dsp::analysis::MeasurementQualityConfig::default().minimum_lag_confidence;
+    let deadline = Instant::now() + budget;
+    let mut attempts = 0_u32;
+    while Instant::now() < deadline {
+        attempts += 1;
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
+        let response = capture(
+            MultiCaptureRequest {
+                inputs: inputs.clone(),
+                output_device: session.plan().output_device.clone(),
+                output_channel: first_source.output_channel,
+                output_overrides: Vec::new(),
+                sample_rate_hz: rate,
+                stimulus: stimulus.clone(),
+            },
+            cancel,
+        );
+        match response {
+            Ok(captured) if captured.recordings.len() == inputs.len() => {
+                let awake = captured.recordings.iter().all(|recording| {
+                    math_audio_dsp::analysis::estimate_lag_with_confidence(&burst, recording)
+                        .is_ok_and(|lag| lag.confidence >= minimum)
+                });
+                if awake {
+                    if attempts > 1 {
+                        log::info!("Audio chain awake after {attempts} wake-up attempts");
+                    } else {
+                        log::debug!("Audio chain awake on first wake-up attempt");
+                    }
+                    return Ok(());
+                }
+            }
+            Err(_) => sleep(std::time::Duration::from_millis(WAKE_ERROR_BACKOFF_MS)),
+            Ok(_) => {}
+        }
+    }
+    log::warn!(
+        "Audio chain did not respond within {:.0}s of wake-up probes — proceeding; the first take will fail fast on a dead chain",
+        budget.as_secs_f64(),
+    );
+    Ok(())
+}
+
+/// Record all declared sources with simultaneous microphone input streams.
+///
+/// Resolve calibration paths against `plan_directory`. `output_directory` must
+/// not already exist; existing recordings are never overwritten. Run on a worker
+/// thread. Cancellation retains complete sources with an explicit cancelled state.
+///
 /// # Errors
 /// Returns configuration, calibration, device, cancellation, or filesystem errors.
 /// An error after acquisition starts preserves its journal and completed sources.
@@ -451,6 +543,12 @@ fn record_with(
             &stimulus.timing_chirp,
             session.plan().sample_rate_hz,
             1,
+        )?;
+        wake_session_chain(
+            &mut capture,
+            session,
+            cancel,
+            std::time::Duration::from_secs_f64(crate::signal_recorder::wake::WAKE_BUDGET_SECS),
         )?;
         for repeat_index in 0..session.plan().repeat_count {
             for (source_index, source) in session.plan().sources.iter().enumerate() {

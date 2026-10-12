@@ -64,6 +64,91 @@ dimensions when the plan declares them, per-source room IRs from the selected
 IR microphone, per-bin coherence beside each phase response, the resolved
 timing identity, probe/anchor passes when recorded, and per-take IR-only STI.
 
+## Session plans
+
+A session plan is one JSON file describing everything RoomEQ needs later:
+microphone routes and positions, sources, the sweep, the timing reference,
+room dimensions, and optional probe/bass-anchor/CTC passes. Record with a
+plan whenever the takes will feed `autoeq`/`roomeq`; the one-shot `capture`
+command is for quick checks only. Runnable examples live in `examples/`:
+
+| Plan | Shape |
+| --- | --- |
+| `stereo-two-seats.json` | Minimal stereo room: 2 sources, 2 seat mics, room dims |
+| `home-theater-5.1-sub.json` | Full rig: 6 sources, dedicated timing emitter, probe + bass-anchor + loopback passes, bass-weighted sweep |
+| `ctc-head-position.json` | Crosstalk-cancellation ear pair: compact geometry, loopback, one head position |
+| `full-roomeq-session.json` | Everything in one run: seats + ears, probe + bass-anchor + CTC, dedicated timing emitter |
+
+Workflow:
+
+```bash
+sotf-capture plan-validate --plan examples/stereo-two-seats.json
+sotf-capture plan-record --plan my-room.json --output raw-2026-10-11
+sotf-capture plan-process --raw raw-2026-10-11/capture-raw.json --output processed-2026-10-11
+```
+
+A minimal plan looks like this (see `examples/stereo-two-seats.json` for the
+full file):
+
+```json
+{
+  "version": 1,
+  "geometry": "spread",
+  "sample_rate_hz": 48000,
+  "output_device": "ADAM Audio USB",
+  "microphones": [
+    {
+      "id": "main-seat",
+      "device": "UMIK-1 A",
+      "input_channel": 0,
+      "calibration_file": "calibrations/umik-a-90deg.txt",
+      "calibration_orientation": "ninety_degrees",
+      "gain_db": 0.0,
+      "position_m": [0.0, 0.0, 1.2],
+      "position_uncertainty_mm": 5.0
+    },
+    {
+      "id": "second-seat",
+      "device": "UMIK-1 B",
+      "input_channel": 0,
+      "calibration_file": "calibrations/umik-b-90deg.txt",
+      "calibration_orientation": "ninety_degrees",
+      "gain_db": 0.0,
+      "position_m": [0.6, 0.0, 1.2],
+      "position_uncertainty_mm": 5.0
+    }
+  ],
+  "sources": [
+    {"id": "left", "output_channel": 0},
+    {"id": "right", "output_channel": 1}
+  ],
+  "sweep": {"duration_secs": 5.0, "start_hz": 20.0, "end_hz": 20000.0, "amplitude": 0.1},
+  "room_dimensions": {"length": 5.2, "width": 3.8, "height": 2.6}
+}
+```
+
+Rules the validator enforces:
+
+- Two to four microphones, each with a unique id, a unique
+  device/channel route, and its own calibration file resolved relative to
+  the plan. Device names must match `sotf-capture devices` output.
+- At least one source; every source gets its own output channel and is
+  excited separately while all microphones record.
+- Without `timing_reference`, timing chirps ride on the first source
+  channel and takes stay arrival-aligned; declare a fixed emitter (with
+  surveyed position and sound speed) for coherent use such as sub/mains
+  alignment or group-delay optimization.
+- `bass_anchor` requires a `loopback` route on the first microphone's
+  device; `ctc` requires a `loopback` route plus two distinct ear
+  microphones. `room_dimensions` (meters) and `setup_description` project
+  straight into the RoomEQ input format.
+- `compact` geometry (ear pairs, arrays) requires positions surveyed to
+  1 mm and distinct per microphone.
+
+Before the full session, run `live` to check levels and one planned take
+at a conservative level: confirm routing, peaks, reference lock, and a
+plausible response, then commit to the whole run.
+
 ## Per-machine device and calibration parameters
 
 Choose input and output independently with `sotf-capture capture --input-device

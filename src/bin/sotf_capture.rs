@@ -850,6 +850,12 @@ fn plan_process(
         "{}",
         sotf_capture::capture_session::clock::io::timing_reference_summary(&report)
     );
+    for line in sotf_capture::capture_session::clock::io::clock_skew_lines(&report) {
+        println!("{line}");
+    }
+    for warning in sotf_capture::capture_session::clock::io::clock_skew_warnings(&report) {
+        eprintln!("warning: clock skew: {warning}");
+    }
     if let Some(ctc) = &report.ctc_measurements {
         println!(
             "CTC raw-sweep fragment: {} ({} files).",

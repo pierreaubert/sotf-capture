@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "geometry": "spread",
+  "sample_rate_hz": 48000,
+  "output_device": "ADAM Audio USB",
+  "microphones": [
+    {
+      "id": "main-seat",
+      "device": "UMIK-1 A",
+      "input_channel": 0,
+      "calibration_file": "calibrations/umik-a-90deg.txt",
+      "calibration_orientation": "ninety_degrees",
+      "gain_db": 0.0,
+      "position_m": [0.0, 0.0, 1.2],
+      "position_uncertainty_mm": 5.0
+    },
+    {
+      "id": "second-seat",
+      "device": "UMIK-1 B",
+      "input_channel": 0,
+      "calibration_file": "calibrations/umik-b-90deg.txt",
+      "calibration_orientation": "ninety_degrees",
+      "gain_db": 0.0,
+      "position_m": [0.6, 0.0, 1.2],
+      "position_uncertainty_mm": 5.0
+    }
+  ],
+  "sources": [
+    {"id": "left", "output_channel": 0},
+    {"id": "right", "output_channel": 1}
+  ],
+  "repeat_count": 1,
+  "sweep": {
+    "duration_secs": 5.0,
+    "start_hz": 20.0,
+    "end_hz": 20000.0,
+    "amplitude": 0.1
+  },
+  "room_dimensions": {
+    "length": 3.0,
+    "width": 4.2,
+    "height": 2.6
+  },
+  "setup_description": "Stereo ADAM pair on desk. Both UMIK-1 on tripods at ear height, capsules vertical."
+}

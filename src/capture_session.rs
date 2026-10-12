@@ -247,6 +247,11 @@ pub struct CaptureCtc {
 }
 
 /// Serializable multi-microphone session declaration.
+///
+/// The identical start/end timing chirps are the drift path: per-take
+/// clock skew is estimated from the chirp pair and corrected before
+/// analysis. Chirpless takes have no unbiased drift source and skip
+/// drift estimation with `None`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureSessionPlan {

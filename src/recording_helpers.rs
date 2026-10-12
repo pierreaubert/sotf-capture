@@ -324,6 +324,9 @@ pub fn take_verdict_text(q: &TakeQualitySummary) -> String {
             q.accepted_count + q.rejected_count
         ));
     }
+    if q.dropped_samples > 0 {
+        parts.push(format!("dropped {} samples", q.dropped_samples));
+    }
     parts.join(", ")
 }
 
@@ -783,6 +786,15 @@ mod tests {
         assert!(text.contains("clipped 0.30%"), "{text}");
         assert!(text.contains("drift -45 ppm"), "{text}");
         assert!(text.contains("4/5 takes accepted"), "{text}");
+        assert!(!text.contains("dropped"), "{text}");
+    }
+
+    #[test]
+    fn take_verdict_text_shows_dropped_samples() {
+        let mut q = quality_summary(true, &[], None);
+        q.dropped_samples = 128;
+        let text = take_verdict_text(&q);
+        assert!(text.contains("dropped 128 samples"), "{text}");
     }
 
     #[test]

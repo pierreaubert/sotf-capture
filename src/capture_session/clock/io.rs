@@ -181,6 +181,81 @@ pub fn timing_reference_summary(report: &ClockProcessedManifest) -> String {
     }
 }
 
+/// Per-take |skew| above which the run warns: corrected, but large
+/// enough to suspect an unstable clock (e.g. a USB-derived UMIK-1 clock)
+/// rather than ordinary crystal error.
+const CLOCK_SKEW_SEVERE_PPM: f64 = 100.0;
+
+/// Take-to-take skew spread above which the run warns of clock wander:
+/// per-take correction assumes the rate is stable within each take, so
+/// wandering rates (UMIK-1 on a noisy USB clock) deserve review even
+/// when every take corrected.
+const CLOCK_SKEW_SPREAD_PPM: f64 = 100.0;
+
+/// One clock-fit line per processed take, in take order.
+pub fn clock_skew_lines(report: &ClockProcessedManifest) -> Vec<String> {
+    report
+        .takes
+        .iter()
+        .map(|take| {
+            let skew = take
+                .clock
+                .skew_ppm
+                .filter(|value| value.is_finite())
+                .map_or("skew unknown".to_string(), |ppm| {
+                    format!("skew {ppm:+.1} ppm")
+                });
+            let basis = match take.clock.basis {
+                super::CaptureClockBasis::Uncorrected => "uncorrected",
+                super::CaptureClockBasis::ArrivalAligned => "arrival-aligned",
+                super::CaptureClockBasis::FixedAcousticReference => "fixed-acoustic-reference",
+            };
+            let mut line = format!(
+                "take {} ({}): {skew}, {}, {basis}",
+                take.raw.take_id, take.raw.microphone_id, take.clock.correction_applied,
+            );
+            if let Some(reason) = take.clock.magnitude_only_reason.as_deref() {
+                line.push_str(&format!("; magnitude-only: {reason}"));
+            }
+            line
+        })
+        .collect()
+}
+
+/// Run-level clock warnings: severe per-take skew, take-to-take wander,
+/// and magnitude-only takes. Empty when every take corrected quietly.
+pub fn clock_skew_warnings(report: &ClockProcessedManifest) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let mut skews: Vec<f64> = Vec::new();
+    for take in &report.takes {
+        if let Some(reason) = take.clock.magnitude_only_reason.as_deref() {
+            warnings.push(format!(
+                "take {} is magnitude-only: {reason}",
+                take.raw.take_id
+            ));
+        }
+        if let Some(ppm) = take.clock.skew_ppm.filter(|value| value.is_finite()) {
+            skews.push(ppm);
+            if ppm.abs() > CLOCK_SKEW_SEVERE_PPM {
+                warnings.push(format!(
+                    "take {} skew {ppm:+.1} ppm exceeds {CLOCK_SKEW_SEVERE_PPM:.0} ppm — corrected, but verify the clock is stable",
+                    take.raw.take_id
+                ));
+            }
+        }
+    }
+    if skews.len() >= 2 {
+        let spread = skews.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))
+            - skews.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        if spread > CLOCK_SKEW_SPREAD_PPM {
+            warnings.push(format!(
+                "clock skew wanders {spread:.0} ppm across takes (>{CLOCK_SKEW_SPREAD_PPM:.0} ppm) — suspect USB-clock instability; prefer shorter takes, more repeats, or a single-clock rig"
+            ));
+        }
+    }
+    warnings
+}
+
 /// Process saved captures without opening audio devices or altering raw takes.
 ///
 /// `output_directory` must not exist. Invalid timing markers preserve raw samples

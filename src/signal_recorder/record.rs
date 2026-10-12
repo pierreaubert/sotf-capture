@@ -556,9 +556,33 @@ fn capture_sweep_take_multi(
 #[cfg(not(target_os = "ios"))]
 type TakeDrift = (Option<ClockDriftEstimate>, bool, Option<(f64, String)>);
 
+/// Timing-chirp information for per-take drift estimation, when the take
+/// carries identical chirps at both ends (capture_session plans). The
+/// template is correlated inside windows around the coarse expected
+/// positions; `spacing_samples` is the exact stimulus-clock chirp distance.
+#[cfg(not(target_os = "ios"))]
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ChirpTiming<'a> {
+    /// Identical start/end timing-chirp template.
+    pub template: &'a [f32],
+    /// Coarse take-clock position of the start chirp (schedule + lag lock).
+    pub expected_start_samples: usize,
+    /// Coarse take-clock position of the end chirp.
+    pub expected_end_samples: usize,
+    /// Exact stimulus-clock distance between the chirps, in samples.
+    pub spacing_samples: f64,
+}
+
 /// Estimate clock drift on one take and, when warranted, time-rescale it
 /// before averaging/analysis. Returns the (possibly corrected) take and its
 /// [`TakeDrift`] bookkeeping. Drift alone never fails the take.
+///
+/// Drift needs identical timing chirps at both take ends; chirpless takes
+/// (`chirps == None`) skip estimation honestly with drift `None` — without
+/// chirps there is no unbiased drift source (two-window drift never
+/// worked: degenerate locks on dense audio, IR-centroid bias when honest;
+/// see `docs/bug-math-dsp-lag-f32-absorption.md`). Plans with timing
+/// chirps are the drift path.
 ///
 /// Two guards against garbage estimates (task-8 review A1):
 /// - estimates above [`super::quality::DRIFT_IMPLAUSIBLE_PPM`] are physically
@@ -568,21 +592,37 @@ type TakeDrift = (Option<ClockDriftEstimate>, bool, Option<(f64, String)>);
 ///   collapses the estimate was wrong, not the clock, and the correction is
 ///   discarded (the raw take is kept, the advisory still stands).
 #[cfg(not(target_os = "ios"))]
-fn correct_take_clock_drift(
+pub(super) fn correct_take_clock_drift(
     recorded: &[f32],
     analysis_reference: &[f32],
     analysis_sample_rate: u32,
     log_tag: &str,
+    chirps: Option<ChirpTiming<'_>>,
 ) -> (Vec<f32>, TakeDrift) {
-    // The estimator windows the ends of the reference, so hand it the active
-    // sweep rather than the silence-padded playback reference.
-    let drift_reference = super::quality::active_reference_span(analysis_reference);
+    let Some(chirps) = chirps else {
+        log::debug!(
+            "[{log_tag}] No timing chirps — skipping clock-drift estimation (chirpless takes have no unbiased drift source)"
+        );
+        return (recorded.to_vec(), (None, false, None));
+    };
     let drift = math_audio_dsp::analysis::estimate_clock_drift(
-        drift_reference,
+        chirps.template,
         recorded,
+        chirps.expected_start_samples,
+        chirps.expected_end_samples,
+        chirps.spacing_samples,
         analysis_sample_rate,
     )
     .ok();
+    if let Some(estimate) = drift.as_ref() {
+        log::debug!(
+            "[{log_tag}] Drift fit: start_lag={} end_lag={} confidence={:.3} ppm={:.1}",
+            estimate.start_lag_samples,
+            estimate.end_lag_samples,
+            estimate.confidence,
+            estimate.ppm,
+        );
+    }
     match (drift_action(drift.as_ref()), drift) {
         (DriftAction::None, _) | (_, None) => (recorded.to_vec(), (drift, false, None)),
         (DriftAction::Implausible, Some(estimate)) => {
@@ -655,6 +695,47 @@ fn correct_take_clock_drift(
     }
 }
 
+/// Preserve a take that failed the lag gate next to the analysis WAV.
+///
+/// "No reliable signal lock" without the take is undebuggable: silence, a
+/// wrong channel, and a weak-but-present sweep all fail identically. The raw
+/// (pre-correction) take is written best-effort to
+/// `<analysis-stem>.nolock-take<N>.wav` and the path is appended to the
+/// error; a failed write keeps the original error so evidence handling can
+/// never mask the gate.
+#[cfg(not(target_os = "ios"))]
+fn lock_failure_with_evidence(
+    log_tag: &str,
+    recorded_wav_path: &Path,
+    take_index: usize,
+    raw: &[f32],
+    sample_rate: u32,
+    error: String,
+) -> String {
+    if raw.is_empty() {
+        return error;
+    }
+    let stem = recorded_wav_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("take");
+    let name = format!("{stem}.nolock-take{}.wav", take_index + 1);
+    let path = recorded_wav_path
+        .parent()
+        .map(|parent| parent.join(&name))
+        .unwrap_or_else(|| PathBuf::from(&name));
+    match super::write::write_wav_file(&path, raw, sample_rate, 1) {
+        Ok(()) => format!("{error} (raw take preserved at {})", path.display()),
+        Err(write_error) => {
+            log::warn!(
+                "[{log_tag}] Could not preserve unlocked take at {} ({write_error})",
+                path.display()
+            );
+            error
+        }
+    }
+}
+
 /// Explain a rejected clock-drift correction in the quality report. This is
 /// deliberately separate from the log message: callers surface the returned
 /// `CaptureAnalysis::quality.issues` to the user, and a plain `Correct` drift
@@ -690,14 +771,16 @@ pub(super) fn correction_keeps_lock(
 ) -> bool {
     use math_audio_dsp::analysis::MeasurementQualityConfig;
 
-    // If the raw take never locked there is no good lock to destroy — leave
-    // the verdict to the downstream gates (single-take lag gate, MAD).
-    let Ok(raw_lock) = math_audio_dsp::analysis::estimate_lag_with_confidence(reference, raw)
+    // Compare advised locks (full-overlap checked): a correction that only
+    // partially locks is suspect. If the raw take never locked there is no
+    // good lock to destroy — leave the verdict to the downstream gates
+    // (single-take lag gate, MAD).
+    let Ok(raw_lock) = super::quality::estimate_lag_or_advise(reference, raw, "drift-verify")
     else {
         return true;
     };
     let corrected_lock =
-        match math_audio_dsp::analysis::estimate_lag_with_confidence(reference, corrected) {
+        match super::quality::estimate_lag_or_advise(reference, corrected, "drift-verify") {
             Ok(lock) => lock,
             // The corrected take no longer locks at all — discard.
             Err(_) => return false,
@@ -945,13 +1028,37 @@ pub(super) fn analyze_sweep_takes(
             // Hard gate: no confident cross-correlation peak means the sweep
             // never locked onto the capture — analyzing it would proceed at
             // an arbitrary lag and feed garbage to roomeq (same spirit as
-            // the silence gate).
-            let lag = super::quality::estimate_lag_or_advise(analysis_reference, raw, &take_tag)?;
-            check_lag_lock(&lag, &take_tag)?;
-            single_lag = Some(lag);
+            // the silence gate). The raw take is preserved for post-mortem.
+            let lag = (|| {
+                let lag =
+                    super::quality::estimate_lag_or_advise(analysis_reference, raw, &take_tag)?;
+                check_lag_lock(&lag, &take_tag)?;
+                Ok::<_, String>(lag)
+            })();
+            match lag {
+                Ok(lag) => single_lag = Some(lag),
+                Err(error) => {
+                    return Err(lock_failure_with_evidence(
+                        &take_tag,
+                        recorded_wav_path,
+                        take_index,
+                        raw,
+                        analysis_sample_rate,
+                        error,
+                    ));
+                }
+            }
         }
-        let (corrected, take_drift) =
-            correct_take_clock_drift(raw, analysis_reference, analysis_sample_rate, &take_tag);
+        // Sweep takes carry no timing chirps: drift estimation stays None
+        // (chirpless takes have no unbiased drift source; see
+        // correct_take_clock_drift).
+        let (corrected, take_drift) = correct_take_clock_drift(
+            raw,
+            analysis_reference,
+            analysis_sample_rate,
+            &take_tag,
+            None,
+        );
         per_take_drift.push(take_drift);
         corrected_takes.push(corrected);
     }
@@ -1005,12 +1112,20 @@ pub(super) fn analyze_sweep_takes(
         })?;
 
         // Task-7 lag-lock gate per take, on the estimates of the
-        // drift-corrected takes actually used for alignment.
+        // drift-corrected takes actually used for alignment. The raw
+        // (pre-correction) take is preserved for post-mortem.
         for (take_index, lag) in averaged.lag_estimates.iter().enumerate() {
-            check_lag_lock(
-                lag,
-                &format!("{log_tag} take {}/{}", take_index + 1, raw_takes.len()),
-            )?;
+            let take_tag = format!("{log_tag} take {}/{}", take_index + 1, raw_takes.len());
+            if let Err(error) = check_lag_lock(lag, &take_tag) {
+                return Err(lock_failure_with_evidence(
+                    &take_tag,
+                    recorded_wav_path,
+                    take_index,
+                    raw_takes.get(take_index).map(Vec::as_slice).unwrap_or(&[]),
+                    analysis_sample_rate,
+                    error,
+                ));
+            }
         }
 
         let accepted = &averaged.averaged.accepted_indices;
@@ -1080,7 +1195,9 @@ pub(super) fn analyze_sweep_takes(
 
     // Drift fields/advisory consider only takes that made it into the
     // analysis: a rejected take's pathologies must not flag the session.
-    let first_drift = relevant_takes.iter().find_map(|&i| per_take_drift[i].0);
+    let first_drift = super::quality::usable_drift_estimate(
+        relevant_takes.iter().find_map(|&i| per_take_drift[i].0),
+    );
     let any_drift_corrected = relevant_takes.iter().any(|&i| per_take_drift[i].1);
     let mut quality_issues: Vec<String> = Vec::new();
     if let Some((_, message)) = relevant_takes
@@ -1250,6 +1367,9 @@ pub(super) fn analyze_sweep_takes(
 /// clock-drift estimation with optional correction, and a quality report —
 /// all returned in [`CaptureAnalysis`].
 ///
+/// Before the take loop, [`super::wake::wake_audio_chain`] probes the chain
+/// awake (bounded by [`super::wake::WAKE_BUDGET_SECS`]).
+///
 /// `cancel` is a cooperative cancellation flag (see [`CancelFlag`]): when
 /// set, the capture stops the streams and returns
 /// `Err(CANCELLED_ERR)` ("cancelled") instead of analyzing.
@@ -1288,6 +1408,18 @@ pub fn record_and_analyze_with_recorder(
         }
         n => n as usize,
     };
+    super::wake::wake_audio_chain(
+        playback,
+        recorder,
+        sample_rate,
+        output_channel,
+        input_channel,
+        output_device_name,
+        input_device_name,
+        cancel.as_ref(),
+        Duration::from_secs_f64(super::wake::WAKE_BUDGET_SECS),
+        "record_and_analyze",
+    )?;
     let mut takes = Vec::with_capacity(num_sweeps);
     let mut dropped_samples = 0_u64;
     let mut analysis_sample_rate = sample_rate;
@@ -1427,6 +1559,10 @@ pub fn record_and_analyze_with(
 ///
 /// `mic_calibrations` must be the same length as `input_channels` (use `None` for uncalibrated).
 ///
+/// Before the take loop, [`super::wake::wake_audio_chain`] probes the chain
+/// awake on the first input channel (bounded by
+/// [`super::wake::WAKE_BUDGET_SECS`]).
+///
 /// `cancel` is a cooperative cancellation flag (see [`CancelFlag`]): when
 /// set, the capture stops the streams and returns
 /// `Err(CANCELLED_ERR)` ("cancelled") instead of analyzing.
@@ -1468,6 +1604,23 @@ pub fn record_and_analyze_with_multi_recorder(
         }
         n => n as usize,
     };
+
+    // Wake the chain once on the first mic: streaming one channel proves
+    // the input device is up for all of them.
+    if let Some(&first_input) = input_channels.first() {
+        super::wake::wake_audio_chain(
+            playback,
+            recorder,
+            sample_rate,
+            output_channel,
+            first_input,
+            output_device_name,
+            input_device_name,
+            cancel.as_ref(),
+            Duration::from_secs_f64(super::wake::WAKE_BUDGET_SECS),
+            "record_and_analyze_multi",
+        )?;
+    }
 
     // Take loop: one play/record cycle per take, all mics simultaneously.
     let mut takes_per_mic: Vec<Vec<Vec<f32>>> = vec![Vec::with_capacity(num_sweeps); num_mics];

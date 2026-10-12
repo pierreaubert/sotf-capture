@@ -21,13 +21,17 @@ fn fake_capture(
     request: MultiCaptureRequest,
     _: &CancelFlag,
 ) -> Result<MultiCaptureResult, String> {
-    assert_eq!(request.output_overrides.len(), 2);
-    assert!(
-        request
-            .output_overrides
-            .iter()
-            .all(|region| region.channel == 0)
-    );
+    // Wake-up probes carry no chirp overrides and echo back for lag lock;
+    // real takes always bracket with start+end chirps on channel 0.
+    if !request.output_overrides.is_empty() {
+        assert_eq!(request.output_overrides.len(), 2);
+        assert!(
+            request
+                .output_overrides
+                .iter()
+                .all(|region| region.channel == 0)
+        );
+    }
     Ok(MultiCaptureResult {
         input_device_ids: request
             .inputs
@@ -110,7 +114,10 @@ fn cancellation_retains_previous_source_and_explicit_status() {
         &cancel,
         |_| {},
         |request, flag| {
-            flag.store(true, Ordering::Relaxed);
+            // Cancel on take calls only: the wake-up probe must run first.
+            if !request.output_overrides.is_empty() {
+                flag.store(true, Ordering::Relaxed);
+            }
             fake_capture(request, flag)
         },
     )
@@ -221,8 +228,12 @@ fn cancelled_repeated_parent_processes_an_explicit_full_matrix_and_keeps_lineage
         &cancel,
         |_| {},
         |request, flag| {
+            // Cancel after the first take completes, not during wake-up.
+            let is_take = !request.output_overrides.is_empty();
             let captured = fake_capture(request, flag)?;
-            flag.store(true, Ordering::Relaxed);
+            if is_take {
+                flag.store(true, Ordering::Relaxed);
+            }
             Ok(captured)
         },
     )
@@ -546,4 +557,88 @@ fn sessions_without_auxiliary_sections_skip_the_runners() {
     .unwrap();
     assert!(manifest.probe_pass.is_none());
     assert!(manifest.bass_anchor_pass.is_none());
+}
+
+fn silent_result(request: &MultiCaptureRequest) -> MultiCaptureResult {
+    MultiCaptureResult {
+        input_device_ids: request
+            .inputs
+            .iter()
+            .map(|input| format!("id:{}", input.device))
+            .collect(),
+        output_device_id: "id:output".into(),
+        sample_rate_hz: request.sample_rate_hz,
+        recordings: vec![vec![0.0; request.stimulus.len()]; request.inputs.len()],
+        input_sample_formats: vec!["F32".into(); request.inputs.len()],
+        output_sample_format: "F32".into(),
+    }
+}
+
+#[test]
+fn wake_up_rides_through_sleeping_first_captures() {
+    use std::cell::Cell;
+
+    let (root, session) = setup();
+    let output = root.path().join("recording");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let calls = Cell::new(0_u32);
+    // The first two backend calls render silence (USB asleep); the wake-up
+    // burns them and the real takes record clean.
+    let manifest = record_with(
+        &session,
+        root.path(),
+        &output,
+        &cancel,
+        |_| {},
+        |request, flag| {
+            calls.set(calls.get() + 1);
+            if calls.get() <= 2 {
+                Ok(silent_result(&request))
+            } else {
+                fake_capture(request, flag)
+            }
+        },
+    )
+    .expect("wake-up must absorb the sleeping captures");
+    assert_eq!(manifest.status, RawCaptureStatus::RawComplete);
+    assert_eq!(manifest.takes.len(), 4);
+    assert!(calls.get() >= 3);
+}
+
+#[test]
+fn wake_up_budget_exhaustion_proceeds_without_error() {
+    use std::time::{Duration, Instant};
+
+    let (_root, session) = setup();
+    let cancel = Arc::new(AtomicBool::new(false));
+    // A chain that never answers: the budget bounds the wait and the call
+    // still returns Ok — the first real take owns the refusal.
+    let started = Instant::now();
+    wake_session_chain(
+        &mut |request, _| Ok(silent_result(&request)),
+        &session,
+        &cancel,
+        Duration::from_millis(300),
+    )
+    .expect("exhaustion must proceed, not fail");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "budget must bound the wait"
+    );
+}
+
+#[test]
+fn wake_up_honors_cancel_immediately() {
+    use std::time::Duration;
+
+    let (_root, session) = setup();
+    let cancel = Arc::new(AtomicBool::new(true));
+    let error = wake_session_chain(
+        &mut |request, flag| fake_capture(request, flag),
+        &session,
+        &cancel,
+        Duration::from_secs(5),
+    )
+    .unwrap_err();
+    assert_eq!(error, "cancelled");
 }

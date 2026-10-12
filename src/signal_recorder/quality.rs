@@ -43,9 +43,11 @@ pub struct CaptureAnalysis {
     /// succeeded; callers decide whether to confirm with the user.
     pub quality: MeasurementQualityReport,
     /// Estimated relative playback/capture clock drift, when the estimation
-    /// itself succeeded (regardless of whether it was acted upon). For
-    /// repeat captures this is the first ACCEPTED take's estimate (all takes
-    /// share the same clock pair; per-take estimates are logged).
+    /// itself succeeded *and* cleared the confidence bar (regardless of
+    /// whether it was acted upon). Low-confidence correlator noise degrades
+    /// to `None` via [`usable_drift_estimate`]. For repeat captures this is
+    /// the first ACCEPTED take's estimate (all takes share the same clock
+    /// pair; per-take estimates are logged).
     pub drift: Option<ClockDriftEstimate>,
     /// True when the capture was time-rescaled via `correct_clock_drift`
     /// before analysis (and before the WAV on disk was written). For repeat
@@ -104,12 +106,11 @@ pub(super) enum DriftAction {
 /// Trim leading/trailing padding (pre/post silence, fades) from a prepared
 /// reference, leaving the active sweep.
 ///
-/// `estimate_clock_drift` windows the *ends* of the reference it is given;
-/// the prepared playback reference ends in post-silence + padding, which
-/// would put the end window on digital silence and make drift estimation
-/// fail outright. Mirrors math-dsp's internal `active_signal_span`
-/// threshold (peak × 1e-6); falls back to the full slice when nothing
-/// exceeds the threshold.
+/// Used to extend the noise-floor window through the reference's own
+/// pre-silence and to isolate the sweep content of a take without padding
+/// dilution. Mirrors math-dsp's internal `active_signal_span` threshold
+/// (peak × 1e-6); falls back to the full slice when nothing exceeds the
+/// threshold.
 #[cfg(not(target_os = "ios"))]
 pub(super) fn active_reference_span(reference: &[f32]) -> &[f32] {
     let (start, end) = active_span_bounds(reference);
@@ -167,6 +168,21 @@ pub(super) fn drift_action(drift: Option<&ClockDriftEstimate>) -> DriftAction {
         }
         _ => DriftAction::None,
     }
+}
+
+/// Drift estimate worth reporting downstream: estimation must have
+/// succeeded *and* cleared [`DRIFT_MIN_CONFIDENCE`]. Below the bar the
+/// number is correlator noise — a head-truncated take reads near −100%
+/// (the sweep end locks at the sweep start) — so it degrades to `None`
+/// and the verdict renders `drift n/a` instead of a scary impossible
+/// value. Mirrors the gate inside [`drift_action`].
+#[cfg(not(target_os = "ios"))]
+pub(super) fn usable_drift_estimate(
+    drift: Option<ClockDriftEstimate>,
+) -> Option<ClockDriftEstimate> {
+    drift.filter(|estimate| {
+        estimate.confidence.is_finite() && estimate.confidence >= DRIFT_MIN_CONFIDENCE
+    })
 }
 
 /// Run `estimate_lag_with_confidence`, mapping estimation failure to the

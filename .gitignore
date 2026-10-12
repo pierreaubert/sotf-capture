@@ -4,5 +4,7 @@ Cargo.lock
 *.log
 *.csv
 *.wav
+*.png
 *~
+__pycache__
 

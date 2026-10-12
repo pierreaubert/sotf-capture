@@ -333,7 +333,13 @@ fn emulated_sweep_loopback_is_flat_and_trustworthy() {
 }
 
 #[test]
-fn emulated_sweep_recovers_injected_clock_drift() {
+fn emulated_sweep_reports_no_drift_without_timing_chirps() {
+    // Chirpless takes have no unbiased drift source: even with an injected
+    // 150 ppm capture-clock stretch, the engine must report drift None
+    // rather than attempt estimation (two-window drift never worked on
+    // real takes — degenerate locks or IR bias; see
+    // docs/bug-math-dsp-lag-f32-absorption.md). Plans with timing chirps
+    // are the drift path.
     let dir = tempfile::tempdir().unwrap();
     let sweep = sweep_2s();
     let temp_wav = super::write::write_temp_wav(&sweep, SAMPLE_RATE, 1).unwrap();
@@ -366,13 +372,12 @@ fn emulated_sweep_recovers_injected_clock_drift() {
     )
     .unwrap();
 
-    let drift = analysis.drift.as_ref().expect("drift estimate");
     assert!(
-        (drift.ppm - 150.0).abs() < 45.0,
-        "expected ~150 ppm, got {:.2}",
-        drift.ppm
+        analysis.drift.is_none(),
+        "chirpless take must skip drift estimation, got {:?}",
+        analysis.drift
     );
-    assert!(analysis.drift_corrected);
+    assert!(!analysis.drift_corrected);
 }
 
 #[test]
@@ -600,4 +605,122 @@ fn emulated_rate_mismatch_resamples_the_reference() {
 
     let reader = hound::WavReader::open(&recorded_wav).unwrap();
     assert_eq!(reader.spec().sample_rate, 44_100);
+}
+
+#[test]
+fn wake_burst_is_deterministic_faded_and_bounded() {
+    use super::wake::{WAKE_BURST_SECS, wake_burst_samples};
+
+    let first = wake_burst_samples(SAMPLE_RATE);
+    let second = wake_burst_samples(SAMPLE_RATE);
+    assert_eq!(first, second);
+    assert_eq!(first.len(), (WAKE_BURST_SECS * SAMPLE_RATE as f32) as usize);
+    assert!(first.iter().all(|sample| sample.is_finite()));
+    let peak = first.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
+    assert!((peak - 0.5).abs() < 1e-6, "{peak}");
+    // Raised-cosine fades pin both ends near zero; the middle stays hot.
+    assert!(first[0].abs() < 1e-4 && first[first.len() - 1].abs() < 1e-4);
+    let mid_peak = first[first.len() / 4..3 * first.len() / 4]
+        .iter()
+        .map(|s| s.abs())
+        .fold(0.0_f32, f32::max);
+    assert!(mid_peak > 0.4, "{mid_peak}");
+}
+
+#[test]
+fn wake_up_rides_through_sleeping_first_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let sweep = sweep_2s();
+    let temp_wav = super::write::write_temp_wav(&sweep, SAMPLE_RATE, 1).unwrap();
+    let recorded_wav = dir.path().join("recorded.wav");
+    let csv = dir.path().join("analysis.csv");
+
+    // The first two input starts render silence (USB asleep); the wake-up
+    // burns them and the real take records clean.
+    let config = FakeAudioConfig {
+        dead_starts: 2,
+        ..FakeAudioConfig::default()
+    };
+    let wire = VirtualWire::new(config);
+    let mut playback = wire.playback("record_and_analyze");
+    let mut recorder = wire.recorder("record_and_analyze");
+    let analysis = record_and_analyze_with_recorder(
+        &mut playback,
+        &mut recorder,
+        temp_wav.path(),
+        &recorded_wav,
+        &sweep,
+        SAMPLE_RATE,
+        &csv,
+        0,
+        0,
+        None,
+        None,
+        None,
+        Some((100.0, 20_000.0)),
+        1,
+        None,
+    )
+    .expect("wake-up must absorb the sleeping starts");
+    assert!(analysis.quality.trustworthy);
+    assert_eq!(analysis.accepted_count, 1);
+}
+
+#[test]
+fn wake_up_budget_exhaustion_proceeds_without_error() {
+    use super::wake::wake_audio_chain;
+    use std::time::{Duration, Instant};
+
+    // A chain that never answers: the budget bounds the wait and the call
+    // still returns Ok — the take gates own the refusal.
+    let config = FakeAudioConfig {
+        dead_starts: usize::MAX,
+        ..FakeAudioConfig::default()
+    };
+    let wire = VirtualWire::new(config);
+    let mut playback = wire.playback("wake");
+    let mut recorder = wire.recorder("wake");
+    let started = Instant::now();
+    wake_audio_chain(
+        &mut playback,
+        &mut recorder,
+        SAMPLE_RATE,
+        0,
+        0,
+        None,
+        None,
+        None,
+        Duration::from_millis(300),
+        "wake",
+    )
+    .expect("exhaustion must proceed, not fail");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "budget must bound the wait"
+    );
+}
+
+#[test]
+fn wake_up_honors_cancel_immediately() {
+    use super::wake::wake_audio_chain;
+    use std::time::Duration;
+
+    let wire = VirtualWire::default();
+    let mut playback = wire.playback("wake");
+    let mut recorder = wire.recorder("wake");
+    let cancel = Arc::new(AtomicBool::new(true));
+    let error = wake_audio_chain(
+        &mut playback,
+        &mut recorder,
+        SAMPLE_RATE,
+        0,
+        0,
+        None,
+        None,
+        Some(&cancel),
+        Duration::from_secs(5),
+        "wake",
+    )
+    .unwrap_err();
+    assert_eq!(error, "cancelled");
 }

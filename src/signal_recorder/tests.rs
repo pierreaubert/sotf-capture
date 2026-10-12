@@ -20,8 +20,8 @@ use super::playback::CpalPlayback;
 use super::probe::gen_schroeder_narrowband_probe;
 #[cfg(not(target_os = "ios"))]
 use super::quality::{
-    DriftAction, build_capture_quality, check_lag_lock, drift_action, snr_warning_issue,
-    thd_warning_issue,
+    DriftAction, build_capture_quality, check_lag_lock, drift_action, estimate_lag_or_advise,
+    snr_warning_issue, thd_warning_issue, usable_drift_estimate,
 };
 #[cfg(not(target_os = "ios"))]
 use super::record::active_take_span;
@@ -793,6 +793,30 @@ fn drift_estimate(ppm: f64, confidence: f32) -> ClockDriftEstimate {
 
 #[test]
 #[cfg(not(target_os = "ios"))]
+fn usable_drift_estimate_suppresses_low_confidence_garbage() {
+    // No estimate stays None.
+    assert!(usable_drift_estimate(None).is_none());
+    // Low-confidence correlator noise (e.g. −100% from a head-truncated
+    // take) degrades to None so the verdict renders `drift n/a`.
+    assert!(usable_drift_estimate(Some(drift_estimate(-999_737.0, 0.1))).is_none());
+    assert!(usable_drift_estimate(Some(drift_estimate(50.0, f32::NAN))).is_none());
+    // Confident estimates pass through untouched, small or large.
+    assert_eq!(
+        usable_drift_estimate(Some(drift_estimate(3.0, 0.9)))
+            .unwrap()
+            .ppm,
+        3.0
+    );
+    assert_eq!(
+        usable_drift_estimate(Some(drift_estimate(-1_292_098.0, 0.9)))
+            .unwrap()
+            .ppm,
+        -1_292_098.0
+    );
+}
+
+#[test]
+#[cfg(not(target_os = "ios"))]
 fn test_drift_action_thresholds() {
     // No estimate, or a low-confidence estimate, never corrects.
     assert_eq!(drift_action(None), DriftAction::None);
@@ -945,8 +969,24 @@ fn test_lag_and_drift_on_delayed_sweep() {
     );
     assert!(check_lag_lock(&lag, "test").is_ok());
 
-    let drift = math_audio_dsp::analysis::estimate_clock_drift(&sweep, &recording, sample_rate)
-        .expect("drift estimation on a clean delayed sweep");
+    // Chirp-pair drift on the same delayed-take shape: identical timing
+    // chirps at both ends, no clock stretch.
+    let chirp = timing_chirp(sample_rate);
+    let chirp_start = delay;
+    let chirp_spacing = sample_rate as usize;
+    let chirp_end = chirp_start + chirp_spacing;
+    let mut chirped = vec![0.0_f32; chirp_end + chirp.len() + delay];
+    chirped[chirp_start..chirp_start + chirp.len()].copy_from_slice(&chirp);
+    chirped[chirp_end..chirp_end + chirp.len()].copy_from_slice(&chirp);
+    let drift = math_audio_dsp::analysis::estimate_clock_drift(
+        &chirp,
+        &chirped,
+        chirp_start + 1500,
+        chirp_end - 800,
+        chirp_spacing as f64,
+        sample_rate,
+    )
+    .expect("drift estimation on a clean delayed chirp pair");
     assert!(
         drift.ppm.abs() <= super::quality::DRIFT_CORRECT_PPM,
         "no synthetic drift: expected |ppm| <= 20, got {:.2}",
@@ -955,34 +995,49 @@ fn test_lag_and_drift_on_delayed_sweep() {
     assert_eq!(drift_action(Some(&drift)), DriftAction::None);
 }
 
+/// Timing-chirp fixture mirroring the capture_session protocol: 100 ms
+/// 2–8 kHz log sweep with 5 ms tapers.
+#[cfg(not(target_os = "ios"))]
+fn timing_chirp(sample_rate: u32) -> Vec<f32> {
+    use math_audio_dsp::signals::{apply_fade_in, apply_fade_out, try_gen_log_sweep};
+    let mut chirp = try_gen_log_sweep(2000.0, 8000.0, 0.5, sample_rate, 0.1).unwrap();
+    let fade = (f64::from(sample_rate) * 0.005).round() as usize;
+    apply_fade_in(&mut chirp, fade);
+    apply_fade_out(&mut chirp, fade);
+    chirp
+}
+
 /// Offline plumbing test (no hardware): an injected +150 ppm capture-clock
-/// stretch must be recovered by `estimate_clock_drift`, and
-/// `correct_clock_drift` must bring the residual back under the correction
-/// threshold.
+/// stretch on a chirped take must be recovered by chirp-pair
+/// `estimate_clock_drift`, and `correct_clock_drift` must bring the
+/// residual back under the correction threshold.
 ///
 /// Regression guard for the math-dsp ppm-scale bug fixed in math-audio
 /// 0.5.26 (previously `estimate_clock_drift` returned true ppm multiplied
 /// by the sample rate — it divided the sample-domain lag change by elapsed
 /// *seconds*; the engine used to compensate via `normalize_clock_drift_ppm`,
-/// removed once the pin moved to the fixed release).
+/// removed once the pin moved to the fixed release). Tolerance is generous
+/// against the sub-sample interpolation error (measured ≈0.5 ppm).
 #[test]
 #[cfg(not(target_os = "ios"))]
 fn test_clock_drift_estimate_and_correct_roundtrip() {
     let sample_rate = 48_000_u32;
-    // Start at 100 Hz (not 20 Hz): the drift estimator's 8192-sample start
-    // window must span enough cycles that periodic correlation sidelobes
-    // fall inside its guard band, keeping the estimate unambiguous.
-    let sweep = math_audio_dsp::signals::gen_log_sweep(100.0, 20_000.0, 0.5, sample_rate, 2.0);
-    let delay = 4_800_usize;
-    let mut reference_take = vec![0.0_f32; delay];
-    reference_take.extend_from_slice(&sweep);
+    let chirp = timing_chirp(sample_rate);
+    // Session-like stimulus: chirp, sweep body, chirp. The sweep body keeps
+    // the lag lock dense (a bare chirp pair cannot lock: identical chirps
+    // are mutual 1.0 sidelobes); drift uses only the chirps.
+    let sweep = math_audio_dsp::signals::gen_log_sweep(20.0, 20_000.0, 0.5, sample_rate, 2.0);
+    let delay = 50_usize; // keeps correction_keeps_lock inside its 960-sample jump bound
+    let end_at = delay + chirp.len() + sweep.len();
+    let spacing = end_at - delay;
+    let mut reference_take = vec![0.0_f32; end_at + chirp.len() + 4_800];
+    reference_take[delay..delay + chirp.len()].copy_from_slice(&chirp);
+    reference_take[delay + chirp.len()..end_at].copy_from_slice(&sweep);
+    reference_take[end_at..end_at + chirp.len()].copy_from_slice(&chirp);
 
     // Simulate a capture clock running 150 ppm fast: content lands at
     // later indices than a stable clock would put it (linear interp, same
     // scheme as correct_clock_drift).
-    // The trailing silence matters: with a nonzero tail, 1-sample overlaps
-    // at the maximum candidate lag normalize to exactly 1.0 and outscore
-    // the true (interpolated, < 1.0) correlation peak.
     let injected_ppm = 150.0_f64;
     let scale = 1.0 - injected_ppm / 1e6;
     let out_len = reference_take.len() + 4_800;
@@ -997,12 +1052,20 @@ fn test_clock_drift_estimate_and_correct_roundtrip() {
         }
     }
 
-    let estimate = math_audio_dsp::analysis::estimate_clock_drift(&sweep, &drifted, sample_rate)
-        .expect("drift estimation on a drifted sweep");
-    // Integer-lag quantization: 1 sample over the ~87808-sample window
-    // baseline is ~11 ppm; interpolation peak shift adds another sample.
+    // Coarse positions follow the stretched clock, ±1500 samples of slop.
+    let expected_start = (delay as f64 / scale) as usize + 1500;
+    let expected_end = (end_at as f64 / scale) as usize - 1500;
+    let estimate = math_audio_dsp::analysis::estimate_clock_drift(
+        &chirp,
+        &drifted,
+        expected_start,
+        expected_end,
+        spacing as f64,
+        sample_rate,
+    )
+    .expect("drift estimation on a drifted chirp pair");
     assert!(
-        (estimate.ppm - injected_ppm).abs() < 45.0,
+        (estimate.ppm - injected_ppm).abs() < 10.0,
         "expected ~{injected_ppm} ppm, got {:.2} (ppm-scale regression? math-audio >= 0.5.26 required)",
         estimate.ppm
     );
@@ -1011,10 +1074,19 @@ fn test_clock_drift_estimate_and_correct_roundtrip() {
     let corrected = math_audio_dsp::analysis::correct_clock_drift(&drifted, &estimate)
         .expect("drift correction");
     assert_eq!(corrected.len(), drifted.len());
-    let residual = math_audio_dsp::analysis::estimate_clock_drift(&sweep, &corrected, sample_rate)
-        .expect("drift re-estimation after correction");
+    // The corrected take runs on the stimulus clock again: coarse positions
+    // are the planted ones, ±1500 samples of slop.
+    let residual = math_audio_dsp::analysis::estimate_clock_drift(
+        &chirp,
+        &corrected,
+        delay + 1500,
+        end_at - 1500,
+        spacing as f64,
+        sample_rate,
+    )
+    .expect("drift re-estimation after correction");
     assert!(
-        residual.ppm.abs() < 60.0,
+        residual.ppm.abs() < 10.0,
         "residual drift after correction should be small, got {:.2} ppm",
         residual.ppm
     );
@@ -1024,6 +1096,70 @@ fn test_clock_drift_estimate_and_correct_roundtrip() {
         super::record::correction_keeps_lock(&reference_take, &drifted, &corrected, sample_rate),
         "a genuine drift correction must keep the lag lock"
     );
+}
+
+/// Engine drift path with timing chirps: injected +150 ppm must be
+/// recovered, corrected, and (above [`super::quality::DRIFT_SEVERE_PPM`])
+/// advised. Chirpless takes skip with `None` (see the analyze path);
+/// this proves the chirped branch stays live.
+#[test]
+#[cfg(not(target_os = "ios"))]
+fn chirped_take_drift_corrects_and_advises() {
+    let sample_rate = 48_000_u32;
+    let injected_ppm = 150.0_f64;
+    let scale = 1.0 - injected_ppm / 1e6;
+    let chirp = timing_chirp(sample_rate);
+    // Session-like stimulus: chirp, sweep body, chirp (see roundtrip test).
+    let sweep = math_audio_dsp::signals::gen_log_sweep(20.0, 20_000.0, 0.5, sample_rate, 2.0);
+    let delay = 50_usize; // keeps correction_keeps_lock inside its 960-sample jump bound
+    let end_at = delay + chirp.len() + sweep.len();
+    let spacing = end_at - delay;
+    let mut reference_take = vec![0.0_f32; end_at + chirp.len() + 4_800];
+    reference_take[delay..delay + chirp.len()].copy_from_slice(&chirp);
+    reference_take[delay + chirp.len()..end_at].copy_from_slice(&sweep);
+    reference_take[end_at..end_at + chirp.len()].copy_from_slice(&chirp);
+    let out_len = reference_take.len() + 4_800;
+    let mut drifted = vec![0.0_f32; out_len];
+    for (index, sample) in drifted.iter_mut().enumerate() {
+        let source = index as f64 * scale;
+        if source <= (reference_take.len() - 1) as f64 {
+            let left = source.floor() as usize;
+            let right = (left + 1).min(reference_take.len() - 1);
+            let frac = (source - left as f64) as f32;
+            *sample = reference_take[left] + frac * (reference_take[right] - reference_take[left]);
+        }
+    }
+
+    let chirps = super::record::ChirpTiming {
+        template: &chirp,
+        expected_start_samples: (delay as f64 / scale) as usize + 1500,
+        expected_end_samples: (end_at as f64 / scale) as usize - 1500,
+        spacing_samples: spacing as f64,
+    };
+    let (corrected, (drift, did_correct, advisory)) = super::record::correct_take_clock_drift(
+        &drifted,
+        &reference_take,
+        sample_rate,
+        "chirp-test",
+        Some(chirps),
+    );
+    let drift = drift.expect("chirped take must produce a drift estimate");
+    assert!(
+        (drift.ppm - injected_ppm).abs() < 10.0,
+        "expected ~{injected_ppm} ppm, got {:.2}",
+        drift.ppm
+    );
+    assert!(did_correct, "150 ppm correction must verify and apply");
+    let (severe_ppm, message) = advisory.expect("150 ppm must carry an advisory");
+    assert!(
+        (severe_ppm - injected_ppm).abs() < 10.0,
+        "advisory ppm {severe_ppm:.2} should match the estimate"
+    );
+    assert!(
+        message.contains("exceeds"),
+        "advisory should explain the severity, got: {message}"
+    );
+    assert_eq!(corrected.len(), drifted.len());
 }
 
 // --- Task 10: residuals (cancel masking, drift correct-then-verify) ---
@@ -1397,6 +1533,69 @@ fn noisy_sweep_take_warns_low_snr() {
         "expected SNR warning, issues: {:?}",
         capture.quality.issues
     );
+}
+
+#[test]
+#[cfg(not(target_os = "ios"))]
+fn unlocked_single_take_preserves_raw_wav() {
+    let sample_rate = 48_000_u32;
+    let reference = padded_sweep_reference(sample_rate);
+    let silent = vec![0.0_f32; reference.len()];
+    let dir = tempfile::tempdir().unwrap();
+    let error = super::record::analyze_sweep_takes(
+        &dir.path().join("D.wav"),
+        &dir.path().join("D.csv"),
+        std::slice::from_ref(&silent),
+        &reference,
+        sample_rate,
+        sample_rate,
+        Some((20.0, 20_000.0)),
+        None,
+        0,
+        "test",
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("D.nolock-take1.wav"),
+        "error must name the evidence: {error}"
+    );
+    let preserved: Vec<f32> = hound::WavReader::open(dir.path().join("D.nolock-take1.wav"))
+        .unwrap()
+        .samples::<f32>()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(preserved.len(), silent.len());
+    assert!(preserved.iter().all(|sample| *sample == 0.0));
+}
+
+#[test]
+#[cfg(not(target_os = "ios"))]
+fn unlocked_take_preservation_failure_keeps_original_error() {
+    let sample_rate = 48_000_u32;
+    let reference = padded_sweep_reference(sample_rate);
+    let silent = vec![0.0_f32; reference.len()];
+    let dir = tempfile::tempdir().unwrap();
+    // Nonexistent directory: the evidence write fails and must not mask
+    // the gate.
+    let missing = dir.path().join("no-such-dir").join("D.wav");
+    let error = super::record::analyze_sweep_takes(
+        &missing,
+        &dir.path().join("D.csv"),
+        std::slice::from_ref(&silent),
+        &reference,
+        sample_rate,
+        sample_rate,
+        Some((20.0, 20_000.0)),
+        None,
+        0,
+        "test",
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("No reliable signal lock") || error.contains("lag confidence"),
+        "{error}"
+    );
+    assert!(!error.contains("preserved at"), "{error}");
 }
 
 /// With only three takes, coherence cannot be computed (math-dsp needs at
@@ -2861,4 +3060,87 @@ fn stipa_generate_analyze_no_reference_recovers_sent_depth() {
         }
     }
     assert!(absolute.sti > 0.70, "sti={}", absolute.sti);
+}
+
+#[cfg(not(target_os = "ios"))]
+#[test]
+fn lag_gate_excludes_partial_overlap_self_match() {
+    // The full sweep planted with deterministic noise (reads ~0.85) plus an
+    // exact truncated copy of the sweep head at the take end (reads 1.0 at
+    // a partial overlap). The estimator's minimum-overlap candidacy must
+    // exclude the louder partial copy, so the gate accepts the true lag on
+    // the first try (see docs/bug-math-dsp-lag-f32-absorption.md).
+    let reference = prepare_measurement_signal(
+        SignalType::Sweep,
+        &SignalParams::Sweep {
+            start_freq: 20.0,
+            end_freq: 20000.0,
+            amp: 0.5,
+        },
+        2.0,
+        48000,
+    )
+    .unwrap();
+    let plant_at = 24_000_usize;
+    let copy_len = 60_000_usize;
+    let gap = 24_000_usize;
+    let copy_at = plant_at + reference.len() + gap;
+    let mut take = vec![0.0_f32; copy_at + copy_len];
+    for (index, sample) in reference.iter().enumerate() {
+        // Deterministic pseudo-noise near the sweep level, so the full
+        // copy reads ~0.7 — clearly under the exact partial copy (1.0)
+        // yet strong enough to lock confidently once it is excluded.
+        let t = index as f32 / 48000.0;
+        let noise = 0.22
+            * (2.0 * std::f32::consts::PI * 1234.0 * t).sin()
+            * (2.0 * std::f32::consts::PI * 57.0 * t).sin();
+        take[plant_at + index] = sample * 0.3 + noise;
+    }
+    for index in 0..copy_len {
+        take[copy_at + index] = reference[index] * 0.3;
+    }
+    let lag = estimate_lag_or_advise(&reference, &take, "test").unwrap();
+    assert_eq!(lag.lag_samples, plant_at as isize);
+    assert!(check_lag_lock(&lag, "test").is_ok());
+}
+
+#[cfg(not(target_os = "ios"))]
+#[test]
+fn lag_gate_dead_take_fails_honestly() {
+    let reference = prepare_measurement_signal(
+        SignalType::Sweep,
+        &SignalParams::Sweep {
+            start_freq: 20.0,
+            end_freq: 20000.0,
+            amp: 0.5,
+        },
+        2.0,
+        48000,
+    )
+    .unwrap();
+    let take = vec![0.0_f32; reference.len() + 1000];
+    let err = estimate_lag_or_advise(&reference, &take, "test").unwrap_err();
+    assert!(err.contains("No reliable signal lock"), "{err}");
+}
+
+#[cfg(not(target_os = "ios"))]
+#[test]
+fn lag_gate_short_take_bypasses_exclusion() {
+    // A take shorter than the reference can only lock partially; the
+    // estimator's minimum-overlap candidacy scales to the shorter signal,
+    // so the gate must still lock instead of failing.
+    let reference = prepare_measurement_signal(
+        SignalType::Sweep,
+        &SignalParams::Sweep {
+            start_freq: 20.0,
+            end_freq: 20000.0,
+            amp: 0.5,
+        },
+        2.0,
+        48000,
+    )
+    .unwrap();
+    let take = reference[..reference.len() / 2].to_vec();
+    let lag = estimate_lag_or_advise(&reference, &take, "test").unwrap();
+    assert_eq!(lag.lag_samples, 0);
 }

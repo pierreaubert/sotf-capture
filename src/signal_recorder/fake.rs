@@ -56,6 +56,10 @@ pub struct FakeAudioConfig {
     pub fail_input_stop: Option<String>,
     /// When set, every output `start` fails with this message.
     pub fail_output_start: Option<String>,
+    /// First N successful input `start` calls render silence (sleeping
+    /// device); later starts render the wire stimulus. Exercises the
+    /// pre-capture wake-up path.
+    pub dead_starts: usize,
 }
 
 impl Default for FakeAudioConfig {
@@ -78,6 +82,7 @@ impl Default for FakeAudioConfig {
             fail_input_start: None,
             fail_input_stop: None,
             fail_output_start: None,
+            dead_starts: 0,
         }
     }
 }
@@ -133,6 +138,7 @@ impl VirtualWire {
             log_tag: log_tag.into(),
             wire: self.clone(),
             capture: None,
+            starts: 0,
         }
     }
 
@@ -240,6 +246,7 @@ pub struct FakeRecorder {
     log_tag: String,
     wire: VirtualWire,
     capture: Option<FakeCapture>,
+    starts: usize,
 }
 
 impl FakeRecorder {
@@ -256,7 +263,9 @@ impl FakeRecorder {
     ) -> Result<Vec<f32>, String> {
         let config = &self.wire.config;
         let (stimulus, sweep_rate) = match self.wire.state.lock() {
-            Ok(state) if state.played => (state.stimulus.clone(), state.sweep_rate),
+            Ok(state) if state.played && self.starts > config.dead_starts => {
+                (state.stimulus.clone(), state.sweep_rate)
+            }
             _ => (Vec::new(), capture.sample_rate),
         };
         let mut signal = if stimulus.is_empty() || sweep_rate == capture.sample_rate {
@@ -357,6 +366,7 @@ impl SweepRecorder for FakeRecorder {
             sample_rate: negotiated,
             expected_duration_secs,
         });
+        self.starts += 1;
         Ok(NegotiatedInput {
             hardware_channels: config.input_channels,
             sample_rate: negotiated,

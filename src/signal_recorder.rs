@@ -29,6 +29,8 @@ mod signal_type;
 #[cfg(test)]
 mod tests;
 mod types;
+#[cfg(not(target_os = "ios"))]
+pub(crate) mod wake;
 mod write;
 
 pub use consts::*;

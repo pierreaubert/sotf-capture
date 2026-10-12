@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "geometry": "spread",
+  "sample_rate_hz": 48000,
+  "output_device": "RME Fireface",
+  "microphones": [
+    {
+      "id": "main-seat",
+      "device": "RME Fireface",
+      "input_channel": 0,
+      "calibration_file": "calibrations/mm1-mlp-onaxis.txt",
+      "calibration_orientation": "on_axis",
+      "gain_db": 18.0,
+      "position_m": [0.0, 0.0, 1.1],
+      "position_uncertainty_mm": 5.0
+    },
+    {
+      "id": "second-seat",
+      "device": "RME Fireface",
+      "input_channel": 1,
+      "calibration_file": "calibrations/mm1-seat-onaxis.txt",
+      "calibration_orientation": "on_axis",
+      "gain_db": 18.0,
+      "position_m": [0.55, 0.0, 1.1],
+      "position_uncertainty_mm": 5.0
+    },
+    {
+      "id": "ear-left",
+      "device": "RME Fireface",
+      "input_channel": 2,
+      "calibration_file": "calibrations/mm1-ear-left-onaxis.txt",
+      "calibration_orientation": "on_axis",
+      "gain_db": 18.0,
+      "position_m": [-0.0875, 0.0, 1.1],
+      "position_uncertainty_mm": 1.0
+    },
+    {
+      "id": "ear-right",
+      "device": "RME Fireface",
+      "input_channel": 3,
+      "calibration_file": "calibrations/mm1-ear-right-onaxis.txt",
+      "calibration_orientation": "on_axis",
+      "gain_db": 18.0,
+      "position_m": [0.0875, 0.0, 1.1],
+      "position_uncertainty_mm": 1.0
+    }
+  ],
+  "sources": [
+    {"id": "front-left", "output_channel": 0},
+    {"id": "front-right", "output_channel": 1},
+    {"id": "sub", "output_channel": 2}
+  ],
+  "repeat_count": 2,
+  "sweep": {
+    "duration_secs": 5.0,
+    "start_hz": 15.0,
+    "end_hz": 20000.0,
+    "amplitude": 0.1,
+    "bass_octave_duration_s": 3.0
+  },
+  "timing_reference": {
+    "output_channel": 0,
+    "position_m": [-1.1, -2.6, 1.1],
+    "position_uncertainty_mm": 10.0,
+    "sound_speed_m_s": 343.0,
+    "sound_speed_uncertainty_m_s": 1.0
+  },
+  "room_dimensions": {
+    "length": 6.4,
+    "width": 4.2,
+    "height": 2.7
+  },
+  "setup_description": "One-command RoomEQ feed: seat sweeps for magnitude EQ, sub sweeps plus probe and bass anchor for delay/gain/group-delay alignment, ear-pair sweeps plus loopback for CTC. Timing chirps ride the surveyed front-left speaker.",
+  "probe": {
+    "probe_duration_ms": 500.0,
+    "silence_duration_ms": 250.0,
+    "signal_level_db": -12.0
+  },
+  "bass_anchor": {
+    "bass_freq_hz": 50.0,
+    "bass_duration_s": 4.0,
+    "fade_ms": 100.0,
+    "num_windows": 4,
+    "silence_duration_ms": 250.0,
+    "signal_level_db": -12.0
+  },
+  "loopback": {
+    "device": "RME Fireface",
+    "input_channel": 7
+  },
+  "ctc": {
+    "left_ear": "ear-left",
+    "right_ear": "ear-right",
+    "head_position": {
+      "id": "main-seat",
+      "x": 0.0,
+      "y": 0.0,
+      "z": 1.1,
+      "yaw_deg": 0.0
+    }
+  }
+}

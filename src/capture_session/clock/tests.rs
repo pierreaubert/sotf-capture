@@ -900,3 +900,92 @@ fn first_grid_mismatch_reports_length_and_value_divergence() {
     .expect("value mismatch must report");
     assert!(values.contains("bin 1"), "{values}");
 }
+
+#[test]
+fn clock_skew_summary_reports_per_take_fit_and_real_fallback() {
+    let root = write_golden_directory();
+    let output = root.path().join("processed");
+    let report = io::process_capture_session(root.path(), &output).unwrap();
+    let lines = io::clock_skew_lines(&report);
+    assert_eq!(lines.len(), 2);
+    // Take 0 resampled near the golden +80 ppm; take 1 fell back.
+    assert!(
+        lines[0].contains(&report.takes[0].raw.take_id) && lines[0].contains("resampled"),
+        "{}",
+        lines[0]
+    );
+    let skew = report.takes[0].clock.skew_ppm.unwrap();
+    assert!(
+        lines[0].contains(&format!("{skew:+.1}")),
+        "line must print the fitted skew: {}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains("magnitude-only"),
+        "fallback take must show its reason: {}",
+        lines[1]
+    );
+    // Both real takes carry magnitude-only reasons (take 0 resampled but
+    // its uncertainty exceeds the coherent gate); the quiet +80 ppm fit
+    // itself raises no severe/wander warning.
+    let warnings = io::clock_skew_warnings(&report);
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| warning.contains("magnitude-only")),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings[1].contains(&report.takes[1].raw.take_id),
+        "{}",
+        warnings[1]
+    );
+}
+
+#[test]
+fn clock_skew_warnings_flag_severe_skew_and_wander() {
+    let root = write_golden_directory();
+    let output = root.path().join("processed");
+    let mut report = io::process_capture_session(root.path(), &output).unwrap();
+    report.takes[0].clock.skew_ppm = Some(150.0);
+    report.takes[0].clock.magnitude_only_reason = None;
+    report.takes[1].clock.skew_ppm = Some(-120.0);
+    report.takes[1].clock.magnitude_only_reason = None;
+    let warnings = io::clock_skew_warnings(&report);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("+150.0") && warning.contains("exceeds 100 ppm")),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("wanders 270 ppm")),
+        "{warnings:?}"
+    );
+    // Small stable skews on every take stay quiet.
+    report.takes[0].clock.skew_ppm = Some(40.0);
+    report.takes[1].clock.skew_ppm = Some(-30.0);
+    assert!(io::clock_skew_warnings(&report).is_empty());
+}
+
+#[test]
+fn clock_skew_lines_mark_unknown_and_empty_runs() {
+    let root = write_golden_directory();
+    let output = root.path().join("processed");
+    let mut report = io::process_capture_session(root.path(), &output).unwrap();
+    report.takes[0].clock.skew_ppm = None;
+    report.takes[0].clock.magnitude_only_reason = None;
+    let lines = io::clock_skew_lines(&report);
+    assert!(lines[0].contains("skew unknown"), "{}", lines[0]);
+    assert!(
+        io::clock_skew_warnings(&report)
+            .iter()
+            .all(|warning| !warning.contains("exceeds"))
+    );
+    report.takes.clear();
+    assert!(io::clock_skew_lines(&report).is_empty());
+    assert!(io::clock_skew_warnings(&report).is_empty());
+}
