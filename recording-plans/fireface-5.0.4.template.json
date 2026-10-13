@@ -1,0 +1,154 @@
+{
+  "version": 1,
+  "geometry": "spread",
+  "sample_rate_hz": 48000,
+  "output_device": "coreaudio:RMEUSBDevice-193-24006088",
+  "microphones": [
+    {
+      "id": "room-reference",
+      "device": "coreaudio:RMEUSBDevice-193-24006088",
+      "input_channel": 0,
+      "calibration_file": "../data_tests/microphones/UMIC_34S863/calibration.txt",
+      "calibration_orientation": "ninety_degrees",
+      "gain_db": 40,
+      "position_m": [
+        0.24,
+        0,
+        1.25
+      ],
+      "position_uncertainty_mm": 5
+    },
+    {
+      "id": "ear-right",
+      "device": "coreaudio:RMEUSBDevice-193-24006088",
+      "input_channel": 1,
+      "calibration_file": "../data_tests/microphones/UMIC_37U542/calibration.txt",
+      "calibration_orientation": "ninety_degrees",
+      "gain_db": 40,
+      "position_m": [
+        0.16,
+        0,
+        1.25
+      ],
+      "position_uncertainty_mm": 5
+    },
+    {
+      "id": "ear-left",
+      "device": "coreaudio:RMEUSBDevice-193-24006088",
+      "input_channel": 2,
+      "calibration_file": "../data_tests/microphones/UMIC_39I870/39I870_cal_Sonarworks_90degree.txt",
+      "calibration_orientation": "ninety_degrees",
+      "gain_db": 40,
+      "position_m": [
+        -0.16,
+        0,
+        1.25
+      ],
+      "position_uncertainty_mm": 5
+    },
+    {
+      "id": "room-secondary",
+      "device": "coreaudio:RMEUSBDevice-193-24006088",
+      "input_channel": 3,
+      "calibration_file": "../data_tests/microphones/UMIC_39I879/39I879_cal_Sonarworks_90degree.txt",
+      "calibration_orientation": "ninety_degrees",
+      "gain_db": 40,
+      "position_m": [
+        -0.24,
+        0,
+        1.25
+      ],
+      "position_uncertainty_mm": 5
+    }
+  ],
+  "sources": [
+    {
+      "id": "L",
+      "output_channel": 0
+    },
+    {
+      "id": "R",
+      "output_channel": 1
+    },
+    {
+      "id": "C",
+      "output_channel": 2
+    },
+    {
+      "id": "SL",
+      "output_channel": 4
+    },
+    {
+      "id": "SR",
+      "output_channel": 5
+    },
+    {
+      "id": "TFL",
+      "output_channel": 6
+    },
+    {
+      "id": "TFR",
+      "output_channel": 7
+    },
+    {
+      "id": "TRL",
+      "output_channel": 8
+    },
+    {
+      "id": "TRR",
+      "output_channel": 9
+    }
+  ],
+  "repeat_count": 2,
+  "sweep": {
+    "duration_secs": 10.0,
+    "start_hz": 20.0,
+    "end_hz": 20000.0,
+    "amplitude": 0.1
+  },
+  "timing_reference": {
+    "output_channel": 0,
+    "position_m": [
+      -1.4,
+      1.4,
+      1.5
+    ],
+    "position_uncertainty_mm": 10,
+    "sound_speed_m_s": 340.0,
+    "sound_speed_uncertainty_m_s": 1.0
+  },
+  "room_dimensions": {
+    "length": 3.0,
+    "width": 4.2,
+    "height": 2.7
+  },
+  "setup_description": "Fireface 5.0.4 baseline. Output 3 (LFE) omitted. All four microphones recorded simultaneously; left ear=input 2, right ear=input 1. Fixed surveyed L speaker emits start/end timing chirps. Electrical loopback records the actual active playback stream. Record microphone orientation, gain, room temperature, speaker processing and routing before acquisition.",
+  "probe": {
+    "probe_duration_ms": 500.0,
+    "silence_duration_ms": 250.0,
+    "signal_level_db": -20.0
+  },
+  "bass_anchor": {
+    "bass_freq_hz": 80.0,
+    "bass_duration_s": 4.0,
+    "fade_ms": 100.0,
+    "num_windows": 4,
+    "silence_duration_ms": 250.0,
+    "signal_level_db": -20.0
+  },
+  "loopback": {
+    "device": "coreaudio:RMEUSBDevice-193-24006088",
+    "input_channel": 4
+  },
+  "ctc": {
+    "left_ear": "ear-left",
+    "right_ear": "ear-right",
+    "head_position": {
+      "id": "main-head",
+      "x": 0,
+      "y": 0,
+      "z": 1.25,
+      "yaw_deg": 0
+    }
+  }
+}
