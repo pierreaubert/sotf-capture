@@ -321,6 +321,8 @@ fn list_audio_devices(json: bool) -> Result<(), String> {
 
 #[allow(clippy::too_many_arguments)]
 fn record_signal(
+    playback: &mut impl sotf_capture::signal_recorder::SweepPlayback,
+    recorder: &mut impl sotf_capture::signal_recorder::SweepRecorder,
     signal: String,
     duration: f32,
     sample_rate: u32,
@@ -348,10 +350,9 @@ fn record_signal(
     use sotf_capture::recording_helpers::take_verdict_text;
     use sotf_capture::recording_helpers::{capture_signal_params, summarize_take_quality};
     use sotf_capture::signal_recorder::{
-        CpalPlayback, DEFAULT_MLS_ORDER, SignalParams, SignalType,
-        generate_output_filenames_stereo, generate_signal, parse_channel_list,
-        prepare_measurement_signal, prepare_signal, record_and_analyze_with,
-        validate_signal_params, write_temp_wav,
+        DEFAULT_MLS_ORDER, SignalParams, SignalType, generate_output_filenames_stereo,
+        generate_signal, parse_channel_list, prepare_measurement_signal, prepare_signal,
+        record_and_analyze_with_recorder, validate_signal_params, write_temp_wav,
     };
     use std::str::FromStr;
 
@@ -489,9 +490,9 @@ fn record_signal(
             .get(&(record_ch as usize))
             .map(String::as_str)
             .or(microphone_compensation.as_deref());
-        let mut playback = CpalPlayback::new();
-        let capture = record_and_analyze_with(
-            &mut playback,
+        let capture = record_and_analyze_with_recorder(
+            playback,
+            recorder,
             temp_wav.path(),
             &wav_path,
             &prepared_signal,
@@ -502,7 +503,7 @@ fn record_signal(
             output_device.as_deref().or(device.as_deref()),
             input_device.as_deref().or(device.as_deref()),
             effective_mic_comp,
-            None,
+            (signal_type == SignalType::Sweep).then_some((start_freq, end_freq)),
             1,
             None,
         )?;
@@ -968,6 +969,8 @@ fn run() -> Result<(), String> {
             mic_calibrations,
             json,
         } => record_signal(
+            &mut sotf_capture::signal_recorder::CpalPlayback::new(),
+            &mut sotf_capture::signal_recorder::CpalRecorder::new("record_and_analyze"),
             signal,
             duration,
             sample_rate,
@@ -1092,6 +1095,67 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "test-util")]
+    #[test]
+    fn capture_cli_analyzes_sweeps_on_each_requested_output() {
+        use sotf_capture::signal_recorder::{FakeAudioConfig, VirtualWire};
+
+        let directory = tempfile::tempdir().unwrap();
+        // Nonlinearity produces measurable sweep harmonics. Generic analysis
+        // reports zero THD, so this checks the CLI actually selects ESS analysis.
+        let wire = VirtualWire::new(FakeAudioConfig {
+            output_channels: 3,
+            cubic_distortion: 4.0,
+            ..FakeAudioConfig::default()
+        });
+        record_signal(
+            &mut wire.playback("cli regression"),
+            &mut wire.recorder("cli regression"),
+            "sweep".into(),
+            2.0,
+            8000,
+            1,
+            "0,1,2".into(),
+            "0".into(),
+            None,
+            Some(directory.path().to_path_buf()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            20.0,
+            3000.0,
+            Some(0.5),
+            None,
+            None,
+            None,
+            None,
+            HashMap::new(),
+            false,
+        )
+        .unwrap();
+        for output in 0..3 {
+            let csv = std::fs::read_to_string(
+                directory
+                    .path()
+                    .join(format!("sweep_send{output}_rec0_8000.csv")),
+            )
+            .unwrap();
+            let has_harmonics = csv.lines().skip(1).any(|line| {
+                let fields: Vec<_> = line.split(',').collect();
+                let frequency: f32 = fields[0].parse().unwrap();
+                let thd: f32 = fields[3].parse().unwrap();
+                (100.0..=500.0).contains(&frequency) && thd > 0.1
+            });
+            assert!(
+                has_harmonics,
+                "output {output} did not receive ESS analysis"
+            );
+        }
+    }
 
     #[test]
     fn capture_accepts_independent_machine_device_selectors() {
