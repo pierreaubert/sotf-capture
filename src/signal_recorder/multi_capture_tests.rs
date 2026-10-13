@@ -104,6 +104,38 @@ fn negotiation_requires_exact_rate_and_all_requested_channels() {
 }
 
 #[test]
+fn fireface_native_stream_width_supports_low_numbered_routes() {
+    let ranges = vec![range(94, 48_000, 48_000, cpal::SampleFormat::F32)];
+    for required_channels in [1, 5, 10] {
+        let config = exact_config(ranges.clone().into_iter(), required_channels, 48_000).unwrap();
+        assert_eq!(config.channels(), 94);
+        assert_eq!(config.sample_rate(), 48_000);
+    }
+    assert!(exact_config(ranges.clone().into_iter(), 95, 48_000).is_err());
+    assert!(exact_config(ranges.into_iter(), 5, 44_100).is_err());
+
+    let (mut producer, mut consumer) = rtrb::RingBuffer::new(1);
+    let failed = AtomicBool::new(false);
+    let mut input = [0.0_f32; 94];
+    input[..5].copy_from_slice(&[0.1, 0.2, 0.3, 0.4, 0.5]);
+    capture_frames(&input, 94, &[0, 1, 2, 3, 4], &mut producer, &failed);
+    assert_eq!(consumer.pop().unwrap(), [0.1, 0.2, 0.3, 0.4, 0.5]);
+
+    let mut output = [1.0_f32; 188];
+    let cursor = AtomicUsize::new(0);
+    playback_frames(&mut output, 94, 9, &[], &[0.25, -0.5], &cursor, &failed);
+    for (index, sample) in output.iter().enumerate() {
+        let expected = match index {
+            9 => 0.25,
+            103 => -0.5,
+            _ => 0.0,
+        };
+        assert_eq!(*sample, expected);
+    }
+    assert!(!failed.load(Ordering::Relaxed));
+}
+
+#[test]
 fn input_callback_preserves_routing_and_variable_block_boundaries() {
     let (mut producer, mut consumer) = rtrb::RingBuffer::new(4);
     let failed = AtomicBool::new(false);
