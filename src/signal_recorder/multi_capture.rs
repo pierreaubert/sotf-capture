@@ -13,10 +13,10 @@ use std::time::{Duration, Instant};
 use super::CancelFlag;
 use super::measurement::measurement_sample_format_rank;
 
-// Four microphones is the capture protocol limit. Grouped input frames fit in
-// a fixed array so callbacks never allocate, even for aggregate devices.
-const MAX_MICS: usize = 4;
-// Bound configuration-driven memory (at most 256 MiB for planar capture).
+// Four microphones plus one electrical loopback is the capture protocol limit.
+// Grouped input frames fit in a fixed array so callbacks never allocate.
+const MAX_INPUTS: usize = 5;
+// Bound configuration-driven memory (at most 320 MB for planar capture).
 const MAX_FRAMES: usize = 16_000_000;
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -46,7 +46,7 @@ pub struct CaptureOutputSegment {
 /// One source stimulus recorded simultaneously on every requested input.
 #[derive(Debug)]
 pub struct MultiCaptureRequest {
-    /// Two to four input routes, ordered as the returned recordings.
+    /// Two to five input routes (four microphones plus an optional loopback), ordered as the returned recordings.
     pub inputs: Vec<CaptureInput>,
     /// Exact playback device ID or unique enumerated name.
     pub output_device: String,
@@ -84,8 +84,8 @@ struct InputGroup {
 }
 
 fn group_inputs(request: &MultiCaptureRequest) -> Result<Vec<InputGroup>, String> {
-    if !(2..=MAX_MICS).contains(&request.inputs.len()) {
-        return Err("simultaneous capture requires two to four inputs".into());
+    if !(2..=MAX_INPUTS).contains(&request.inputs.len()) {
+        return Err("simultaneous capture requires two to five inputs (up to four microphones plus loopback)".into());
     }
     if !(16_001..=384_000).contains(&request.sample_rate_hz)
         || request.stimulus.is_empty()
@@ -186,7 +186,7 @@ fn capture_frames<T>(
     data: &[T],
     channels: usize,
     selected: &[u16],
-    producer: &mut rtrb::Producer<[f32; MAX_MICS]>,
+    producer: &mut rtrb::Producer<[f32; MAX_INPUTS]>,
     failed: &AtomicBool,
 ) where
     T: cpal::SizedSample,
@@ -194,7 +194,7 @@ fn capture_frames<T>(
 {
     if channels == 0
         || !data.len().is_multiple_of(channels)
-        || selected.len() > MAX_MICS
+        || selected.len() > MAX_INPUTS
         || selected
             .iter()
             .any(|channel| usize::from(*channel) >= channels)
@@ -203,7 +203,7 @@ fn capture_frames<T>(
         return;
     }
     for frame in data.chunks_exact(channels) {
-        let mut selected_frame = [0.0; MAX_MICS];
+        let mut selected_frame = [0.0; MAX_INPUTS];
         for (slot, channel) in selected.iter().enumerate() {
             let sample = <f32 as cpal::FromSample<T>>::from_sample_(frame[usize::from(*channel)]);
             if !sample.is_finite() {
@@ -260,7 +260,7 @@ fn input_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     selected: Vec<u16>,
-    mut producer: rtrb::Producer<[f32; MAX_MICS]>,
+    mut producer: rtrb::Producer<[f32; MAX_INPUTS]>,
     failed: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, String>
 where
@@ -339,7 +339,7 @@ macro_rules! with_sample_format {
 
 struct RunningInput {
     stream: cpal::Stream,
-    consumer: rtrb::Consumer<[f32; MAX_MICS]>,
+    consumer: rtrb::Consumer<[f32; MAX_INPUTS]>,
     routes: Vec<(usize, u16)>,
     failed: Arc<AtomicBool>,
     name: String,

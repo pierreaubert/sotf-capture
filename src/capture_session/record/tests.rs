@@ -494,6 +494,12 @@ fn auxiliary_passes_honor_cancellation() {
 fn ctc_sessions_record_one_loopback_take_per_source() {
     let (root, plain) = setup();
     let mut plan = plain.plan().clone();
+    for input_channel in [2, 3] {
+        let mut mic = plan.microphones[0].clone();
+        mic.id = format!("extra-{input_channel}");
+        mic.input_channel = input_channel;
+        plan.microphones.push(mic);
+    }
     plan.loopback = Some(crate::capture_session::CaptureLoopback {
         device: plan.microphones[0].device.clone(),
         input_channel: 7,
@@ -512,16 +518,26 @@ fn ctc_sessions_record_one_loopback_take_per_source() {
     let session = plan.validate().unwrap();
     let output = root.path().join("session");
     let cancel = Arc::new(AtomicBool::new(false));
+    let mut sweep_requests = 0;
     let manifest = record_with(
         &session,
         root.path(),
         &output,
         &cancel,
         |_| {},
-        fake_capture,
+        |request, cancel| {
+            if !request.output_overrides.is_empty() {
+                assert_eq!(request.inputs.len(), 5);
+                assert_eq!(request.inputs[4].channel, 7);
+                sweep_requests += 1;
+            }
+            fake_capture(request, cancel)
+        },
     )
     .unwrap();
+    assert_eq!(sweep_requests, session.plan().sources.len());
     assert_eq!(manifest.status, RawCaptureStatus::RawComplete);
+    assert_eq!(manifest.takes.len(), session.plan().sources.len() * 4);
     assert_eq!(manifest.loopback_files.len(), session.plan().sources.len());
     for loopback in &manifest.loopback_files {
         assert!(output.join(&loopback.wav_file).is_file());

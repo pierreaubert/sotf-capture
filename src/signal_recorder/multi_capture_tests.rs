@@ -33,6 +33,37 @@ fn aggregate_channels_share_one_stream_but_usb_devices_do_not() {
 }
 
 #[test]
+fn four_microphones_and_loopback_share_one_stream_and_preserve_all_samples() {
+    let mut request = request();
+    request.inputs = [3, 1, 0, 2, 7]
+        .into_iter()
+        .map(|channel| CaptureInput {
+            device: "Fireface".into(),
+            channel,
+        })
+        .collect();
+    let groups = group_inputs(&request).unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].routes, [(0, 3), (1, 1), (2, 0), (3, 2), (4, 7)]);
+    let (mut producer, mut consumer) = rtrb::RingBuffer::new(2);
+    let failed = AtomicBool::new(false);
+    capture_frames(
+        &[0.1, 0.2, 0.3, 0.4, 0.0, 0.0, 0.0, 0.8],
+        8,
+        &[3, 1, 0, 2, 7],
+        &mut producer,
+        &failed,
+    );
+    assert_eq!(consumer.pop().unwrap(), [0.4, 0.2, 0.1, 0.3, 0.8]);
+    assert!(!failed.load(Ordering::Relaxed));
+    request.inputs.push(CaptureInput {
+        device: "Fireface".into(),
+        channel: 8,
+    });
+    assert!(group_inputs(&request).is_err());
+}
+
+#[test]
 fn invalid_requests_fail_without_opening_devices() {
     let mut request = request();
     request.stimulus[0] = f32::NAN;
@@ -85,9 +116,9 @@ fn input_callback_preserves_routing_and_variable_block_boundaries() {
         &failed,
     );
     capture_frames(&[0.7, 0.8, 0.9], 3, &[2, 0], &mut producer, &failed);
-    assert_eq!(consumer.pop().unwrap(), [0.3, 0.1, 0.0, 0.0]);
-    assert_eq!(consumer.pop().unwrap(), [0.6, 0.4, 0.0, 0.0]);
-    assert_eq!(consumer.pop().unwrap(), [0.9, 0.7, 0.0, 0.0]);
+    assert_eq!(consumer.pop().unwrap(), [0.3, 0.1, 0.0, 0.0, 0.0]);
+    assert_eq!(consumer.pop().unwrap(), [0.6, 0.4, 0.0, 0.0, 0.0]);
+    assert_eq!(consumer.pop().unwrap(), [0.9, 0.7, 0.0, 0.0, 0.0]);
     assert!(consumer.pop().is_err());
     assert!(!failed.load(Ordering::Relaxed));
 }
@@ -107,7 +138,7 @@ fn integer_input_is_converted_without_changing_channel_order() {
     let (mut producer, mut consumer) = rtrb::RingBuffer::new(1);
     let failed = AtomicBool::new(false);
     capture_frames(&[i16::MIN, 0, 16_384], 3, &[2, 0], &mut producer, &failed);
-    assert_eq!(consumer.pop().unwrap(), [0.5, -1.0, 0.0, 0.0]);
+    assert_eq!(consumer.pop().unwrap(), [0.5, -1.0, 0.0, 0.0, 0.0]);
     assert!(!failed.load(Ordering::Relaxed));
 }
 
