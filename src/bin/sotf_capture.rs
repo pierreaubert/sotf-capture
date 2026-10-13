@@ -48,7 +48,7 @@ enum Command {
         #[arg(long, default_value_t = 30.0)]
         duration: f64,
     },
-    /// Capture stimulus takes for output/input channel pairs.
+    /// Capture every microphone simultaneously for each sequential output.
     Capture {
         /// Stimulus: sweep, tone, two-tone, white-noise, pink-noise, stipa,
         /// m-noise, mls, dirac.
@@ -66,7 +66,7 @@ enum Command {
         /// Hardware output channels, e.g. "0,1".
         #[arg(long)]
         hwaudio_send_to: String,
-        /// Hardware input channels, e.g. "0" (one per send, or one shared).
+        /// Hardware microphone inputs recorded together for every output, e.g. "0,1,2,3".
         #[arg(long)]
         hwaudio_record_from: String,
         /// Output filename prefix.
@@ -352,7 +352,7 @@ fn record_signal(
     use sotf_capture::signal_recorder::{
         DEFAULT_MLS_ORDER, SignalParams, SignalType, generate_output_filenames_stereo,
         generate_signal, parse_channel_list, prepare_measurement_signal, prepare_signal,
-        record_and_analyze_with_recorder, validate_signal_params, write_temp_wav,
+        record_and_analyze_with_multi_recorder, validate_signal_params, write_temp_wav,
     };
     use std::str::FromStr;
 
@@ -392,13 +392,8 @@ fn record_signal(
             ));
         }
     }
-    if send_to_channels.len() != record_from_channels.len() && record_from_channels.len() != 1 {
-        return Err(format!(
-            "Invalid channel configuration: {} send-to channels, {} record-from channels.\n\
-             Must be either equal counts or a single shared record channel.",
-            send_to_channels.len(),
-            record_from_channels.len()
-        ));
+    if record_from_channels.is_empty() {
+        return Err("hwaudio-record-from must specify at least 1 microphone channel".into());
     }
     let params = match signal_type {
         SignalType::Tone => {
@@ -471,64 +466,75 @@ fn record_signal(
     };
 
     for (index, &send_ch) in send_to_channels.iter().enumerate() {
-        let record_ch = if record_from_channels.len() == 1 {
-            record_from_channels[0]
-        } else {
-            record_from_channels[index]
-        };
-        let (wav_name, csv_name) = generate_output_filenames_stereo(
-            name.as_deref(),
-            signal_type,
-            send_ch,
-            record_ch,
-            sample_rate,
-        );
-        let wav_path = output_dir.join(wav_name);
-        let csv_path = output_dir.join(csv_name);
+        let (wav_paths, csv_paths): (Vec<_>, Vec<_>) = record_from_channels
+            .iter()
+            .map(|&record_ch| {
+                let (wav_name, csv_name) = generate_output_filenames_stereo(
+                    name.as_deref(),
+                    signal_type,
+                    send_ch,
+                    record_ch,
+                    sample_rate,
+                );
+                (output_dir.join(wav_name), output_dir.join(csv_name))
+            })
+            .unzip();
         let temp_wav = write_temp_wav(&prepared_signal, sample_rate, 1)?;
-        let effective_mic_comp = mic_calibration_map
-            .get(&(record_ch as usize))
-            .map(String::as_str)
-            .or(microphone_compensation.as_deref());
-        let capture = record_and_analyze_with_recorder(
+        let mic_calibrations: Vec<_> = record_from_channels
+            .iter()
+            .map(|channel| {
+                mic_calibration_map
+                    .get(&usize::from(*channel))
+                    .or(microphone_compensation.as_ref())
+                    .cloned()
+            })
+            .collect();
+        let captures = record_and_analyze_with_multi_recorder(
             playback,
             recorder,
             temp_wav.path(),
-            &wav_path,
+            &wav_paths,
             &prepared_signal,
             sample_rate,
-            &csv_path,
+            &csv_paths,
             send_ch,
-            record_ch,
+            &record_from_channels,
             output_device.as_deref().or(device.as_deref()),
             input_device.as_deref().or(device.as_deref()),
-            effective_mic_comp,
+            &mic_calibrations,
             (signal_type == SignalType::Sweep).then_some((start_freq, end_freq)),
             1,
             None,
         )?;
-        let quality = summarize_take_quality(&capture);
-        let verdict = take_verdict_text(&quality);
-        if json {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "version": 1,
-                    "send_channel": send_ch,
-                    "record_channel": record_ch,
-                    "requested_output_device": output_device.as_deref().or(device.as_deref()),
-                    "requested_input_device": input_device.as_deref().or(device.as_deref()),
-                    "microphone_calibration": effective_mic_comp,
-                    "wav": wav_path.display().to_string(),
-                    "csv": csv_path.display().to_string(),
-                    "trustworthy": quality.trustworthy,
-                    "verdict": verdict,
-                })
-            );
-        } else if quality.trustworthy {
-            println!("pair hw{send_ch}->hw{record_ch}: complete — {verdict}");
-        } else {
-            println!("pair hw{send_ch}->hw{record_ch}: NEEDS REVIEW — {verdict}");
+        for (mic_index, (&record_ch, capture)) in
+            record_from_channels.iter().zip(&captures).enumerate()
+        {
+            let wav_path = &wav_paths[mic_index];
+            let csv_path = &csv_paths[mic_index];
+            let effective_mic_comp = mic_calibrations[mic_index].as_deref();
+            let quality = summarize_take_quality(capture);
+            let verdict = take_verdict_text(&quality);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "version": 1,
+                        "send_channel": send_ch,
+                        "record_channel": record_ch,
+                        "requested_output_device": output_device.as_deref().or(device.as_deref()),
+                        "requested_input_device": input_device.as_deref().or(device.as_deref()),
+                        "microphone_calibration": effective_mic_comp,
+                        "wav": wav_path.display().to_string(),
+                        "csv": csv_path.display().to_string(),
+                        "trustworthy": quality.trustworthy,
+                        "verdict": verdict,
+                    })
+                );
+            } else if quality.trustworthy {
+                println!("pair hw{send_ch}->hw{record_ch}: complete — {verdict}");
+            } else {
+                println!("pair hw{send_ch}->hw{record_ch}: NEEDS REVIEW — {verdict}");
+            }
         }
         if index + 1 < send_to_channels.len() {
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -1098,62 +1104,117 @@ mod tests {
 
     #[cfg(feature = "test-util")]
     #[test]
-    fn capture_cli_analyzes_sweeps_on_each_requested_output() {
-        use sotf_capture::signal_recorder::{FakeAudioConfig, VirtualWire};
+    fn capture_cli_records_every_microphone_for_each_output() {
+        use sotf_capture::signal_recorder::{
+            FakeAudioConfig, FakeRecorder, NegotiatedInput, RecordedTake, SweepRecorder,
+            VirtualWire,
+        };
 
-        let directory = tempfile::tempdir().unwrap();
-        // Nonlinearity produces measurable sweep harmonics. Generic analysis
-        // reports zero THD, so this checks the CLI actually selects ESS analysis.
-        let wire = VirtualWire::new(FakeAudioConfig {
-            output_channels: 3,
-            cubic_distortion: 4.0,
-            ..FakeAudioConfig::default()
-        });
-        record_signal(
-            &mut wire.playback("cli regression"),
-            &mut wire.recorder("cli regression"),
-            "sweep".into(),
-            2.0,
-            8000,
-            1,
-            "0,1,2".into(),
-            "0".into(),
-            None,
-            Some(directory.path().to_path_buf()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            20.0,
-            3000.0,
-            Some(0.5),
-            None,
-            None,
-            None,
-            None,
-            HashMap::new(),
-            false,
-        )
-        .unwrap();
-        for output in 0..3 {
-            let csv = std::fs::read_to_string(
-                directory
-                    .path()
-                    .join(format!("sweep_send{output}_rec0_8000.csv")),
+        struct TrackedRecorder {
+            inner: FakeRecorder,
+            starts: Vec<Vec<u16>>,
+        }
+        impl SweepRecorder for TrackedRecorder {
+            fn start(
+                &mut self,
+                device: Option<&str>,
+                channels: &[u16],
+                rate: u32,
+                seconds: f64,
+            ) -> Result<NegotiatedInput, String> {
+                self.starts.push(channels.to_vec());
+                self.inner.start(device, channels, rate, seconds)
+            }
+            fn captured_samples(&self) -> usize {
+                self.inner.captured_samples()
+            }
+            fn stop(&mut self) -> Result<RecordedTake, String> {
+                self.inner.stop()
+            }
+        }
+
+        // Also exercise equal list lengths: inputs are all microphones for
+        // every output, rather than zipped output/input pairs.
+        for microphone_count in [1, 3, 4] {
+            let directory = tempfile::tempdir().unwrap();
+            // Nonlinearity produces measurable sweep harmonics. Generic analysis
+            // reports zero THD, so this checks the CLI actually selects ESS analysis.
+            let wire = VirtualWire::new(FakeAudioConfig {
+                output_channels: 3,
+                input_channels: microphone_count,
+                cubic_distortion: 4.0,
+                ..FakeAudioConfig::default()
+            });
+            let microphones: Vec<u16> = (0..microphone_count as u16).collect();
+            let microphone_list = microphones
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut recorder = TrackedRecorder {
+                inner: wire.recorder("cli regression"),
+                starts: Vec::new(),
+            };
+            record_signal(
+                &mut wire.playback("cli regression"),
+                &mut recorder,
+                "sweep".into(),
+                2.0,
+                8000,
+                1,
+                "0,1,2".into(),
+                microphone_list,
+                None,
+                Some(directory.path().to_path_buf()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                20.0,
+                3000.0,
+                Some(0.5),
+                None,
+                None,
+                None,
+                None,
+                HashMap::new(),
+                false,
             )
             .unwrap();
-            let has_harmonics = csv.lines().skip(1).any(|line| {
-                let fields: Vec<_> = line.split(',').collect();
-                let frequency: f32 = fields[0].parse().unwrap();
-                let thd: f32 = fields[3].parse().unwrap();
-                (100.0..=500.0).contains(&frequency) && thd > 0.1
-            });
-            assert!(
-                has_harmonics,
-                "output {output} did not receive ESS analysis"
-            );
+            // Wake probes use just the first mic; each sweep uses the whole list.
+            if microphone_count > 1 {
+                assert_eq!(
+                    recorder
+                        .starts
+                        .iter()
+                        .filter(|channels| **channels == microphones)
+                        .count(),
+                    3
+                );
+            }
+            for output in 0..3 {
+                for microphone in 0..microphone_count {
+                    let stem = format!("sweep_send{output}_rec{microphone}_8000");
+                    let wav = hound::WavReader::open(directory.path().join(format!("{stem}.wav")))
+                        .unwrap();
+                    assert_eq!(wav.spec().channels, 1);
+                    assert_eq!(wav.spec().sample_rate, 8000);
+                    let csv = std::fs::read_to_string(directory.path().join(format!("{stem}.csv")))
+                        .unwrap();
+                    let has_harmonics = csv.lines().skip(1).any(|line| {
+                        let fields: Vec<_> = line.split(',').collect();
+                        let frequency: f32 = fields[0].parse().unwrap();
+                        let thd: f32 = fields[3].parse().unwrap();
+                        (100.0..=500.0).contains(&frequency) && thd > 0.1
+                    });
+                    assert!(
+                        has_harmonics,
+                        "output {output} did not receive ESS analysis"
+                    );
+                }
+            }
         }
     }
 

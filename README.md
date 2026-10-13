@@ -36,6 +36,24 @@ just dev
 just prod
 ```
 
+## Capture multiple microphones
+
+`capture` plays each requested output sequentially and records all requested
+microphone inputs simultaneously during each take. Channel indices are zero-based;
+the output and input lists are independent, including when their lengths match.
+
+```bash
+./target/release/sotf-capture capture --hwaudio-send-to 0,1,2 \
+  --hwaudio-record-from 0,1,2,3 --signal sweep --duration 5 --channels 1 \
+  --input-device Fireface --output-device Fireface
+```
+
+This captures twelve output/microphone combinations in three sweep takes, writing
+one mono WAV and one analysis CSV per combination, such as
+`sweep_send2_rec3_48000.wav` and `sweep_send2_rec3_48000.csv`.
+`--channels 1` specifies mono stimulus generation. Previously, equal-length
+lists selected only matching output/input pairs; they now capture every combination.
+
 ## Saved acquisition handoff
 
 Clock processing retains original device-clock WAV snapshots with processed
