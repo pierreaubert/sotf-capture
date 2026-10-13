@@ -173,7 +173,9 @@ fn exact_config(
     rate: u32,
 ) -> Result<cpal::SupportedStreamConfig, String> {
     supported
-        .filter(|c| c.channels() >= required_channels && c.channels() <= 64
+        // Selected routes are bounded separately. Interfaces such as Fireface
+        // expose wider native streams even when only low-numbered routes are used.
+        .filter(|c| c.channels() >= required_channels
             && c.min_sample_rate() <= rate && c.max_sample_rate() >= rate
             && measurement_sample_format_rank(c.sample_format()) < 12)
         .min_by_key(|c| (measurement_sample_format_rank(c.sample_format()), c.channels()))
