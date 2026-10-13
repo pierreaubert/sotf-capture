@@ -10,8 +10,8 @@ use crate::quality::{
     QualityPolicy, QualityStatus, QualityThreshold, QualityUnit, ThresholdComparison,
 };
 use math_audio_dsp::analysis::{
-    MeasurementQualityConfig, MicrophoneCompensation, analyze_recording,
-    estimate_lag_with_confidence,
+    MeasurementQualityConfig, MicrophoneCompensation, analyze_recording_with_lag,
+    estimate_sweep_lag_with_confidence,
 };
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -342,7 +342,7 @@ fn write_magnitude(
         .get(layout.sweep_offset..layout.sweep_offset + layout.sweep_samples)
         .ok_or("stimulus sweep range is invalid")?;
     let (start, end) = if uncorrected {
-        let lag = estimate_lag_with_confidence(reference, samples)?;
+        let lag = estimate_sweep_lag_with_confidence(reference, samples, plan.sample_rate_hz)?;
         if !lag.confidence.is_finite()
             || lag.confidence < MeasurementQualityConfig::default().minimum_lag_confidence
         {
@@ -374,7 +374,7 @@ fn write_magnitude(
     if power(capture).unwrap_or(0.0) <= 0.0 {
         return Err("sweep capture is silent".into());
     }
-    let lag = estimate_lag_with_confidence(reference, capture)?;
+    let lag = estimate_sweep_lag_with_confidence(reference, capture, plan.sample_rate_hz)?;
     if !lag.confidence.is_finite()
         || lag.confidence < MeasurementQualityConfig::default().minimum_lag_confidence
     {
@@ -382,11 +382,12 @@ fn write_magnitude(
     }
     let temporary = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
     crate::signal_recorder::write_wav_file(temporary.path(), capture, plan.sample_rate_hz, 1)?;
-    let analysis = analyze_recording(
+    let analysis = analyze_recording_with_lag(
         temporary.path(),
         reference,
         plan.sample_rate_hz,
         Some((plan.sweep.start_hz as f32, plan.sweep.end_hz as f32)),
+        lag,
     )?;
     let compensation = MicrophoneCompensation::from_file(calibration)?;
     let calibration_start = compensation

@@ -27,7 +27,7 @@ use crate::quality::{
 #[cfg(not(target_os = "ios"))]
 use math_audio_dsp::analysis::{
     ClockDriftEstimate, LagEstimate, MeasurementQualityConfig, MicrophoneCompensation,
-    analyze_recording,
+    analyze_recording_with_lag,
 };
 use std::path::{Path, PathBuf};
 
@@ -1020,31 +1020,38 @@ pub(super) fn analyze_sweep_takes(
     let analysis_reference = resampled_reference.as_deref().unwrap_or(reference_signal);
     let single_take = raw_takes.len() == 1;
 
-    // Per-take clock-drift handling (R5), before averaging. Single-take
-    // captures keep the Task-7 gate order: the lag lock runs on the raw take,
-    // before drift handling.
+    // Gate each raw take before drift handling and reuse that estimate for
+    // analysis/averaging. Chirpless sweep correction below leaves samples intact.
     let mut corrected_takes = Vec::with_capacity(raw_takes.len());
     let mut per_take_drift: Vec<TakeDrift> = Vec::with_capacity(raw_takes.len());
-    let mut single_lag = None;
+    let mut take_lags = Vec::with_capacity(raw_takes.len());
     for (take_index, raw) in raw_takes.iter().enumerate() {
         let take_tag = if single_take {
             log_tag.to_string()
         } else {
             format!("{log_tag} take {}/{}", take_index + 1, raw_takes.len())
         };
-        if single_take {
+        {
             // Hard gate: no confident cross-correlation peak means the sweep
             // never locked onto the capture — analyzing it would proceed at
             // an arbitrary lag and feed garbage to roomeq (same spirit as
             // the silence gate). The raw take is preserved for post-mortem.
             let lag = (|| {
-                let lag =
-                    super::quality::estimate_lag_or_advise(analysis_reference, raw, &take_tag)?;
+                let lag = if sweep_range.is_some() {
+                    super::quality::estimate_sweep_lag_or_advise(
+                        analysis_reference,
+                        raw,
+                        analysis_sample_rate,
+                        &take_tag,
+                    )?
+                } else {
+                    super::quality::estimate_lag_or_advise(analysis_reference, raw, &take_tag)?
+                };
                 check_lag_lock(&lag, &take_tag)?;
                 Ok::<_, String>(lag)
             })();
             match lag {
-                Ok(lag) => single_lag = Some(lag),
+                Ok(lag) => take_lags.push(lag),
                 Err(error) => {
                     return Err(lock_failure_with_evidence(
                         &take_tag,
@@ -1084,8 +1091,7 @@ pub(super) fn analyze_sweep_takes(
     let noise_floor_unknown_reason: Option<&'static str>;
 
     if single_take {
-        lag_for_quality =
-            single_lag.expect("single-take path always gates the lag before this point");
+        lag_for_quality = take_lags[0];
         analysis_capture = corrected_takes
             .into_iter()
             .next()
@@ -1116,10 +1122,11 @@ pub(super) fn analyze_sweep_takes(
     } else {
         // Robustly align, deconvolve, and median/MAD-average the takes. Any
         // take that cannot lock aborts the set (REW abort semantics).
-        let averaged = math_audio_dsp::analysis::average_ess_recordings(
+        let averaged = math_audio_dsp::analysis::average_ess_recordings_with_lags(
             &corrected_takes,
             analysis_reference,
             analysis_sample_rate,
+            &take_lags,
         )
         .map_err(|e| {
             format!(
@@ -1128,9 +1135,8 @@ pub(super) fn analyze_sweep_takes(
             )
         })?;
 
-        // Task-7 lag-lock gate per take, on the estimates of the
-        // drift-corrected takes actually used for alignment. The raw
-        // (pre-correction) take is preserved for post-mortem.
+        // The same accepted estimates were used for alignment above. Keep the
+        // defensive quality gate before writing a repeat measurement.
         for (take_index, lag) in averaged.lag_estimates.iter().enumerate() {
             let take_tag = format!("{log_tag} take {}/{}", take_index + 1, raw_takes.len());
             if let Err(error) = check_lag_lock(lag, &take_tag) {
@@ -1282,11 +1288,22 @@ pub(super) fn analyze_sweep_takes(
 
     // Analyze the recording
     log::debug!("[{log_tag}] Analyzing recording...");
-    let analysis = analyze_recording(
+    // The repeat average is already aligned. Reusing its input take's original
+    // lag would remove valid response samples; re-estimating could shift it again.
+    let analysis_lag = LagEstimate {
+        lag_samples: if single_take {
+            lag_for_quality.lag_samples
+        } else {
+            0
+        },
+        ..lag_for_quality
+    };
+    let analysis = analyze_recording_with_lag(
         recorded_wav_path,
         analysis_reference,
         analysis_sample_rate,
         sweep_range,
+        analysis_lag,
     )?;
 
     let single_snr_windows = single_take.then(|| {

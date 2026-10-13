@@ -3187,3 +3187,70 @@ fn lag_gate_short_take_bypasses_exclusion() {
     let lag = estimate_lag_or_advise(&reference, &take, "test").unwrap();
     assert_eq!(lag.lag_samples, 0);
 }
+
+#[cfg(not(target_os = "ios"))]
+#[test]
+#[ignore = "requires SOTF_SWEEP_LOCK_WAV pointing to a local 5-second 20–20000 Hz take"]
+fn fireface_sweep_lock_local_regression() {
+    let path = std::env::var("SOTF_SWEEP_LOCK_WAV").expect("set SOTF_SWEEP_LOCK_WAV");
+    let mut reader = WavReader::open(path).unwrap();
+    let rate = reader.spec().sample_rate;
+    let recorded = reader
+        .samples::<f32>()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let reference = prepare_measurement_signal(
+        SignalType::Sweep,
+        &SignalParams::Sweep {
+            start_freq: 20.0,
+            end_freq: 20000.0,
+            amp: 0.5,
+        },
+        5.0,
+        rate,
+    )
+    .unwrap();
+    let lag = super::quality::estimate_sweep_lag_or_advise(
+        &reference,
+        &recorded,
+        rate,
+        "local regression",
+    )
+    .unwrap();
+    eprintln!("Fireface sweep lag: {lag:?}");
+    // The local recording may be replaced by a later hardware take; its absolute
+    // buffering latency is not fixed. Known-delay accuracy is tested synthetically.
+    assert!(lag.lag_samples >= 0);
+    assert!((lag.lag_samples as usize) + reference.len() <= recorded.len());
+    let directory = tempdir().unwrap();
+    let analysis = super::record::analyze_sweep_takes(
+        &directory.path().join("take.wav"),
+        &directory.path().join("take.csv"),
+        std::slice::from_ref(&recorded),
+        &reference,
+        rate,
+        rate,
+        Some((20.0, 20000.0)),
+        None,
+        0,
+        "local regression",
+    )
+    .unwrap();
+    assert_eq!(analysis.result.estimated_lag_samples, lag.lag_samples);
+    assert_eq!(analysis.accepted_count, 1);
+    let repeat = super::record::analyze_sweep_takes(
+        &directory.path().join("average.wav"),
+        &directory.path().join("average.csv"),
+        &[recorded.clone(), recorded.clone(), recorded],
+        &reference,
+        rate,
+        rate,
+        Some((20.0, 20000.0)),
+        None,
+        0,
+        "local repeats",
+    )
+    .unwrap();
+    assert_eq!(repeat.result.estimated_lag_samples, 0);
+    assert_eq!(repeat.accepted_count, 3);
+}

@@ -211,16 +211,27 @@ pub(super) fn estimate_lag_or_advise(
     })
 }
 
-/// Hard gate: refuse takes whose reference↔capture cross-correlation has no
-/// confident peak. `analyze_recording` computes the same lag internally but
-/// only exposes `estimated_lag_samples` (no confidence) in `AnalysisResult`,
-/// so the engine runs `estimate_lag_with_confidence` itself — one extra
-/// FFT-based cross-correlation per take, negligible against the multi-second
-/// capture.
+/// Estimate sweep arrival with speaker/room coloration tolerance.
+#[cfg(not(target_os = "ios"))]
+pub(super) fn estimate_sweep_lag_or_advise(
+    reference: &[f32],
+    recorded: &[f32],
+    sample_rate: u32,
+    log_tag: &str,
+) -> Result<LagEstimate, String> {
+    math_audio_dsp::analysis::estimate_sweep_lag_with_confidence(reference, recorded, sample_rate)
+        .map_err(|error| format!("[{log_tag}] No reliable signal lock ({error}) — check mic connection and input routing for missing signal; inspect the saved take for incomplete sweep coverage or competing arrivals"))
+}
+
+/// Reject nonfinite or insufficient method-specific lag confidence.
+///
+/// The accepted estimate is passed into analysis rather than calculated again.
+/// Wake probes retain generic correlation; acoustic sweeps use the weighted
+/// envelope estimator and its validated minimum confidence.
 #[cfg(not(target_os = "ios"))]
 pub(super) fn check_lag_lock(lag: &LagEstimate, log_tag: &str) -> Result<(), String> {
     let minimum = MeasurementQualityConfig::default().minimum_lag_confidence;
-    if lag.confidence < minimum {
+    if !lag.confidence.is_finite() || lag.confidence < minimum {
         return Err(format!(
             "[{log_tag}] No reliable signal lock (lag confidence {:.3} < {:.3}) — \
              check mic connection, input channel, and playback level; \
