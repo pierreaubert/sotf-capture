@@ -770,6 +770,30 @@ fn plan_validate(plan_path: &std::path::Path) -> Result<(), String> {
     let plan: CaptureSessionPlan =
         serde_json::from_str(&json).map_err(|e| format!("cannot parse capture session: {e}"))?;
     let session = plan.validate().map_err(|e| e.to_string())?;
+    let plan_directory = plan_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut failures = Vec::new();
+    for mic in &session.plan().microphones {
+        let path = plan_directory.join(&mic.calibration_file);
+        let check = std::fs::File::open(&path).and_then(|file| {
+            if file.metadata()?.is_file() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("not a regular file"))
+            }
+        });
+        if let Err(error) = check {
+            failures.push(format!("{}: {} — {error}", mic.id, path.display()));
+        }
+    }
+    if !failures.is_empty() {
+        return Err(format!(
+            "calibration file validation failed (relative paths use the plan directory):\n{}",
+            failures.join("\n")
+        ));
+    }
     println!(
         "Session plan valid: {:?}, {} microphones, {} sources, {} Hz.",
         session.plan().geometry,
@@ -1453,6 +1477,44 @@ mod tests {
             }
             _ => panic!("expected plan-process command"),
         }
+    }
+
+    #[test]
+    fn plan_validation_checks_all_calibration_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let plan_directory = directory.path().join("plans");
+        std::fs::create_dir(&plan_directory).unwrap();
+        let calibration = directory.path().join("calibration.txt");
+        std::fs::write(&calibration, "20 0\n20000 0\n").unwrap();
+        let mut plan: serde_json::Value =
+            serde_json::from_str(include_str!("../../examples/full-roomeq-session.json")).unwrap();
+        for mic in plan["microphones"].as_array_mut().unwrap() {
+            mic["calibration_file"] = "../calibration.txt".into();
+        }
+        // Absolute paths and paths relative to the plan both resolve successfully.
+        plan["microphones"][1]["calibration_file"] = calibration.to_str().unwrap().into();
+        let plan_path = plan_directory.join("session.json");
+        std::fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
+        plan_validate(&plan_path).unwrap();
+
+        plan["microphones"][0]["calibration_file"] = "missing-first.txt".into();
+        plan["microphones"][1]["calibration_file"] = "missing-second.txt".into();
+        plan["microphones"][2]["calibration_file"] = ".".into();
+        std::fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
+        let error = plan_validate(&plan_path).unwrap_err();
+        for (id, filename) in [
+            ("main-seat", "missing-first.txt"),
+            ("second-seat", "missing-second.txt"),
+            ("ear-left", "."),
+        ] {
+            assert!(error.contains(id), "{error}");
+            assert!(
+                error.contains(&plan_directory.join(filename).display().to_string()),
+                "{error}"
+            );
+        }
+        assert!(error.contains("not a regular file"), "{error}");
+        assert!(!error.contains("ear-right"), "{error}");
     }
 
     #[test]
