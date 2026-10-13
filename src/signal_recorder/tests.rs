@@ -2836,6 +2836,44 @@ fn thd_warning_issue_ignores_peaks_outside_the_sweep_band() {
 
 #[test]
 #[cfg(not(target_os = "ios"))]
+fn thd_control_uses_80_to_16000_hz_for_warnings_and_findings() {
+    use crate::quality::{QualityMetric, QualityStatus};
+
+    let frequencies = [20.0, 79.0, 80.0, 1000.0, 16_000.0, 19_931.0];
+    let thd = [50.0, 40.0, 2.0, 3.0, 4.0, 22.5];
+    // Strong out-of-band bass must not raise the in-band fundamental gate.
+    let fundamental = [40.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let sweep = Some((20.0, 20_000.0));
+    assert!(thd_warning_issue(&frequencies, &thd, &fundamental, sweep).is_none());
+    let findings = super::quality::structured_quality_findings(
+        &[0.1; 32],
+        &frequencies,
+        &thd,
+        &vec![vec![-40.0; frequencies.len()]; 4],
+        &fundamental,
+        sweep,
+        None,
+        None,
+        false,
+    );
+    let finding = findings
+        .iter()
+        .find(|finding| finding.metric == QualityMetric::TotalHarmonicDistortion)
+        .unwrap();
+    assert_eq!(finding.status, QualityStatus::Pass);
+    assert_eq!(finding.measured, Some(4.0));
+    let band = finding.band.as_ref().unwrap();
+    assert_eq!((band.low_hz, band.high_hz), (80.0, 16_000.0));
+    for index in [2, 4] {
+        let mut boundary_thd = thd;
+        boundary_thd[index] = 12.0;
+        assert!(thd_warning_issue(&frequencies, &boundary_thd, &fundamental, sweep).is_some());
+    }
+    assert!(thd_warning_issue(&frequencies, &thd, &fundamental, Some((20.0, 60.0))).is_none());
+}
+
+#[test]
+#[cfg(not(target_os = "ios"))]
 fn snr_warning_issue_flags_low_broadband_snr() {
     let loud = vec![1.0_f32; 1024];
     // 20 dB SNR stays quiet.

@@ -54,6 +54,9 @@ one mono WAV and one analysis CSV per combination, such as
 `--channels 1` specifies mono stimulus generation. Previously, equal-length
 lists selected only matching output/input pairs; they now capture every combination.
 
+THD quality control evaluates 80 Hz–16 kHz, intersected with the requested sweep
+range. The saved sweep and exported response retain the full requested band.
+
 ## Saved acquisition handoff
 
 Clock processing retains original device-clock WAV snapshots with processed

@@ -288,15 +288,27 @@ pub(super) fn thd_warning_issue(
     }
 }
 
+/// Control distortion in the speaker passband, excluding sweep endpoints.
+/// Intersect with the stimulus range so unexcited frequencies never count.
+fn thd_control_band(sweep_range: Option<(f32, f32)>) -> Option<(f32, f32)> {
+    let (low, high) = sweep_range?;
+    let low = low.max(80.0);
+    let high = high.min(16_000.0);
+    (low <= high).then_some((low, high))
+}
+
 fn thd_peak(
     frequencies: &[f32],
     thd_percent: &[f32],
     fundamental_db: &[f32],
     sweep_range: Option<(f32, f32)>,
 ) -> Option<(f32, f32)> {
-    let peak_fundamental = fundamental_db
+    let (low_hz, high_hz) = thd_control_band(sweep_range)?;
+    let peak_fundamental = frequencies
         .iter()
-        .copied()
+        .zip(fundamental_db)
+        .filter(|(frequency, _)| **frequency >= low_hz && **frequency <= high_hz)
+        .map(|(_, value)| *value)
         .filter(|value| value.is_finite())
         .max_by(f32::total_cmp)?;
     let floor = peak_fundamental - THD_FUNDAMENTAL_GATE_DB;
@@ -305,9 +317,7 @@ fn thd_peak(
         .zip(thd_percent.iter())
         .zip(fundamental_db.iter())
         .filter(|((frequency, _), _)| {
-            frequency.is_finite()
-                && sweep_range
-                    .is_none_or(|(low_hz, high_hz)| **frequency >= low_hz && **frequency <= high_hz)
+            frequency.is_finite() && **frequency >= low_hz && **frequency <= high_hz
         })
         .filter(|((_, thd), _)| thd.is_finite())
         .filter(|((_, _), fundamental)| **fundamental >= floor)
@@ -388,7 +398,7 @@ pub(super) fn structured_quality_findings(
             message: format!("{clipped_samples} captured samples reached full scale"),
         });
     }
-    let band = sweep_range.map(|(low_hz, high_hz)| QualityBand {
+    let band = thd_control_band(sweep_range).map(|(low_hz, high_hz)| QualityBand {
         low_hz: f64::from(low_hz),
         high_hz: f64::from(high_hz),
     });
