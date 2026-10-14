@@ -454,6 +454,63 @@ the rank logic in `solve_direction`). These checks run on plan
 geometry at `plan-validate` time as warnings (§10), so the user learns
 *before* recording that their flat four-seat row cannot yield heights.
 
+#### Inverse mode (Phase 4): microphones from surveyed sources
+
+The forward problem with the roles swapped: each unsurveyed
+microphone is multilaterated from its ranges to surveyed sources
+using the same `solve_position`, so the table above applies verbatim
+with "sources" for "microphones". Per mic: ≥ 4 ranges to surveyed,
+non-coplanar, non-collinear sources ⇒ unique 3D position; 3 sources
+⇒ unpublished mirror pair (`mirror_ambiguous`, position refused); ≥ 4
+coplanar sources ⇒ published with the flag; collinear ⇒
+`degenerate_geometry`. No new gauge appears: the plan frame is fixed
+by the surveyed sources, and scale is fixed by the absolute ranges
+via `c`, exactly as forward. Surveyed microphones are anchors, never
+estimates (`surveyed_anchor`); a session may mix forward and inverse
+solves freely — each point is estimated from whichever side is
+surveyed, and points surveyed on neither side wait for the joint
+solve below.
+
+#### Joint self-calibration (Phase 4): alternating solve with anchors
+
+Unknowns are all unsurveyed points on both sides: 3·(S+M−A) coordinates
+for S sources, M microphones, and A surveyed anchors. Equations are
+the usable source×mic cross-range cells. Three counting rules gate
+the solve, all necessary, none sufficient alone (geometry still rules):
+
+1. Global count: usable cells ≥ 3·(S+M−A). Fewer equations than
+   coordinates ⇒ refuse, no iteration attempted.
+2. Per-point links: every unknown needs ≥ 4 usable cross-ranges,
+   because each alternating sweep solves one point from the other
+   side's current positions through `solve_position` (which enforces
+   `MIN_RANGES_FOR_FIX`). Corollary: a stereo (2-source) session can
+   never joint-solve — each mic sees at most 2 sources. Joint mode
+   needs rich sessions (≥ 4 sources AND ≥ 4 microphones with a dense
+   usable matrix) and says so when they are absent.
+3. Anchors: at least 3 surveyed points (sources, mics, or mixed),
+   non-collinear. Three non-collinear anchors fix the 6-DOF rigid
+   gauge (translation + rotation) — but they always define a plane,
+   and reflection across the anchor plane preserves every anchor
+   position and every pairwise distance. So a 3-anchor (or any
+   coplanar-anchor) frame carries a GLOBAL mirror ambiguity: the
+   whole solution may flip across the anchor plane with identical
+   residuals. Joint estimates publish with the mirror flag set unless
+   a 4th anchor off the anchor plane breaks it (anchor rank 3). Scale
+   is fixed by the absolute ranges via `c` — unlike pure-TDOA or
+   angle-only self-calibration, there is no scale gauge to fix.
+
+Convergence is not guaranteed: alternating sweeps iterate to a max
+position shift below 1 µm or a 50-sweep cap, and any sub-solve
+failure, cap exhaustion, or singular joint normal matrix refuses the
+whole calibration (`solve_failed`) rather than publishing a
+half-converged frame. Uncertainty is the full joint covariance
+marginal per point — conditioning single-point sigmas on estimated
+anchors would be overconfident, so the joint normal matrix over all
+unknowns is inverted once (Cholesky) and each point reports its own
+3×3 block. Outlier exclusion runs only on the final polish sweep:
+robust fitting needs a converged fixpoint first, and excluding
+against unconverged anchors would cascade into depletion.
+
 ## 7. DSP pipeline (per `plan-process` run)
 
 ### 7.1 Where it hooks in
@@ -554,6 +611,20 @@ Microphone `position_m` stays **required** in v1 — making it optional
 for the inverse problem is Phase 4 and needs its own migration care,
 since today every consumer assumes it exists.
 
+Phase 4 migration: `CaptureMicrophone.position_m` and
+`position_uncertainty_mm` become `Option` with the source pairing
+rule (both present or both absent; finite; uncertainty ≥ 0), and the
+compact-geometry distinctness check compares surveyed pairs only (two
+unsurveyed mics are not "duplicates"). Consumer care, each explicit:
+the emitter-clock geometry branch skips takes whose mic is unsurveyed
+(same as non-finite today — the take keeps its non-acoustic basis);
+reflection analysis refuses the source report with a recorded issue
+(it needs surveyed arrays); RoomEQ-handoff provenance refuses the
+unsurveyed take (the frozen autoeq contract requires surveyed
+geometry — the manifest degrades to `pending_processing`, the run
+continues); forward solves gather surveyed-mic cells only. Old plans
+with surveyed mics behave bit-identically.
+
 ### 8.2 DSP layer (`math-dsp`, new module `capture_localization`)
 
 Pure functions over slices and `[f64; 3]` arrays, in the style of
@@ -585,8 +656,14 @@ pub struct LocalizationReport {
     pub mic_bias_correction_m: f64,    // b_common applied (0 if none)
     pub ranges: Vec<SourceRanges>,     // one per plan source, plan order
     pub sources: Vec<SourcePosition>,  // one per plan source, plan order
+    #[serde(default)]                  // Phase 4: one per plan mic,
+    pub microphones: Vec<MicPosition>, // plan order (inverse/joint)
     pub issues: Vec<String>,           // session-level, human-readable
 }
+
+// MicPosition mirrors SourcePosition with microphone_id for
+// source_id and loo_worst_source for loo_worst_microphone; surveyed
+// mics carry position None + surveyed_anchor.
 
 pub struct SourceRanges {
     pub source_id: String,
@@ -652,6 +729,9 @@ inside this crate plus the pure `math-dsp` module.
 | Q8 geometry | §6.4 rank/planarity failures | position refused or mirror-flagged | `degenerate_geometry` / `mirror_ambiguous` |
 | Q8b range count | fewer than 4 usable ranges (other than the 3-mic mirror case) | position refused | `insufficient_ranges` |
 | Q9 SNR | take's band SNR below the coherent threshold (existing 30 dB policy findings) | cell refused | `band_snr_low` |
+| Q10 joint counting (Phase 4) | usable cells < 3·unknowns, a point with < 4 links, < 3 anchors, or collinear anchors | joint solve not attempted; direct reasons stand | (no token; session note) |
+| Q10b joint convergence (Phase 4) | sub-solve failure, 50-sweep cap, or singular joint normal matrix | whole calibration refused, ranges kept | `solve_failed` |
+| — anchor status (Phase 4) | surveyed point in inverse/joint output; anchors are held fixed, never estimated | position empty by design | `surveyed_anchor` |
 
 Thresholds are named constants beside the code that uses them (the
 `COHERENT_TIMING_LIMIT_US` pattern), each with the one-line physical
@@ -671,6 +751,10 @@ table in the same commit.
   `localization left: 4/4 ranges 2.10–3.40 m` followed by
   `localization left position: [2.310, -1.100, 0.700] m rms 3.0 mm gdop 2.1`
   or `localization left position: refused (solve_residual_high) rms 41.2 mm`.
+  Phase 4 adds one microphone line per plan mic in the same shape
+  (`localization mic mic-1 position: …`), plus a joint-calibration
+  line when the joint solve runs
+  (`localization joint: 5 sources + 8 microphones from 3 anchors, rms …`).
   A coplanar solve appends ` [mirror-ambiguous]`. Printed next to
   `clock_skew_lines` output; warnings to stderr like the existing clock
   warnings. Exit status unchanged — localization refusal is evidence,
