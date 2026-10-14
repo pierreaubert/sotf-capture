@@ -592,6 +592,9 @@ pub struct SourcePosition {
     pub gdop: Option<f64>,
     pub mirror_ambiguous: bool,
     pub declared_error_m: Option<f64>, // vs §8.1 surveyed position
+    pub loo_max_residual_m: Option<f64>,     // §7.2 step 8, None
+    pub loo_worst_microphone: Option<String>,// without spare mics
+    pub loo_max_shift_m: Option<f64>,
     pub reason: Option<String>,
 }
 ```

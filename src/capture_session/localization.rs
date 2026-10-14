@@ -30,7 +30,9 @@ use super::clock::{CaptureClockBasis, CaptureClockFit};
 use super::{CaptureMicrophone, CaptureSessionPlan, CaptureSource};
 use crate::quality::COHERENT_CAPTURE_SNR_THRESHOLD_DB;
 use math_audio_dsp::analysis::cross_correlate_envelope;
-use math_audio_dsp::capture_localization::{MIN_RANGES_FOR_FIX, geometry_rank, solve_position};
+use math_audio_dsp::capture_localization::{
+    MIN_RANGES_FOR_FIX, PositionEstimate, geometry_rank, loo_diagnostics, solve_position,
+};
 use math_audio_dsp::capture_tdoa::MIN_TDOA_CONFIDENCE_DB;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -188,6 +190,16 @@ pub struct SourcePosition {
     /// Distance to the surveyed source position, when declared.
     #[serde(default)]
     pub declared_error_m: Option<f64>,
+    /// Largest leave-one-out held-out residual in meters, when the
+    /// geometry has spare microphones to re-solve without.
+    #[serde(default)]
+    pub loo_max_residual_m: Option<f64>,
+    /// Microphone held out for the largest residual, when diagnosed.
+    #[serde(default)]
+    pub loo_worst_microphone: Option<String>,
+    /// Largest leave-one-out solution shift in meters, when diagnosed.
+    #[serde(default)]
+    pub loo_max_shift_m: Option<f64>,
     /// Stable machine token explaining a missing position.
     #[serde(default)]
     pub reason: Option<String>,
@@ -1830,13 +1842,10 @@ fn solve_source_positions(
 
 /// Multilaterate one source row with geometry and residual gates.
 ///
-/// Cells pair with plan microphones by order (the builders' contract) and
-/// by id; a misaligned cell counts as missing rather than misattributed.
-/// Usable cells mirror the solver's validity rules exactly, so the
-/// geometry pre-check and the solver classify the same subset: `None`
-/// from the solver then means depletion or divergence (`solve_failed`),
-/// never a disagreement about the input. Refusals set `reason` and leave
-/// the position empty; `solve_residual_high` still publishes the RMS and
+/// `None` from the solver means depletion or divergence
+/// (`solve_failed`), never an input disagreement (see
+/// [`gather_usable_cells`]). Refusals set `reason` and leave the
+/// position empty; `solve_residual_high` still publishes the RMS and
 /// GDOP of the refused fit as evidence.
 fn solve_row_position(
     row: &SourceRanges,
@@ -1852,23 +1861,13 @@ fn solve_row_position(
         gdop: None,
         mirror_ambiguous,
         declared_error_m: None,
+        loo_max_residual_m: None,
+        loo_worst_microphone: None,
+        loo_max_shift_m: None,
         reason: reason.map(str::to_string),
     };
     let mut notes = Vec::new();
-    let mut usable: Vec<(usize, [f64; 3], f64, f64)> = Vec::new();
-    for (index, cell) in row.cells.iter().enumerate() {
-        let Some(microphone) = microphones.get(index) else {
-            continue;
-        };
-        if cell.microphone_id != microphone.id {
-            continue;
-        }
-        if let (Some(distance), Some(sigma)) = (cell.distance_m, cell.sigma_m) {
-            if distance.is_finite() && distance >= 0.0 && sigma.is_finite() && sigma > 0.0 {
-                usable.push((index, microphone.position_m, distance, sigma));
-            }
-        }
-    }
+    let usable = gather_usable_cells(row, microphones);
     if usable.len() < MIN_RANGES_FOR_FIX {
         if usable.len() == 3 {
             let positions: Vec<[f64; 3]> =
@@ -1930,6 +1929,8 @@ fn solve_row_position(
         return (refused, notes);
     }
     let declared_error_m = declared_m.map(|surveyed| euclidean_m(surveyed, estimate.position_m));
+    let (loo_max_residual_m, loo_worst_microphone, loo_max_shift_m) =
+        loo_fields(row, &usable, &positions, &ranges, &estimate);
     let position = SourcePosition {
         source_id: row.source_id.clone(),
         position_m: Some(estimate.position_m),
@@ -1938,9 +1939,65 @@ fn solve_row_position(
         gdop: Some(estimate.gdop),
         mirror_ambiguous: estimate.mirror_ambiguous,
         declared_error_m,
+        loo_max_residual_m,
+        loo_worst_microphone,
+        loo_max_shift_m,
         reason: None,
     };
     (position, notes)
+}
+
+/// Gather solver-usable cells pairing range rows with plan microphones.
+///
+/// Cells pair by order (the builders' contract) and by id; a
+/// misaligned cell counts as missing rather than misattributed. The
+/// validity rules mirror the solver's exactly, so the geometry
+/// pre-check and the solver classify the same subset.
+fn gather_usable_cells(
+    row: &SourceRanges,
+    microphones: &[CaptureMicrophone],
+) -> Vec<(usize, [f64; 3], f64, f64)> {
+    let mut usable = Vec::new();
+    for (index, cell) in row.cells.iter().enumerate() {
+        let Some(microphone) = microphones.get(index) else {
+            continue;
+        };
+        if cell.microphone_id != microphone.id {
+            continue;
+        }
+        if let (Some(distance), Some(sigma)) = (cell.distance_m, cell.sigma_m) {
+            if distance.is_finite() && distance >= 0.0 && sigma.is_finite() && sigma > 0.0 {
+                usable.push((index, microphone.position_m, distance, sigma));
+            }
+        }
+    }
+    usable
+}
+
+/// Leave-one-out diagnostics for a solved row (§7.2 step 8).
+///
+/// Re-solves per used microphone with that range dropped and reports
+/// the largest held-out residual (with its microphone) and the largest
+/// solution shift. Minimum geometry (four used ranges) diagnoses
+/// nothing — every drop depletes — and reports `None`, which is
+/// honest, not missing.
+fn loo_fields(
+    row: &SourceRanges,
+    usable: &[(usize, [f64; 3], f64, f64)],
+    positions: &[[f64; 3]],
+    ranges: &[Option<(f64, f64)>],
+    estimate: &PositionEstimate,
+) -> (Option<f64>, Option<String>, Option<f64>) {
+    match loo_diagnostics(positions, ranges, estimate) {
+        Some(diagnostics) => (
+            Some(diagnostics.max_residual_m),
+            usable
+                .get(diagnostics.worst_index)
+                .map(|(cell, _, _, _)| row.cells[*cell].microphone_id.clone()),
+            Some(diagnostics.max_shift_m),
+        ),
+        None => (None, None, None),
+    }
 }
 
 /// True median of an ascending slice; `None` when empty.
@@ -2831,6 +2888,10 @@ mod tests {
             assert!(position.rms_residual_m.unwrap_or(f64::NAN) < 0.01);
             assert!(position.gdop.unwrap_or(f64::NAN).is_finite());
             assert!(position.sigma_m.unwrap().iter().all(|sigma| *sigma > 0.0));
+            // Four microphones leave no spare cell to hold out.
+            assert_eq!(position.loo_max_residual_m, None);
+            assert_eq!(position.loo_worst_microphone, None);
+            assert_eq!(position.loo_max_shift_m, None);
         }
         assert!(lines[2].contains("position: ["));
     }
@@ -3329,6 +3390,39 @@ mod tests {
     }
 
     #[test]
+    fn positions_publish_loo_diagnostics_with_spare_mics() {
+        let microphones = vec![
+            ("mic-0", [0.0, 0.0, 0.0]),
+            ("mic-1", [1.0, 0.0, 0.0]),
+            ("mic-2", [0.0, 1.0, 0.0]),
+            ("mic-3", [0.0, 0.0, 1.0]),
+            ("mic-4", [1.0, 1.0, 1.0]),
+            ("mic-5", [1.0, 1.0, 0.0]),
+        ];
+        let truth = [2.3, -1.1, 0.7];
+        let row = position_row(
+            "left",
+            microphones
+                .iter()
+                .map(|(id, position)| (*id, Some((distance_meter(*position, truth), 0.001))))
+                .collect(),
+        );
+        let plan = position_plan(&microphones, Some(truth));
+        let (sources, _) = solve_source_positions(&plan, &[row], 343.0, 48_000);
+        let position = &sources[0];
+        assert!(position.position_m.is_some());
+        let residual = position.loo_max_residual_m.unwrap_or(f64::NAN);
+        let shift = position.loo_max_shift_m.unwrap_or(f64::NAN);
+        assert!(residual < 1.0e-6, "residual {residual}");
+        assert!(shift < 1.0e-6, "shift {shift}");
+        let worst = position.loo_worst_microphone.as_deref().unwrap_or("none");
+        assert!(
+            microphones.iter().any(|(id, _)| *id == worst),
+            "worst mic {worst} must be a plan microphone"
+        );
+    }
+
+    #[test]
     fn median_sorted_picks_the_true_middle() {
         assert_eq!(median_sorted(&[]), None);
         assert_eq!(median_sorted(&[2.0]), Some(2.0));
@@ -3545,6 +3639,9 @@ mod tests {
                     gdop: Some(2.1),
                     mirror_ambiguous: true,
                     declared_error_m: None,
+                    loo_max_residual_m: Some(0.004),
+                    loo_worst_microphone: Some("mic-2".into()),
+                    loo_max_shift_m: Some(0.01),
                     reason: None,
                 },
                 SourcePosition {
@@ -3555,6 +3652,9 @@ mod tests {
                     gdop: None,
                     mirror_ambiguous: false,
                     declared_error_m: None,
+                    loo_max_residual_m: None,
+                    loo_worst_microphone: None,
+                    loo_max_shift_m: None,
                     reason: Some("solve_failed".into()),
                 },
             ],
