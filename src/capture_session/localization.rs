@@ -31,7 +31,8 @@ use super::{CaptureMicrophone, CaptureSessionPlan, CaptureSource};
 use crate::quality::COHERENT_CAPTURE_SNR_THRESHOLD_DB;
 use math_audio_dsp::analysis::cross_correlate_envelope;
 use math_audio_dsp::capture_localization::{
-    MIN_RANGES_FOR_FIX, PositionEstimate, geometry_rank, loo_diagnostics, solve_position,
+    JointEstimate, JointPoint, MIN_JOINT_ANCHORS, MIN_RANGES_FOR_FIX, PositionEstimate,
+    geometry_rank, joint_self_calibrate, loo_diagnostics, solve_position,
 };
 use math_audio_dsp::capture_tdoa::MIN_TDOA_CONFIDENCE_DB;
 use serde::{Deserialize, Serialize};
@@ -244,6 +245,29 @@ pub struct MicPosition {
     pub reason: Option<String>,
 }
 
+/// One joint self-calibration summary (Phase 4): how many points on
+/// each side the joint solve estimated, from how many anchors.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JointCalibration {
+    /// Unsurveyed sources the joint solve estimated.
+    pub sources_solved: usize,
+    /// Unsurveyed microphones the joint solve estimated.
+    pub microphones_solved: usize,
+    /// Surveyed anchors (sources plus microphones) fixing the frame.
+    pub anchors: usize,
+    /// RMS residual over all jointly used cells in meters.
+    pub rms_residual_m: f64,
+    /// True unless the anchors span rank 3: a 3-anchor (or any
+    /// coplanar-anchor) frame carries a global mirror across the
+    /// anchor plane with identical residuals.
+    pub mirror_ambiguous: bool,
+    /// True when the surveyed coverage was too thin for consensus
+    /// cascade seeding: a gross outlier may have absorbed into the
+    /// frame with clean residuals, so verify the geometry when
+    /// outliers are possible.
+    pub outlier_absorb_risk: bool,
+}
+
 /// Session range matrix with its time-origin evidence.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LocalizationReport {
@@ -269,6 +293,11 @@ pub struct LocalizationReport {
     /// inverse/joint microphone positions).
     #[serde(default)]
     pub microphones: Vec<MicPosition>,
+    /// Joint self-calibration summary when both sides had unsurveyed
+    /// points and the joint solve ran (§6.4); `None` for direct-only
+    /// sessions and refused or not-attempted joint solves.
+    #[serde(default)]
+    pub joint: Option<JointCalibration>,
     /// Session-level evidence notes and degradation warnings.
     #[serde(default)]
     pub issues: Vec<String>,
@@ -1870,6 +1899,7 @@ pub(super) fn localize_session(
         ranges: Vec::new(),
         sources: Vec::new(),
         microphones: Vec::new(),
+        joint: None,
         issues: Vec::new(),
     };
     let mut skews: Vec<f64> = fits
@@ -2030,12 +2060,39 @@ pub(super) fn localize_session(
             .collect();
         ranges.push(combine_repeat_rows(&report.plan, source, &repeats));
     }
-    let (sources, mut position_issues) =
-        solve_source_positions(&report.plan, &ranges, sound_speed, rate);
-    issues.append(&mut position_issues);
-    let (microphones, mut mic_issues) =
-        solve_microphone_positions(&report.plan, &ranges, sound_speed, rate);
-    issues.append(&mut mic_issues);
+    // Joint self-calibration runs only when both sides hold unsurveyed
+    // points; one-sided sessions keep the direct solves, and Q10
+    // counting failures fall back to them with a session note (Q10b
+    // convergence failures refuse every unsurveyed point instead).
+    let joint_attempt = (report
+        .plan
+        .sources
+        .iter()
+        .any(|source| source.position_m.is_none())
+        && report
+            .plan
+            .microphones
+            .iter()
+            .any(|microphone| microphone.position_m.is_none()))
+    .then(|| try_joint_positions(&report.plan, &ranges, sound_speed, rate));
+    let (sources, microphones, joint) = match joint_attempt {
+        Some(Ok(mut attempt)) => {
+            issues.append(&mut attempt.notes);
+            (attempt.sources, attempt.microphones, attempt.calibration)
+        }
+        attempt => {
+            if let Some(Err(mut q10)) = attempt {
+                issues.append(&mut q10);
+            }
+            let (sources, mut position_issues) =
+                solve_source_positions(&report.plan, &ranges, sound_speed, rate);
+            issues.append(&mut position_issues);
+            let (microphones, mut mic_issues) =
+                solve_microphone_positions(&report.plan, &ranges, sound_speed, rate);
+            issues.append(&mut mic_issues);
+            (sources, microphones, None)
+        }
+    };
     LocalizationReport {
         mode,
         sound_speed_m_s: sound_speed,
@@ -2046,6 +2103,7 @@ pub(super) fn localize_session(
         ranges,
         sources,
         microphones,
+        joint,
         issues,
     }
 }
@@ -2105,6 +2163,507 @@ fn solve_microphone_positions(
         issues.append(&mut notes);
     }
     (microphones, issues)
+}
+
+/// Dense joint-solve inputs assembled from plan survey + range matrix.
+struct JointInputs {
+    source_seeds: Vec<Option<[f64; 3]>>,
+    mic_seeds: Vec<Option<[f64; 3]>>,
+    ranges_sm: Vec<Option<(f64, f64)>>,
+    usable: Vec<bool>,
+}
+
+/// A joint attempt's published outputs.
+///
+/// `calibration` is `None` when the attempt itself failed past counting
+/// (Q10b): every unsurveyed point is refused with `solve_failed` while
+/// surveyed audits still publish.
+struct JointAttempt {
+    sources: Vec<SourcePosition>,
+    microphones: Vec<MicPosition>,
+    notes: Vec<String>,
+    calibration: Option<JointCalibration>,
+}
+
+/// One range cell as a joint-solve link, or `None` when refused.
+///
+/// The validity rules mirror the solver's exactly (see
+/// [`gather_usable_cells`]): finite non-negative distance with finite
+/// positive sigma.
+fn joint_usable_link(cell: &RangeCell) -> Option<(f64, f64)> {
+    if let (Some(distance), Some(sigma)) = (cell.distance_m, cell.sigma_m)
+        && distance.is_finite()
+        && distance >= 0.0
+        && sigma.is_finite()
+        && sigma > 0.0
+    {
+        Some((distance, sigma))
+    } else {
+        None
+    }
+}
+
+/// Assemble dense joint-solve inputs from the plan and range matrix.
+///
+/// Rows pair with plan sources by order and by id (a misaligned row
+/// counts as missing, as in [`gather_usable_column`]); cells pair
+/// with plan microphones the same way ([`gather_usable_cells`]).
+fn build_joint_inputs(plan: &CaptureSessionPlan, ranges: &[SourceRanges]) -> JointInputs {
+    let microphones = plan.microphones.len();
+    let mut ranges_sm = Vec::with_capacity(plan.sources.len() * microphones);
+    let mut usable = Vec::with_capacity(plan.sources.len() * microphones);
+    for (index, source) in plan.sources.iter().enumerate() {
+        let row = ranges.get(index).filter(|row| row.source_id == source.id);
+        for (mic_index, microphone) in plan.microphones.iter().enumerate() {
+            let link = row
+                .and_then(|row| row.cells.get(mic_index))
+                .filter(|cell| cell.microphone_id == microphone.id)
+                .and_then(joint_usable_link);
+            usable.push(link.is_some());
+            ranges_sm.push(link);
+        }
+    }
+    JointInputs {
+        source_seeds: plan
+            .sources
+            .iter()
+            .map(|source| source.position_m)
+            .collect(),
+        mic_seeds: plan
+            .microphones
+            .iter()
+            .map(|microphone| microphone.position_m)
+            .collect(),
+        ranges_sm,
+        usable,
+    }
+}
+
+/// Q10 counting gate over assembled joint inputs (§9).
+///
+/// Mirrors the solver's refusal predicates exactly (same values, same
+/// anchor order: sources then microphones), so a pass here means a
+/// solver `None` is truly convergence (Q10b), never counting. Each
+/// failing rule yields one session note; empty means attempt.
+fn joint_counting_notes(plan: &CaptureSessionPlan, inputs: &JointInputs) -> Vec<String> {
+    let mut notes = Vec::new();
+    for (index, source) in plan.sources.iter().enumerate() {
+        let surveyed = inputs.source_seeds.get(index).copied().flatten();
+        if surveyed.is_some_and(|position| !position.iter().all(|c| c.is_finite())) {
+            notes.push(format!(
+                "joint self-calibration not attempted: surveyed source {} position is not finite; direct solves stand",
+                source.id
+            ));
+        }
+    }
+    for (index, microphone) in plan.microphones.iter().enumerate() {
+        let surveyed = inputs.mic_seeds.get(index).copied().flatten();
+        if surveyed.is_some_and(|position| !position.iter().all(|c| c.is_finite())) {
+            notes.push(format!(
+                "joint self-calibration not attempted: surveyed microphone {} position is not finite; direct solves stand",
+                microphone.id
+            ));
+        }
+    }
+    if !notes.is_empty() {
+        return notes;
+    }
+    let anchors: Vec<[f64; 3]> = inputs
+        .source_seeds
+        .iter()
+        .chain(inputs.mic_seeds.iter())
+        .filter_map(|seed| *seed)
+        .collect();
+    if anchors.len() < MIN_JOINT_ANCHORS {
+        notes.push(format!(
+            "joint self-calibration not attempted: {} surveyed anchors (< {MIN_JOINT_ANCHORS} required); direct solves stand",
+            anchors.len()
+        ));
+        return notes;
+    }
+    if geometry_rank(&anchors).collinear {
+        notes.push(
+            "joint self-calibration not attempted: surveyed anchors are collinear; direct solves stand"
+                .into(),
+        );
+        return notes;
+    }
+    let unknowns = inputs
+        .source_seeds
+        .iter()
+        .chain(inputs.mic_seeds.iter())
+        .filter(|seed| seed.is_none())
+        .count();
+    let usable_count = inputs.usable.iter().filter(|used| **used).count();
+    if usable_count < 3 * unknowns {
+        notes.push(format!(
+            "joint self-calibration not attempted: {usable_count} usable cells below the {} minimum (3 per unknown); direct solves stand",
+            3 * unknowns
+        ));
+    }
+    let mics = inputs.mic_seeds.len();
+    for (index, source) in plan.sources.iter().enumerate() {
+        if inputs.source_seeds.get(index).copied().flatten().is_some() {
+            continue;
+        }
+        let links = (0..mics)
+            .filter(|mic| {
+                inputs
+                    .usable
+                    .get(index * mics + mic)
+                    .copied()
+                    .unwrap_or(false)
+            })
+            .count();
+        if links < MIN_RANGES_FOR_FIX {
+            notes.push(format!(
+                "joint self-calibration not attempted: source {} has {links} usable links (< {MIN_RANGES_FOR_FIX} required); direct solves stand",
+                source.id
+            ));
+        }
+    }
+    for (index, microphone) in plan.microphones.iter().enumerate() {
+        if inputs.mic_seeds.get(index).copied().flatten().is_some() {
+            continue;
+        }
+        let links = (0..inputs.source_seeds.len())
+            .filter(|source| {
+                inputs
+                    .usable
+                    .get(source * mics + index)
+                    .copied()
+                    .unwrap_or(false)
+            })
+            .count();
+        if links < MIN_RANGES_FOR_FIX {
+            notes.push(format!(
+                "joint self-calibration not attempted: microphone {} has {links} usable links (< {MIN_RANGES_FOR_FIX} required); direct solves stand",
+                microphone.id
+            ));
+        }
+    }
+    notes
+}
+
+/// Blank refused source entry for a failed joint attempt (Q10b).
+fn joint_refused_source(source_id: &str) -> SourcePosition {
+    SourcePosition {
+        source_id: source_id.into(),
+        position_m: None,
+        sigma_m: None,
+        rms_residual_m: None,
+        gdop: None,
+        mirror_ambiguous: false,
+        declared_error_m: None,
+        loo_max_residual_m: None,
+        loo_worst_microphone: None,
+        loo_max_shift_m: None,
+        reason: Some("solve_failed".into()),
+    }
+}
+
+/// Blank refused microphone entry for a failed joint attempt (Q10b).
+fn joint_refused_microphone(microphone_id: &str) -> MicPosition {
+    MicPosition {
+        microphone_id: microphone_id.into(),
+        position_m: None,
+        sigma_m: None,
+        rms_residual_m: None,
+        gdop: None,
+        mirror_ambiguous: false,
+        declared_error_m: None,
+        loo_max_residual_m: None,
+        loo_worst_source: None,
+        loo_max_shift_m: None,
+        reason: Some("solve_failed".into()),
+    }
+}
+
+/// Map one joint point into a source report entry.
+///
+/// GDOP stays empty (the joint covariance marginals replace the
+/// single-point dilution figure) and LOO stays empty (the solver runs
+/// no joint leave-one-out: held-out links poison verdicts through
+/// frame flex); the global mirror flag applies to every jointly
+/// estimated point.
+fn joint_mapped_source(
+    source_id: &str,
+    point: &JointPoint,
+    mirror_ambiguous: bool,
+) -> SourcePosition {
+    SourcePosition {
+        source_id: source_id.into(),
+        position_m: Some(point.position_m),
+        sigma_m: Some(point.sigma_m),
+        rms_residual_m: Some(point.rms_residual_m),
+        gdop: None,
+        mirror_ambiguous,
+        declared_error_m: None,
+        loo_max_residual_m: None,
+        loo_worst_microphone: None,
+        loo_max_shift_m: None,
+        reason: None,
+    }
+}
+
+/// Map one joint point into a microphone report entry (see
+/// [`joint_mapped_source`] for the empty fields).
+fn joint_mapped_microphone(
+    microphone_id: &str,
+    point: &JointPoint,
+    mirror_ambiguous: bool,
+) -> MicPosition {
+    MicPosition {
+        microphone_id: microphone_id.into(),
+        position_m: Some(point.position_m),
+        sigma_m: Some(point.sigma_m),
+        rms_residual_m: Some(point.rms_residual_m),
+        gdop: None,
+        mirror_ambiguous,
+        declared_error_m: None,
+        loo_max_residual_m: None,
+        loo_worst_source: None,
+        loo_max_shift_m: None,
+        reason: None,
+    }
+}
+
+/// Jointly calibrate unsurveyed sources and microphones (§6.4).
+///
+/// `Err` carries Q10 session notes (counting failed: the caller falls
+/// back to direct solves, which stand). `Ok` is the joint attempt —
+/// positions, notes, and the calibration summary, or a `None` summary
+/// when the attempt itself failed past counting (Q10b: every
+/// unsurveyed point refused with `solve_failed`, ranges kept, while
+/// surveyed audits still publish).
+fn try_joint_positions(
+    plan: &CaptureSessionPlan,
+    ranges: &[SourceRanges],
+    sound_speed_m_s: f64,
+    sample_rate_hz: u32,
+) -> Result<JointAttempt, Vec<String>> {
+    let inputs = build_joint_inputs(plan, ranges);
+    let q10 = joint_counting_notes(plan, &inputs);
+    if !q10.is_empty() {
+        return Err(q10);
+    }
+    let sample_m = sound_speed_m_s / f64::from(sample_rate_hz.max(1));
+    let Some(estimate) = joint_self_calibrate(
+        &inputs.source_seeds,
+        &inputs.mic_seeds,
+        &inputs.ranges_sm,
+    ) else {
+        let (sources, microphones, notes) = map_joint_refused(plan, ranges, sample_m);
+        return Ok(JointAttempt {
+            sources,
+            microphones,
+            notes,
+            calibration: None,
+        });
+    };
+    let mut notes = Vec::new();
+    let sources = map_joint_sources(plan, ranges, &estimate, sample_m, &mut notes);
+    let microphones = map_joint_microphones(plan, ranges, &estimate, sample_m, &mut notes);
+    notes.extend(joint_exclusion_notes(plan, &inputs, &estimate));
+    if estimate.outlier_absorb_risk {
+        notes.push(
+            "joint self-calibration on thin surveyed coverage: a gross range outlier can absorb into the frame with clean residuals; verify the geometry when outliers are possible"
+                .into(),
+        );
+    }
+    let calibration = JointCalibration {
+        sources_solved: inputs.source_seeds.iter().filter(|seed| seed.is_none()).count(),
+        microphones_solved: inputs.mic_seeds.iter().filter(|seed| seed.is_none()).count(),
+        anchors: inputs
+            .source_seeds
+            .iter()
+            .chain(inputs.mic_seeds.iter())
+            .filter(|seed| seed.is_some())
+            .count(),
+        rms_residual_m: estimate.rms_residual_m,
+        mirror_ambiguous: estimate.mirror_ambiguous,
+        outlier_absorb_risk: estimate.outlier_absorb_risk,
+    };
+    Ok(JointAttempt {
+        sources,
+        microphones,
+        notes,
+        calibration: Some(calibration),
+    })
+}
+
+/// Map a failed joint attempt (Q10b): every unsurveyed point refused
+/// with `solve_failed` while surveyed audits still publish.
+fn map_joint_refused(
+    plan: &CaptureSessionPlan,
+    ranges: &[SourceRanges],
+    sample_m: f64,
+) -> (Vec<SourcePosition>, Vec<MicPosition>, Vec<String>) {
+    let mut sources = Vec::with_capacity(ranges.len());
+    let mut microphones = Vec::with_capacity(plan.microphones.len());
+    let mut notes = Vec::new();
+    for row in ranges {
+        let surveyed = plan
+            .sources
+            .iter()
+            .find(|source| source.id == row.source_id)
+            .and_then(|source| source.position_m);
+        if let Some(declared) = surveyed {
+            let (position, mut audit) =
+                solve_row_position(row, &plan.microphones, Some(declared), sample_m);
+            sources.push(position);
+            notes.append(&mut audit);
+        } else {
+            notes.push(format!(
+                "source {} position refused: joint self-calibration failed (solve_failed)",
+                row.source_id
+            ));
+            sources.push(joint_refused_source(&row.source_id));
+        }
+    }
+    for (index, microphone) in plan.microphones.iter().enumerate() {
+        if microphone.position_m.is_some() {
+            let (position, mut audit) = solve_column_position(
+                &microphone.id,
+                index,
+                ranges,
+                &plan.sources,
+                microphone.position_m,
+                sample_m,
+            );
+            microphones.push(position);
+            notes.append(&mut audit);
+        } else {
+            notes.push(format!(
+                "microphone {} position refused: joint self-calibration failed (solve_failed)",
+                microphone.id
+            ));
+            microphones.push(joint_refused_microphone(&microphone.id));
+        }
+    }
+    (sources, microphones, notes)
+}
+
+/// Map joint source estimates into report entries, auditing surveyed
+/// rows forward as in direct mode.
+fn map_joint_sources(
+    plan: &CaptureSessionPlan,
+    ranges: &[SourceRanges],
+    estimate: &JointEstimate,
+    sample_m: f64,
+    notes: &mut Vec<String>,
+) -> Vec<SourcePosition> {
+    let mut sources = Vec::with_capacity(ranges.len());
+    for row in ranges {
+        let found = plan
+            .sources
+            .iter()
+            .enumerate()
+            .find(|(_, source)| source.id == row.source_id);
+        let Some((index, source)) = found else {
+            sources.push(joint_refused_source(&row.source_id));
+            continue;
+        };
+        if let Some(declared) = source.position_m {
+            let (position, mut audit) =
+                solve_row_position(row, &plan.microphones, Some(declared), sample_m);
+            sources.push(position);
+            notes.append(&mut audit);
+            continue;
+        }
+        let point = estimate
+            .source_points
+            .get(index)
+            .and_then(|point| point.as_ref());
+        if let Some(point) = point {
+            sources.push(joint_mapped_source(
+                &source.id,
+                point,
+                estimate.mirror_ambiguous,
+            ));
+        } else {
+            notes.push(format!(
+                "source {} position refused: joint self-calibration failed (solve_failed)",
+                source.id
+            ));
+            sources.push(joint_refused_source(&source.id));
+        }
+    }
+    sources
+}
+
+/// Map joint microphone estimates into report entries; surveyed
+/// microphones stay anchors.
+fn map_joint_microphones(
+    plan: &CaptureSessionPlan,
+    ranges: &[SourceRanges],
+    estimate: &JointEstimate,
+    sample_m: f64,
+    notes: &mut Vec<String>,
+) -> Vec<MicPosition> {
+    let mut microphones = Vec::with_capacity(plan.microphones.len());
+    for (index, microphone) in plan.microphones.iter().enumerate() {
+        if let Some(surveyed) = microphone.position_m {
+            let (position, mut audit) = solve_column_position(
+                &microphone.id,
+                index,
+                ranges,
+                &plan.sources,
+                Some(surveyed),
+                sample_m,
+            );
+            microphones.push(position);
+            notes.append(&mut audit);
+            continue;
+        }
+        let point = estimate
+            .mic_points
+            .get(index)
+            .and_then(|point| point.as_ref());
+        if let Some(point) = point {
+            microphones.push(joint_mapped_microphone(
+                &microphone.id,
+                point,
+                estimate.mirror_ambiguous,
+            ));
+        } else {
+            notes.push(format!(
+                "microphone {} position refused: joint self-calibration failed (solve_failed)",
+                microphone.id
+            ));
+            microphones.push(joint_refused_microphone(&microphone.id));
+        }
+    }
+    microphones
+}
+
+/// One session note per link the joint fit excluded as a range
+/// outlier, in source-major cell order.
+fn joint_exclusion_notes(
+    plan: &CaptureSessionPlan,
+    inputs: &JointInputs,
+    estimate: &JointEstimate,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    let mics = plan.microphones.len();
+    for (cell, used) in estimate.used_links.iter().enumerate() {
+        if *used || !inputs.usable.get(cell).copied().unwrap_or(false) {
+            continue;
+        }
+        let (Some(source), Some(mic)) = (cell.checked_div(mics), cell.checked_rem(mics)) else {
+            continue;
+        };
+        let (Some(source), Some(microphone)) =
+            (plan.sources.get(source), plan.microphones.get(mic))
+        else {
+            continue;
+        };
+        notes.push(format!(
+            "source {}: {} excluded from the joint fit as a range outlier",
+            source.id, microphone.id
+        ));
+    }
+    notes
 }
 
 /// Outcome of the shared multilateration core (§6.1 + Q7).
@@ -2638,7 +3197,29 @@ pub fn localization_summary_lines(report: &LocalizationReport) -> Vec<String> {
             lines.push(microphone_summary_line(microphone));
         }
     }
+    if let Some(calibration) = &report.joint {
+        lines.push(joint_summary_line(calibration));
+    }
     lines
+}
+
+/// One CLI line for a joint self-calibration (§8.1).
+fn joint_summary_line(calibration: &JointCalibration) -> String {
+    let mut detail = String::new();
+    if calibration.mirror_ambiguous {
+        detail.push_str(" [mirror-ambiguous]");
+    }
+    if calibration.outlier_absorb_risk {
+        detail.push_str(" [outlier-absorb-risk]");
+    }
+    format!(
+        "localization joint: {} sources + {} microphones from {} anchors, rms {:.1} mm{}",
+        calibration.sources_solved,
+        calibration.microphones_solved,
+        calibration.anchors,
+        calibration.rms_residual_m * 1000.0,
+        detail
+    )
 }
 
 /// One CLI line for a solved or refused source position.
@@ -4069,6 +4650,250 @@ mod tests {
         }
     }
 
+    /// Joint Q10b fixture: solver-probe geometry (5 sources, first
+    /// two surveyed; 6 microphones, 0/1/2/4 surveyed) with exact 1 mm
+    /// ranges except src-2, which keeps 4 links with a wild fourth —
+    /// session counting passes but the solver depletes on exclusion.
+    fn joint_q10b_fixture() -> (
+        crate::capture_session::CaptureSessionPlan,
+        Vec<SourceRanges>,
+    ) {
+        let sources: Vec<(&str, [f64; 3])> = vec![
+            ("src-0", [3.5, 1.0, 1.4]),
+            ("src-1", [3.5, 2.0, 1.0]),
+            ("src-2", [1.0, -1.0, 1.6]),
+            ("src-3", [1.0, 4.0, 0.9]),
+            ("src-4", [1.0, 1.5, 2.4]),
+        ];
+        let mics: Vec<(&str, [f64; 3])> = vec![
+            ("mic-0", [0.0, 0.0, 1.0]),
+            ("mic-1", [2.0, 0.0, 1.2]),
+            ("mic-2", [0.0, 2.0, 0.9]),
+            ("mic-3", [2.0, 2.0, 1.5]),
+            ("mic-4", [1.0, 1.0, 0.8]),
+            ("mic-5", [1.0, 3.0, 1.1]),
+        ];
+        let mut plan: crate::capture_session::CaptureSessionPlan =
+            serde_json::from_str(include_str!("../../tests/fixtures/capture-session.json"))
+                .unwrap();
+        let template = plan.microphones[0].clone();
+        plan.microphones = mics
+            .iter()
+            .enumerate()
+            .map(|(channel, (id, position))| {
+                let mut microphone = template.clone();
+                microphone.id = (*id).to_string();
+                microphone.input_channel = channel as u16;
+                let surveyed = !matches!(channel, 3 | 5);
+                microphone.position_m = surveyed.then_some(*position);
+                microphone.position_uncertainty_mm = surveyed.then_some(0.1);
+                microphone
+            })
+            .collect();
+        plan.sources = sources
+            .iter()
+            .enumerate()
+            .map(|(channel, (id, position))| {
+                let surveyed = channel < 2;
+                crate::capture_session::CaptureSource {
+                    id: (*id).to_string(),
+                    output_channel: channel as u16,
+                    position_m: surveyed.then_some(*position),
+                    position_uncertainty_mm: surveyed.then_some(0.1),
+                    source_delay_calibration_ms: None,
+                }
+            })
+            .collect();
+        let ranges = sources
+            .iter()
+            .map(|(source_id, truth)| {
+                position_row(
+                    source_id,
+                    mics.iter()
+                        .enumerate()
+                        .map(|(channel, (id, position))| {
+                            if *source_id == "src-2" && matches!(channel, 4 | 5) {
+                                return (*id, None);
+                            }
+                            let mut distance = distance_meter(*position, *truth);
+                            if *source_id == "src-2" && channel == 3 {
+                                distance += 0.15;
+                            }
+                            (*id, Some((distance, 0.001)))
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        (plan, ranges)
+    }
+
+    #[test]
+    fn joint_session_calibrates_unsurveyed_sources_and_mics() {
+        // Both sides partially unsurveyed: the joint solve calibrates
+        // all four unknowns coherently; surveyed sources keep forward
+        // audits and surveyed microphones stay anchors.
+        let mut harness = harness_rich(HarnessMode::Loopback);
+        let source_truth = harness.golden.sources_m.clone();
+        for source in &mut harness.report.plan.sources {
+            source.position_m = source_truth.get(&source.id).copied();
+            source.position_uncertainty_mm = Some(0.1);
+        }
+        for mic in harness.report.plan.microphones.iter_mut().skip(4) {
+            mic.position_m = None;
+            mic.position_uncertainty_mm = None;
+        }
+        let unsurveyed_sources: Vec<String> = harness
+            .report
+            .plan
+            .sources
+            .iter()
+            .skip(3)
+            .take(2)
+            .map(|source| source.id.clone())
+            .collect();
+        assert_eq!(unsurveyed_sources.len(), 2);
+        for source in &mut harness.report.plan.sources {
+            if unsurveyed_sources.contains(&source.id) {
+                source.position_m = None;
+                source.position_uncertainty_mm = None;
+            }
+        }
+        let localized = localize_session(
+            &harness.report,
+            harness.raw_root.path(),
+            harness.output.path(),
+            &harness.fits,
+        );
+        assert_eq!(localized.mode, LocalizationMode::LoopbackReferenced);
+        let calibration = localized
+            .joint
+            .as_ref()
+            .expect("joint calibration publishes");
+        assert_eq!(calibration.sources_solved, 2);
+        assert_eq!(calibration.microphones_solved, 2);
+        assert_eq!(calibration.anchors, 7);
+        assert!(!calibration.outlier_absorb_risk);
+        for position in &localized.sources {
+            let truth = harness.golden.sources_m[&position.source_id];
+            let fit = position.position_m.expect("joint source solves");
+            let error = distance_meter(fit, truth);
+            assert!(
+                error < 0.02,
+                "{}: joint source error {error} m",
+                position.source_id
+            );
+        }
+        for microphone in &localized.microphones {
+            if microphone.microphone_id == "mic-4" || microphone.microphone_id == "mic-5" {
+                let truth = harness.golden.microphones_m[&microphone.microphone_id];
+                let fit = microphone.position_m.expect("joint mic solves");
+                let error = distance_meter(fit, truth);
+                assert!(
+                    error < 0.02,
+                    "{}: joint mic error {error} m",
+                    microphone.microphone_id
+                );
+            } else {
+                assert_eq!(microphone.position_m, None);
+                assert_eq!(microphone.reason.as_deref(), Some("surveyed_anchor"));
+            }
+        }
+        let lines = localization_summary_lines(&localized);
+        assert!(
+            lines.iter().any(|line| line
+                .starts_with("localization joint: 2 sources + 2 microphones from 7 anchors")),
+            "joint line missing: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn joint_q10_falls_back_to_direct_solves() {
+        // Two anchors only: counting refuses the joint solve, direct
+        // reasons stand, and a session note says the joint solve was
+        // not attempted.
+        let mut harness = harness_rich(HarnessMode::Loopback);
+        for source in harness.report.plan.sources.iter_mut().skip(1) {
+            source.position_m = None;
+            source.position_uncertainty_mm = None;
+        }
+        {
+            let first = harness.report.plan.sources[0].id.clone();
+            let truth = harness.golden.sources_m[&first];
+            harness.report.plan.sources[0].position_m = Some(truth);
+            harness.report.plan.sources[0].position_uncertainty_mm = Some(0.1);
+        }
+        for mic in harness.report.plan.microphones.iter_mut().skip(1) {
+            mic.position_m = None;
+            mic.position_uncertainty_mm = None;
+        }
+        let localized = localize_session(
+            &harness.report,
+            harness.raw_root.path(),
+            harness.output.path(),
+            &harness.fits,
+        );
+        assert_eq!(localized.joint, None);
+        assert!(
+            localized.issues.iter().any(|issue| issue
+                .contains("joint self-calibration not attempted")
+                && issue.contains("direct solves stand")),
+            "Q10 note missing: {:?}",
+            localized.issues
+        );
+        for position in &localized.sources[1..] {
+            assert_eq!(
+                position.reason.as_deref(),
+                Some("insufficient_ranges"),
+                "direct reason stands for {}",
+                position.source_id
+            );
+        }
+        for microphone in &localized.microphones[1..] {
+            assert_eq!(
+                microphone.reason.as_deref(),
+                Some("insufficient_ranges"),
+                "direct reason stands for {}",
+                microphone.microphone_id
+            );
+        }
+    }
+
+    #[test]
+    fn joint_q10b_refusal_marks_solve_failed() {
+        // Session counting passes but the solver depletes (src-2 loses
+        // its wild fourth link to exclusion): every unsurveyed point is
+        // refused with solve_failed while surveyed audits publish.
+        let (plan, ranges) = joint_q10b_fixture();
+        let attempt = try_joint_positions(&plan, &ranges, 343.0, 48_000).expect("counting passes");
+        assert_eq!(attempt.calibration, None);
+        for position in &attempt.sources {
+            if position.source_id == "src-0" || position.source_id == "src-1" {
+                assert!(position.position_m.is_some(), "surveyed audit publishes");
+                assert!(position.declared_error_m.is_some());
+            } else {
+                assert_eq!(position.position_m, None);
+                assert_eq!(position.reason.as_deref(), Some("solve_failed"));
+            }
+        }
+        for microphone in &attempt.microphones {
+            if microphone.microphone_id == "mic-3" || microphone.microphone_id == "mic-5" {
+                assert_eq!(microphone.position_m, None);
+                assert_eq!(microphone.reason.as_deref(), Some("solve_failed"));
+            } else {
+                assert_eq!(microphone.reason.as_deref(), Some("surveyed_anchor"));
+            }
+        }
+        assert!(
+            attempt
+                .notes
+                .iter()
+                .any(|note| note.contains("joint self-calibration failed (solve_failed)")),
+            "Q10b note missing: {:?}",
+            attempt.notes
+        );
+    }
+
     #[test]
     fn bench_missing_file_falls_back_uncalibrated() {
         let mut harness = harness(HarnessMode::Loopback);
@@ -4445,6 +5270,7 @@ mod tests {
             ],
             issues: Vec::new(),
             microphones: Vec::new(),
+            joint: None,
         };
         let lines = localization_summary_lines(&report);
         assert_eq!(lines.len(), 5);
@@ -4479,6 +5305,7 @@ mod tests {
             ranges: Vec::new(),
             sources: Vec::new(),
             microphones,
+            joint: None,
             issues: Vec::new(),
         };
         // All surveyed: no microphone lines (Phase 3 output unchanged).

@@ -471,7 +471,7 @@ solves freely — each point is estimated from whichever side is
 surveyed, and points surveyed on neither side wait for the joint
 solve below.
 
-#### Joint self-calibration (Phase 4): alternating solve with anchors
+#### Joint self-calibration (Phase 4): joint LM with anchors
 
 Unknowns are all unsurveyed points on both sides: 3·(S+M−A) coordinates
 for S sources, M microphones, and A surveyed anchors. Equations are
@@ -481,8 +481,8 @@ the solve, all necessary, none sufficient alone (geometry still rules):
 1. Global count: usable cells ≥ 3·(S+M−A). Fewer equations than
    coordinates ⇒ refuse, no iteration attempted.
 2. Per-point links: every unknown needs ≥ 4 usable cross-ranges,
-   because each alternating sweep solves one point from the other
-   side's current positions through `solve_position` (which enforces
+   because the final polish sweep re-solves each point from the
+   other side through `solve_position` (which enforces
    `MIN_RANGES_FOR_FIX`). Corollary: a stereo (2-source) session can
    never joint-solve — each mic sees at most 2 sources. Joint mode
    needs rich sessions (≥ 4 sources AND ≥ 4 microphones with a dense
@@ -499,17 +499,34 @@ the solve, all necessary, none sufficient alone (geometry still rules):
    is fixed by the absolute ranges via `c` — unlike pure-TDOA or
    angle-only self-calibration, there is no scale gauge to fix.
 
-Convergence is not guaranteed: alternating sweeps iterate to a max
-position shift below 1 µm or a 50-sweep cap, and any sub-solve
-failure, cap exhaustion, or singular joint normal matrix refuses the
-whole calibration (`solve_failed`) rather than publishing a
-half-converged frame. Uncertainty is the full joint covariance
-marginal per point — conditioning single-point sigmas on estimated
-anchors would be overconfident, so the joint normal matrix over all
-unknowns is inverted once (Cholesky) and each point reports its own
-3×3 block. Outlier exclusion runs only on the final polish sweep:
-robust fitting needs a converged fixpoint first, and excluding
-against unconverged anchors would cascade into depletion.
+The joint solve runs only when both sides hold unsurveyed points;
+one-sided sessions keep the direct (forward/inverse) solves, which
+are exact there. As built, the solver is one joint
+Levenberg-Marquardt over all unknowns at once — per-point
+alternation cannot bootstrap here (sweep-one sub-solves face
+mostly-unconverged anchors and diverge), so the planned alternating
+sweeps were replaced during implementation. Seeding is a consensus
+cascade when coverage allows (unknowns with enough links to known
+positions seed by consensus trilateration, round by round), and
+wide-Tukey LM#1 converges from there with gross outliers flat from
+iteration zero, so no stage ever fits one. Thin coverage falls back
+to Huber LM#1 from trilateration seeds, and the estimate flags
+`outlier_absorb_risk`: there a wild link can absorb into null
+slides (28 cm at 70 sigma observed) with clean residuals, so
+positions are honest only if the links are clean. Mirror-flip basin
+hopping (bad-count first, Tukey cost ties) escapes anchor-plane
+traps; count-gated pre-hop plus post-hop 3.5-sigma exclusions with
+depletion re-gates drop outliers; a Jacobi polish replays the
+forward solver per unknown. Convergence is not guaranteed: LM
+damping/iteration caps, polish depletion, or a singular joint
+normal matrix refuses the whole calibration (`solve_failed`,
+Q10b) rather than publishing a half-converged frame, while
+counting failures refuse the attempt with a session note and the
+direct solves stand (Q10). Uncertainty is the full joint
+covariance marginal per point — conditioning single-point sigmas
+on estimated anchors would be overconfident, so the joint normal
+matrix over all unknowns is inverted once (Cholesky) and each
+point reports its own 3×3 block.
 
 ## 7. DSP pipeline (per `plan-process` run)
 
@@ -730,7 +747,7 @@ inside this crate plus the pure `math-dsp` module.
 | Q8b range count | fewer than 4 usable ranges (other than the 3-mic mirror case) | position refused | `insufficient_ranges` |
 | Q9 SNR | take's band SNR below the coherent threshold (existing 30 dB policy findings) | cell refused | `band_snr_low` |
 | Q10 joint counting (Phase 4) | usable cells < 3·unknowns, a point with < 4 links, < 3 anchors, or collinear anchors | joint solve not attempted; direct reasons stand | (no token; session note) |
-| Q10b joint convergence (Phase 4) | sub-solve failure, 50-sweep cap, or singular joint normal matrix | whole calibration refused, ranges kept | `solve_failed` |
+| Q10b joint convergence (Phase 4) | LM damping/iteration cap, polish depletion, or singular joint normal matrix | whole calibration refused, ranges kept | `solve_failed` |
 | — anchor status (Phase 4) | surveyed point in inverse/joint output; anchors are held fixed, never estimated | position empty by design | `surveyed_anchor` |
 
 Thresholds are named constants beside the code that uses them (the
@@ -755,7 +772,8 @@ table in the same commit.
   (`localization mic mic-1 position: …`), plus a joint-calibration
   line when the joint solve runs
   (`localization joint: 5 sources + 8 microphones from 3 anchors, rms …`).
-  A coplanar solve appends ` [mirror-ambiguous]`. Printed next to
+  A coplanar solve appends ` [mirror-ambiguous]`; a thin-coverage
+  joint solve appends ` [outlier-absorb-risk]`. Printed next to
   `clock_skew_lines` output; warnings to stderr like the existing clock
   warnings. Exit status unchanged — localization refusal is evidence,
   not a processing failure.
