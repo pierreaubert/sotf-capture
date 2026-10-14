@@ -98,9 +98,15 @@ pub struct CaptureMicrophone {
     /// Documented input gain, held fixed throughout the session.
     pub gain_db: f64,
     /// Microphone coordinates in meters in one session coordinate system.
-    pub position_m: [f64; 3],
+    /// `None` for unsurveyed microphones (Phase 4 inverse/joint modes);
+    /// consumers that need surveyed geometry say so explicitly instead
+    /// of assuming this exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_m: Option<[f64; 3]>,
     /// Survey uncertainty in millimeters, required for compact-array use.
-    pub position_uncertainty_mm: f64,
+    /// Present exactly when `position_m` is (validated as a pair).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_uncertainty_mm: Option<f64>,
 }
 
 /// A loudspeaker excited separately while every microphone records.
@@ -408,16 +414,28 @@ impl CaptureSessionPlan {
             if mic.calibration_file.as_os_str().is_empty() {
                 return Err(reject("each microphone requires its own calibration file"));
             }
-            if !mic.gain_db.is_finite()
-                || mic.position_m.iter().any(|value| !value.is_finite())
-                || !mic.position_uncertainty_mm.is_finite()
-                || mic.position_uncertainty_mm < 0.0
-            {
+            if !mic.gain_db.is_finite() {
+                return Err(reject("microphone gain must be finite"));
+            }
+            let geometry_valid = match (mic.position_m, mic.position_uncertainty_mm) {
+                (None, None) => true,
+                (Some(position), Some(uncertainty)) => {
+                    position.iter().all(|value| value.is_finite())
+                        && uncertainty.is_finite()
+                        && uncertainty >= 0.0
+                }
+                (Some(_), None) | (None, Some(_)) => false,
+            };
+            if !geometry_valid {
                 return Err(reject(
-                    "microphone gain and geometry must be finite and uncertainty nonnegative",
+                    "microphone surveyed position and uncertainty must both be present or both absent, finite, with nonnegative uncertainty",
                 ));
             }
-            if self.geometry == CaptureGeometry::Compact && mic.position_uncertainty_mm > 1.0 {
+            if self.geometry == CaptureGeometry::Compact
+                && mic
+                    .position_uncertainty_mm
+                    .is_some_and(|uncertainty| uncertainty > 1.0)
+            {
                 return Err(reject(
                     "compact microphone positions require at most 1 mm uncertainty",
                 ));
@@ -425,9 +443,15 @@ impl CaptureSessionPlan {
         }
         if self.geometry == CaptureGeometry::Compact {
             for (index, mic) in self.microphones.iter().enumerate() {
+                // Unsurveyed microphones are not duplicates of each other;
+                // only surveyed pairs clash.
+                let Some(position) = mic.position_m else {
+                    continue;
+                };
                 if self.microphones[..index]
                     .iter()
-                    .any(|other| other.position_m == mic.position_m)
+                    .filter_map(|other| other.position_m)
+                    .any(|other| other == position)
                 {
                     return Err(reject("compact microphones must occupy distinct positions"));
                 }

@@ -205,6 +205,45 @@ pub struct SourcePosition {
     pub reason: Option<String>,
 }
 
+/// One estimated microphone position from multilateration over a range
+/// column (Phase 4 inverse mode) or the joint calibration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MicPosition {
+    /// Microphone label from the session declaration.
+    pub microphone_id: String,
+    /// Estimated microphone position in meters.
+    #[serde(default)]
+    pub position_m: Option<[f64; 3]>,
+    /// Per-axis one-sigma uncertainty in meters.
+    #[serde(default)]
+    pub sigma_m: Option<[f64; 3]>,
+    /// RMS range residual of the multilateration fit in meters.
+    #[serde(default)]
+    pub rms_residual_m: Option<f64>,
+    /// Geometric dilution of precision of the source geometry.
+    #[serde(default)]
+    pub gdop: Option<f64>,
+    /// True when coplanar sources leave a mirror solution.
+    pub mirror_ambiguous: bool,
+    /// Distance to the surveyed microphone position; always `None`
+    /// (surveyed microphones are anchors, never estimates).
+    #[serde(default)]
+    pub declared_error_m: Option<f64>,
+    /// Largest leave-one-out held-out residual in meters, when the
+    /// geometry has spare sources to re-solve without.
+    #[serde(default)]
+    pub loo_max_residual_m: Option<f64>,
+    /// Source held out for the largest residual, when diagnosed.
+    #[serde(default)]
+    pub loo_worst_source: Option<String>,
+    /// Largest leave-one-out solution shift in meters, when diagnosed.
+    #[serde(default)]
+    pub loo_max_shift_m: Option<f64>,
+    /// Stable machine token explaining a missing position.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 /// Session range matrix with its time-origin evidence.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LocalizationReport {
@@ -226,6 +265,10 @@ pub struct LocalizationReport {
     /// One entry per plan source, aligned with `ranges`.
     #[serde(default)]
     pub sources: Vec<SourcePosition>,
+    /// One entry per plan microphone, in plan order (Phase 4
+    /// inverse/joint microphone positions).
+    #[serde(default)]
+    pub microphones: Vec<MicPosition>,
     /// Session-level evidence notes and degradation warnings.
     #[serde(default)]
     pub issues: Vec<String>,
@@ -1142,8 +1185,10 @@ fn emitter_anchor_check(
         let measured = fit.first.offset_samples
             - (ratio - 1.0) * layout.start_chirp_offset as f64
             - electrical;
-        let surveyed = mic
-            .position_m
+        let Some(mic_position) = mic.position_m else {
+            continue;
+        };
+        let surveyed = mic_position
             .iter()
             .zip(emitter.position_m)
             .map(|(a, b)| (a - b).powi(2))
@@ -1824,6 +1869,7 @@ pub(super) fn localize_session(
         mic_bias_correction_m: 0.0,
         ranges: Vec::new(),
         sources: Vec::new(),
+        microphones: Vec::new(),
         issues: Vec::new(),
     };
     let mut skews: Vec<f64> = fits
@@ -1987,6 +2033,9 @@ pub(super) fn localize_session(
     let (sources, mut position_issues) =
         solve_source_positions(&report.plan, &ranges, sound_speed, rate);
     issues.append(&mut position_issues);
+    let (microphones, mut mic_issues) =
+        solve_microphone_positions(&report.plan, &ranges, sound_speed, rate);
+    issues.append(&mut mic_issues);
     LocalizationReport {
         mode,
         sound_speed_m_s: sound_speed,
@@ -1996,6 +2045,7 @@ pub(super) fn localize_session(
         mic_bias_correction_m: mic_bias_m,
         ranges,
         sources,
+        microphones,
         issues,
     }
 }
@@ -2028,13 +2078,139 @@ fn solve_source_positions(
     (sources, issues)
 }
 
+/// Solve one 3D position per microphone column, in plan order.
+///
+/// Inverse of [`solve_source_positions`]: columns align with plan
+/// microphones by id, and each column solves against surveyed plan
+/// sources. Surveyed microphones are anchors, never estimates.
+fn solve_microphone_positions(
+    plan: &CaptureSessionPlan,
+    ranges: &[SourceRanges],
+    sound_speed_m_s: f64,
+    sample_rate_hz: u32,
+) -> (Vec<MicPosition>, Vec<String>) {
+    let sample_m = sound_speed_m_s / f64::from(sample_rate_hz.max(1));
+    let mut microphones = Vec::with_capacity(plan.microphones.len());
+    let mut issues = Vec::new();
+    for (index, microphone) in plan.microphones.iter().enumerate() {
+        let (position, mut notes) = solve_column_position(
+            &microphone.id,
+            index,
+            ranges,
+            &plan.sources,
+            microphone.position_m,
+            sample_m,
+        );
+        microphones.push(position);
+        issues.append(&mut notes);
+    }
+    (microphones, issues)
+}
+
+/// Outcome of the shared multilateration core (§6.1 + Q7).
+///
+/// Forward rows and inverse columns run the same solver with the same
+/// gates and refusal tokens; only the anchor side differs. The row
+/// and column assemblers map verdicts to their own report structs and
+/// note wording.
+enum PointVerdict {
+    /// Solved; the assembler maps excluded slots to anchor names.
+    Solved {
+        estimate: PositionEstimate,
+        excluded_slots: Vec<usize>,
+    },
+    /// Refused; the assembler formats notes from the evidence.
+    Refused {
+        reason: &'static str,
+        mirror_ambiguous: bool,
+        rms_residual_m: Option<f64>,
+        gdop: Option<f64>,
+        residual_gate_m: Option<f64>,
+    },
+}
+
+/// Multilaterate one point from usable anchor cells.
+///
+/// `usable` pairs each cell's original index with its anchor position,
+/// distance, and sigma. `None` from the solver means depletion or
+/// divergence (`solve_failed`), never an input disagreement (see
+/// [`gather_usable_cells`]).
+fn solve_point(usable: &[(usize, [f64; 3], f64, f64)], sample_m: f64) -> PointVerdict {
+    let refused = |reason: &'static str,
+                   mirror_ambiguous: bool,
+                   rms_residual_m: Option<f64>,
+                   gdop: Option<f64>,
+                   residual_gate_m: Option<f64>| {
+        PointVerdict::Refused {
+            reason,
+            mirror_ambiguous,
+            rms_residual_m,
+            gdop,
+            residual_gate_m,
+        }
+    };
+    if usable.len() < MIN_RANGES_FOR_FIX {
+        if usable.len() == 3 {
+            let positions: Vec<[f64; 3]> =
+                usable.iter().map(|(_, position, _, _)| *position).collect();
+            if geometry_rank(&positions).collinear {
+                return refused("degenerate_geometry", false, None, None, None);
+            }
+            return refused("mirror_ambiguous", true, None, None, None);
+        }
+        return refused("insufficient_ranges", false, None, None, None);
+    }
+    let positions: Vec<[f64; 3]> = usable.iter().map(|(_, position, _, _)| *position).collect();
+    if geometry_rank(&positions).collinear {
+        return refused("degenerate_geometry", false, None, None, None);
+    }
+    let ranges: Vec<Option<(f64, f64)>> = usable
+        .iter()
+        .map(|(_, _, distance, sigma)| Some((*distance, *sigma)))
+        .collect();
+    let Some(estimate) = solve_position(&positions, &ranges) else {
+        return refused("solve_failed", false, None, None, None);
+    };
+    let excluded_slots: Vec<usize> = estimate
+        .used
+        .iter()
+        .enumerate()
+        .filter(|(_, used)| !**used)
+        .map(|(slot, _)| slot)
+        .collect();
+    let mut used_sigmas: Vec<f64> = estimate
+        .used
+        .iter()
+        .enumerate()
+        .filter(|(_, used)| **used)
+        .map(|(slot, _)| usable[slot].3)
+        .collect();
+    used_sigmas.sort_by(f64::total_cmp);
+    let median_sigma = median_sorted(&used_sigmas).unwrap_or(0.0);
+    // Q7: refuse fits whose RMS residual exceeds one sample or three
+    // median cell sigmas. `max` falls back to the sigma term when the
+    // sample term is degenerate, so the gate stays fail-closed.
+    let residual_gate_m = sample_m.max(3.0 * median_sigma);
+    if estimate.rms_residual_m > residual_gate_m {
+        return refused(
+            "solve_residual_high",
+            estimate.mirror_ambiguous,
+            Some(estimate.rms_residual_m),
+            Some(estimate.gdop),
+            Some(residual_gate_m),
+        );
+    }
+    PointVerdict::Solved {
+        estimate,
+        excluded_slots,
+    }
+}
+
 /// Multilaterate one source row with geometry and residual gates.
 ///
-/// `None` from the solver means depletion or divergence
-/// (`solve_failed`), never an input disagreement (see
-/// [`gather_usable_cells`]). Refusals set `reason` and leave the
-/// position empty; `solve_residual_high` still publishes the RMS and
-/// GDOP of the refused fit as evidence.
+/// Thin assembler over [`solve_point`]: refusals set `reason` and
+/// leave the position empty; `solve_residual_high` still publishes
+/// the RMS and GDOP of the refused fit as evidence.
 fn solve_row_position(
     row: &SourceRanges,
     microphones: &[CaptureMicrophone],
@@ -2056,83 +2232,174 @@ fn solve_row_position(
     };
     let mut notes = Vec::new();
     let usable = gather_usable_cells(row, microphones);
-    if usable.len() < MIN_RANGES_FOR_FIX {
-        if usable.len() == 3 {
+    let anchor_ids: Vec<String> = usable
+        .iter()
+        .map(|(index, _, _, _)| row.cells[*index].microphone_id.clone())
+        .collect();
+    match solve_point(&usable, sample_m) {
+        PointVerdict::Refused {
+            reason,
+            mirror_ambiguous,
+            rms_residual_m,
+            gdop,
+            residual_gate_m,
+        } => {
+            if reason == "solve_failed" {
+                notes.push(format!(
+                    "source {} position refused: multilateration failed (solve_failed)",
+                    row.source_id
+                ));
+            }
+            let mut refused = blank(Some(reason), mirror_ambiguous);
+            if reason == "solve_residual_high" {
+                if let (Some(rms), Some(gate)) = (rms_residual_m, residual_gate_m) {
+                    notes.push(format!(
+                        "source {} position refused: RMS residual {:.1} mm exceeds the {:.1} mm gate (solve_residual_high)",
+                        row.source_id,
+                        rms * 1000.0,
+                        gate * 1000.0,
+                    ));
+                }
+                refused.rms_residual_m = rms_residual_m;
+                refused.gdop = gdop;
+            }
+            (refused, notes)
+        }
+        PointVerdict::Solved {
+            estimate,
+            excluded_slots,
+        } => {
+            for slot in excluded_slots {
+                notes.push(format!(
+                    "source {}: {} excluded from the position fit as a range outlier",
+                    row.source_id, anchor_ids[slot]
+                ));
+            }
+            let declared_error_m =
+                declared_m.map(|surveyed| euclidean_m(surveyed, estimate.position_m));
             let positions: Vec<[f64; 3]> =
                 usable.iter().map(|(_, position, _, _)| *position).collect();
-            if geometry_rank(&positions).collinear {
-                return (blank(Some("degenerate_geometry"), false), notes);
+            let ranges: Vec<Option<(f64, f64)>> = usable
+                .iter()
+                .map(|(_, _, distance, sigma)| Some((*distance, *sigma)))
+                .collect();
+            let (loo_max_residual_m, loo_worst_microphone, loo_max_shift_m) =
+                loo_fields(&anchor_ids, &positions, &ranges, &estimate);
+            let position = SourcePosition {
+                source_id: row.source_id.clone(),
+                position_m: Some(estimate.position_m),
+                sigma_m: Some(estimate.sigma_m),
+                rms_residual_m: Some(estimate.rms_residual_m),
+                gdop: Some(estimate.gdop),
+                mirror_ambiguous: estimate.mirror_ambiguous,
+                declared_error_m,
+                loo_max_residual_m,
+                loo_worst_microphone,
+                loo_max_shift_m,
+                reason: None,
+            };
+            (position, notes)
+        }
+    }
+}
+
+/// Multilaterate one microphone column against surveyed sources.
+///
+/// Inverse assembler over [`solve_point`]: the same solver, gates,
+/// and tokens as forward, with source anchors. Surveyed microphones
+/// are anchors, never estimates — the solve is not attempted and the
+/// entry carries `surveyed_anchor`.
+fn solve_column_position(
+    microphone_id: &str,
+    microphone_index: usize,
+    ranges: &[SourceRanges],
+    sources: &[CaptureSource],
+    surveyed_m: Option<[f64; 3]>,
+    sample_m: f64,
+) -> (MicPosition, Vec<String>) {
+    let blank = |reason: Option<&str>, mirror_ambiguous: bool| MicPosition {
+        microphone_id: microphone_id.to_string(),
+        position_m: None,
+        sigma_m: None,
+        rms_residual_m: None,
+        gdop: None,
+        mirror_ambiguous,
+        declared_error_m: None,
+        loo_max_residual_m: None,
+        loo_worst_source: None,
+        loo_max_shift_m: None,
+        reason: reason.map(str::to_string),
+    };
+    let mut notes = Vec::new();
+    if surveyed_m.is_some() {
+        return (blank(Some("surveyed_anchor"), false), notes);
+    }
+    let usable = gather_usable_column(microphone_index, ranges, sources);
+    let anchor_ids: Vec<String> = usable
+        .iter()
+        .map(|(index, _, _, _)| ranges[*index].source_id.clone())
+        .collect();
+    match solve_point(&usable, sample_m) {
+        PointVerdict::Refused {
+            reason,
+            mirror_ambiguous,
+            rms_residual_m,
+            gdop,
+            residual_gate_m,
+        } => {
+            if reason == "solve_failed" {
+                notes.push(format!(
+                    "microphone {microphone_id} position refused: multilateration failed (solve_failed)"
+                ));
             }
-            return (blank(Some("mirror_ambiguous"), true), notes);
+            let mut refused = blank(Some(reason), mirror_ambiguous);
+            if reason == "solve_residual_high" {
+                if let (Some(rms), Some(gate)) = (rms_residual_m, residual_gate_m) {
+                    notes.push(format!(
+                        "microphone {microphone_id} position refused: RMS residual {:.1} mm exceeds the {:.1} mm gate (solve_residual_high)",
+                        rms * 1000.0,
+                        gate * 1000.0,
+                    ));
+                }
+                refused.rms_residual_m = rms_residual_m;
+                refused.gdop = gdop;
+            }
+            (refused, notes)
         }
-        return (blank(Some("insufficient_ranges"), false), notes);
-    }
-    let positions: Vec<[f64; 3]> = usable.iter().map(|(_, position, _, _)| *position).collect();
-    if geometry_rank(&positions).collinear {
-        return (blank(Some("degenerate_geometry"), false), notes);
-    }
-    let ranges: Vec<Option<(f64, f64)>> = usable
-        .iter()
-        .map(|(_, _, distance, sigma)| Some((*distance, *sigma)))
-        .collect();
-    let Some(estimate) = solve_position(&positions, &ranges) else {
-        notes.push(format!(
-            "source {} position refused: multilateration failed (solve_failed)",
-            row.source_id
-        ));
-        return (blank(Some("solve_failed"), false), notes);
-    };
-    for (slot, used) in estimate.used.iter().enumerate() {
-        if !used {
-            let microphone_id = &row.cells[usable[slot].0].microphone_id;
-            notes.push(format!(
-                "source {}: {microphone_id} excluded from the position fit as a range outlier",
-                row.source_id
-            ));
+        PointVerdict::Solved {
+            estimate,
+            excluded_slots,
+        } => {
+            for slot in excluded_slots {
+                notes.push(format!(
+                    "microphone {microphone_id}: {} excluded from the position fit as a range outlier",
+                    anchor_ids[slot]
+                ));
+            }
+            let positions: Vec<[f64; 3]> =
+                usable.iter().map(|(_, position, _, _)| *position).collect();
+            let cell_ranges: Vec<Option<(f64, f64)>> = usable
+                .iter()
+                .map(|(_, _, distance, sigma)| Some((*distance, *sigma)))
+                .collect();
+            let (loo_max_residual_m, loo_worst_source, loo_max_shift_m) =
+                loo_fields(&anchor_ids, &positions, &cell_ranges, &estimate);
+            let position = MicPosition {
+                microphone_id: microphone_id.to_string(),
+                position_m: Some(estimate.position_m),
+                sigma_m: Some(estimate.sigma_m),
+                rms_residual_m: Some(estimate.rms_residual_m),
+                gdop: Some(estimate.gdop),
+                mirror_ambiguous: estimate.mirror_ambiguous,
+                declared_error_m: None,
+                loo_max_residual_m,
+                loo_worst_source,
+                loo_max_shift_m,
+                reason: None,
+            };
+            (position, notes)
         }
     }
-    let mut used_sigmas: Vec<f64> = estimate
-        .used
-        .iter()
-        .enumerate()
-        .filter(|(_, used)| **used)
-        .map(|(slot, _)| usable[slot].3)
-        .collect();
-    used_sigmas.sort_by(f64::total_cmp);
-    let median_sigma = median_sorted(&used_sigmas).unwrap_or(0.0);
-    // Q7: refuse fits whose RMS residual exceeds one sample or three
-    // median cell sigmas. `max` falls back to the sigma term when the
-    // sample term is degenerate, so the gate stays fail-closed.
-    let residual_gate_m = sample_m.max(3.0 * median_sigma);
-    if estimate.rms_residual_m > residual_gate_m {
-        notes.push(format!(
-            "source {} position refused: RMS residual {:.1} mm exceeds the {:.1} mm gate (solve_residual_high)",
-            row.source_id,
-            estimate.rms_residual_m * 1000.0,
-            residual_gate_m * 1000.0,
-        ));
-        let mut refused = blank(Some("solve_residual_high"), estimate.mirror_ambiguous);
-        refused.rms_residual_m = Some(estimate.rms_residual_m);
-        refused.gdop = Some(estimate.gdop);
-        return (refused, notes);
-    }
-    let declared_error_m = declared_m.map(|surveyed| euclidean_m(surveyed, estimate.position_m));
-    let (loo_max_residual_m, loo_worst_microphone, loo_max_shift_m) =
-        loo_fields(row, &usable, &positions, &ranges, &estimate);
-    let position = SourcePosition {
-        source_id: row.source_id.clone(),
-        position_m: Some(estimate.position_m),
-        sigma_m: Some(estimate.sigma_m),
-        rms_residual_m: Some(estimate.rms_residual_m),
-        gdop: Some(estimate.gdop),
-        mirror_ambiguous: estimate.mirror_ambiguous,
-        declared_error_m,
-        loo_max_residual_m,
-        loo_worst_microphone,
-        loo_max_shift_m,
-        reason: None,
-    };
-    (position, notes)
 }
 
 /// Gather solver-usable cells pairing range rows with plan microphones.
@@ -2153,25 +2420,29 @@ fn gather_usable_cells(
         if cell.microphone_id != microphone.id {
             continue;
         }
+        // Unsurveyed microphones keep their ranges but cannot anchor a
+        // forward solve; they wait for the inverse or joint solve.
+        let Some(anchor) = microphone.position_m else {
+            continue;
+        };
         if let (Some(distance), Some(sigma)) = (cell.distance_m, cell.sigma_m) {
             if distance.is_finite() && distance >= 0.0 && sigma.is_finite() && sigma > 0.0 {
-                usable.push((index, microphone.position_m, distance, sigma));
+                usable.push((index, anchor, distance, sigma));
             }
         }
     }
     usable
 }
 
-/// Leave-one-out diagnostics for a solved row (§7.2 step 8).
+/// Leave-one-out diagnostics for a solved row or column (§7.2 step 8).
 ///
-/// Re-solves per used microphone with that range dropped and reports
-/// the largest held-out residual (with its microphone) and the largest
-/// solution shift. Minimum geometry (four used ranges) diagnoses
-/// nothing — every drop depletes — and reports `None`, which is
-/// honest, not missing.
+/// Re-solves per used anchor with that range dropped and reports the
+/// largest held-out residual (with its anchor label) and the largest
+/// solution shift. `anchor_ids` runs parallel to `positions`/`ranges`.
+/// Minimum geometry (four used ranges) diagnoses nothing — every drop
+/// depletes — and reports `None`, which is honest, not missing.
 fn loo_fields(
-    row: &SourceRanges,
-    usable: &[(usize, [f64; 3], f64, f64)],
+    anchor_ids: &[String],
     positions: &[[f64; 3]],
     ranges: &[Option<(f64, f64)>],
     estimate: &PositionEstimate,
@@ -2179,13 +2450,46 @@ fn loo_fields(
     match loo_diagnostics(positions, ranges, estimate) {
         Some(diagnostics) => (
             Some(diagnostics.max_residual_m),
-            usable
-                .get(diagnostics.worst_index)
-                .map(|(cell, _, _, _)| row.cells[*cell].microphone_id.clone()),
+            anchor_ids.get(diagnostics.worst_index).cloned(),
             Some(diagnostics.max_shift_m),
         ),
         None => (None, None, None),
     }
+}
+
+/// Gather solver-usable cells down one microphone column, pairing range
+/// rows with surveyed plan sources.
+///
+/// Rows pair with plan sources by order and by id; a misaligned row
+/// counts as missing rather than misattributed. Only surveyed sources
+/// anchor an inverse solve — unsurveyed sources wait for the joint
+/// solve. The validity rules mirror the solver's exactly.
+fn gather_usable_column(
+    microphone_index: usize,
+    ranges: &[SourceRanges],
+    sources: &[CaptureSource],
+) -> Vec<(usize, [f64; 3], f64, f64)> {
+    let mut usable = Vec::new();
+    for (index, row) in ranges.iter().enumerate() {
+        let Some(source) = sources.get(index) else {
+            continue;
+        };
+        if row.source_id != source.id {
+            continue;
+        }
+        let Some(cell) = row.cells.get(microphone_index) else {
+            continue;
+        };
+        let Some(surveyed) = source.position_m else {
+            continue;
+        };
+        if let (Some(distance), Some(sigma)) = (cell.distance_m, cell.sigma_m) {
+            if distance.is_finite() && distance >= 0.0 && sigma.is_finite() && sigma > 0.0 {
+                usable.push((index, surveyed, distance, sigma));
+            }
+        }
+    }
+    usable
 }
 
 /// True median of an ascending slice; `None` when empty.
@@ -2217,8 +2521,9 @@ pub fn localization_readiness(plan: &CaptureSessionPlan) -> Vec<String> {
     let positions: Vec<[f64; 3]> = plan
         .microphones
         .iter()
-        .map(|microphone| microphone.position_m)
+        .filter_map(|microphone| microphone.position_m)
         .collect();
+    let surveyed = positions.len();
     let rank = geometry_rank(&positions);
     let mode = if plan.loopback.is_some() {
         "loopback-referenced (electrical loopback wired)"
@@ -2230,21 +2535,30 @@ pub fn localization_readiness(plan: &CaptureSessionPlan) -> Vec<String> {
     lines.push(format!(
         "localization readiness: {microphones} microphones, expecting {mode}"
     ));
-    if microphones < MIN_RANGES_FOR_FIX {
+    if surveyed < microphones {
         lines.push(format!(
-            "localization readiness: {microphones}/4 microphones, positions need at least 4"
+            "localization readiness: {}/{} microphones unsurveyed; forward solves use surveyed anchors only, the rest wait for inverse/joint solves",
+            microphones - surveyed,
+            microphones
         ));
     }
-    if rank.collinear {
-        lines.push(
-            "localization readiness: microphone geometry is collinear, 3D positions impossible"
-                .into(),
-        );
-    } else if rank.coplanar {
-        lines.push(
-            "localization readiness: microphones are coplanar, positions stay mirror-ambiguous without height diversity"
-                .into(),
-        );
+    if surveyed < MIN_RANGES_FOR_FIX {
+        lines.push(format!(
+            "localization readiness: {surveyed}/4 surveyed microphones, forward positions need at least 4"
+        ));
+    }
+    if surveyed >= MIN_RANGES_FOR_FIX {
+        if rank.collinear {
+            lines.push(
+                "localization readiness: microphone geometry is collinear, 3D positions impossible"
+                    .into(),
+            );
+        } else if rank.coplanar {
+            lines.push(
+                "localization readiness: microphones are coplanar, positions stay mirror-ambiguous without height diversity"
+                    .into(),
+            );
+        }
     }
     lines
 }
@@ -2313,6 +2627,17 @@ pub fn localization_summary_lines(report: &LocalizationReport) -> Vec<String> {
             lines.push(position_summary_line(position));
         }
     }
+    // Microphone lines print only when some microphone is unsurveyed;
+    // all-surveyed sessions keep the Phase 3 output byte-identical.
+    if report
+        .microphones
+        .iter()
+        .any(|mic| mic.reason.as_deref() != Some("surveyed_anchor"))
+    {
+        for microphone in &report.microphones {
+            lines.push(microphone_summary_line(microphone));
+        }
+    }
     lines
 }
 
@@ -2334,6 +2659,27 @@ fn position_summary_line(position: &SourcePosition) -> String {
     } else {
         let reason = position.reason.as_deref().unwrap_or("unknown");
         format!("localization {source_id} position: refused ({reason}){detail}")
+    }
+}
+
+/// One microphone position line, mirroring [`position_summary_line`].
+fn microphone_summary_line(position: &MicPosition) -> String {
+    let microphone_id = &position.microphone_id;
+    let mut detail = String::new();
+    if let Some(rms) = position.rms_residual_m {
+        let _ = write!(detail, " rms {:.1} mm", rms * 1000.0);
+    }
+    if let Some(gdop) = position.gdop {
+        let _ = write!(detail, " gdop {gdop:.1}");
+    }
+    if position.mirror_ambiguous {
+        detail.push_str(" [mirror-ambiguous]");
+    }
+    if let Some([x, y, z]) = position.position_m {
+        format!("localization mic {microphone_id} position: [{x:.3}, {y:.3}, {z:.3}] m{detail}")
+    } else {
+        let reason = position.reason.as_deref().unwrap_or("unknown");
+        format!("localization mic {microphone_id} position: refused ({reason}){detail}")
     }
 }
 
@@ -2606,6 +2952,16 @@ mod tests {
         .unwrap()
     }
 
+    /// Rich geometry for Phase 4 inverse/joint tests: 5 non-coplanar
+    /// sources by 6 non-coplanar microphones (the base golden's two
+    /// sources cannot anchor an inverse solve).
+    fn rich_golden() -> Golden {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/localization-golden-rich.json"
+        ))
+        .unwrap()
+    }
+
     fn distance_meter(a: [f64; 3], b: [f64; 3]) -> f64 {
         ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
     }
@@ -2672,7 +3028,12 @@ mod tests {
 
     /// Build a complete synthetic single-repeat session for one mode.
     fn harness(mode: HarnessMode) -> Harness {
-        harness_repeats(mode, 1, None, None)
+        harness_repeats(mode, 1, None, None, golden())
+    }
+
+    /// Rich-geometry session for Phase 4 inverse/joint tests.
+    fn harness_rich(mode: HarnessMode) -> Harness {
+        harness_repeats(mode, 1, None, None, rich_golden())
     }
 
     /// Synthesize one harness take with its clock fit into the manifest.
@@ -2843,8 +3204,8 @@ mod tests {
         repeats: u32,
         wild: Option<(&str, &str, u32, f64)>,
         sweep_override: Option<(f64, f64)>,
+        golden: Golden,
     ) -> Harness {
-        let golden = golden();
         let rate = golden.sample_rate_hz;
         let mut plan: CaptureSessionPlan =
             serde_json::from_str(include_str!("../../tests/fixtures/capture-session.json"))
@@ -2869,8 +3230,8 @@ mod tests {
                 mic.id = id.clone();
                 mic.device = "iface".into();
                 mic.input_channel = channel as u16;
-                mic.position_m = *position;
-                mic.position_uncertainty_mm = 0.1;
+                mic.position_m = Some(*position);
+                mic.position_uncertainty_mm = Some(0.1);
                 mic
             })
             .collect();
@@ -3177,7 +3538,7 @@ mod tests {
                 let mut microphone = template.clone();
                 microphone.id = (*id).to_string();
                 microphone.input_channel = channel as u16;
-                microphone.position_m = *position;
+                microphone.position_m = Some(*position);
                 microphone
             })
             .collect();
@@ -3336,6 +3697,7 @@ mod tests {
             3,
             Some(("left", "mic-1", 1, wild_extra)),
             None,
+            golden(),
         );
         let localized = localize_session(
             &harness.report,
@@ -3396,7 +3758,13 @@ mod tests {
         // A sub measurement session plans a genuine 20-300 Hz sweep
         // while the timing chirps stay full-band markers, so the
         // clock still fits and every sweep arrival goes low-band.
-        let harness = harness_repeats(HarnessMode::Loopback, 1, None, Some((20.0, 300.0)));
+        let harness = harness_repeats(
+            HarnessMode::Loopback,
+            1,
+            None,
+            Some((20.0, 300.0)),
+            golden(),
+        );
         let localized = localize_session(
             &harness.report,
             harness.raw_root.path(),
@@ -3571,7 +3939,7 @@ mod tests {
 
     #[test]
     fn anchor_session_trusts_loopback_without_mismatch() {
-        let harness = harness_repeats(HarnessMode::Anchor, 1, None, None);
+        let harness = harness_repeats(HarnessMode::Anchor, 1, None, None, golden());
         for take in &harness.report.takes {
             assert_eq!(
                 take.clock.basis,
@@ -3598,6 +3966,106 @@ mod tests {
             let truth = harness.golden.sources_m[&position.source_id];
             let fit = position.position_m.expect("anchor ranges solve");
             assert!(distance_meter(fit, truth) < 0.02);
+        }
+    }
+
+    #[test]
+    fn inverse_session_solves_microphones_from_surveyed_sources() {
+        // Pure inverse session: every source surveyed, no microphone
+        // surveyed. Forward rows deplete (no anchors) while every
+        // microphone column solves against the five surveyed sources.
+        let mut harness = harness_rich(HarnessMode::Loopback);
+        let source_truth = harness.golden.sources_m.clone();
+        for source in &mut harness.report.plan.sources {
+            source.position_m = source_truth.get(&source.id).copied();
+            source.position_uncertainty_mm = Some(0.1);
+        }
+        for mic in &mut harness.report.plan.microphones {
+            mic.position_m = None;
+            mic.position_uncertainty_mm = None;
+        }
+        let localized = localize_session(
+            &harness.report,
+            harness.raw_root.path(),
+            harness.output.path(),
+            &harness.fits,
+        );
+        assert_eq!(localized.mode, LocalizationMode::LoopbackReferenced);
+        // Ranges need no positions: the full matrix still publishes.
+        for row in &localized.ranges {
+            for cell in &row.cells {
+                let key = format!("{}/{}", row.source_id, cell.microphone_id);
+                let expected = harness.golden.expected_ranges_m[&key];
+                let distance = cell.distance_m.unwrap_or(f64::NAN);
+                assert!(
+                    (distance - expected).abs() < 0.002,
+                    "{key}: got {distance}, want {expected}"
+                );
+            }
+        }
+        // Forward solves cannot run without surveyed microphones.
+        for position in &localized.sources {
+            assert_eq!(position.position_m, None);
+            assert_eq!(position.reason.as_deref(), Some("insufficient_ranges"));
+        }
+        // Every microphone solves against the surveyed sources.
+        assert_eq!(localized.microphones.len(), 6);
+        for microphone in &localized.microphones {
+            let truth = harness.golden.microphones_m[&microphone.microphone_id];
+            let fit = microphone.position_m.expect("inverse column solves");
+            let error = distance_meter(fit, truth);
+            assert!(error < 0.02, "{} error {error}", microphone.microphone_id);
+            assert_eq!(microphone.reason, None);
+            assert!(!microphone.mirror_ambiguous);
+            // Five sources leave one spare for leave-one-out.
+            assert!(microphone.loo_worst_source.is_some());
+        }
+        let lines = localization_summary_lines(&localized);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("mic mic-0 position: ["))
+        );
+    }
+
+    #[test]
+    fn mixed_session_solves_forward_and_inverse_together() {
+        // Four surveyed microphones anchor the forward solves; the two
+        // remaining microphones solve inversely against surveyed
+        // sources. Surveyed microphones are anchors, never estimates.
+        let mut harness = harness_rich(HarnessMode::Loopback);
+        let source_truth = harness.golden.sources_m.clone();
+        for source in &mut harness.report.plan.sources {
+            source.position_m = source_truth.get(&source.id).copied();
+            source.position_uncertainty_mm = Some(0.1);
+        }
+        for mic in harness.report.plan.microphones.iter_mut().skip(4) {
+            mic.position_m = None;
+            mic.position_uncertainty_mm = None;
+        }
+        let localized = localize_session(
+            &harness.report,
+            harness.raw_root.path(),
+            harness.output.path(),
+            &harness.fits,
+        );
+        assert_eq!(localized.mode, LocalizationMode::LoopbackReferenced);
+        for position in &localized.sources {
+            let truth = harness.golden.sources_m[&position.source_id];
+            let fit = position.position_m.expect("forward row solves");
+            assert!(distance_meter(fit, truth) < 0.02);
+            // Surveyed sources score their forward estimates.
+            assert!(position.declared_error_m.is_some_and(|error| error < 0.02));
+        }
+        for microphone in &localized.microphones {
+            if microphone.microphone_id == "mic-4" || microphone.microphone_id == "mic-5" {
+                let truth = harness.golden.microphones_m[&microphone.microphone_id];
+                let fit = microphone.position_m.expect("inverse column solves");
+                assert!(distance_meter(fit, truth) < 0.02);
+            } else {
+                assert_eq!(microphone.position_m, None);
+                assert_eq!(microphone.reason.as_deref(), Some("surveyed_anchor"));
+            }
         }
     }
 
@@ -3882,7 +4350,26 @@ mod tests {
         let lines = localization_readiness(&plan);
         assert!(lines[0].contains("2 microphones"));
         assert!(lines[0].contains("relative-only"));
-        assert!(lines.iter().any(|line| line.contains("2/4 microphones")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("2/4 surveyed microphones"))
+        );
+        plan.microphones[0].position_m = None;
+        plan.microphones[0].position_uncertainty_mm = None;
+        let lines = localization_readiness(&plan);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("1/2 microphones unsurveyed"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("1/4 surveyed microphones"))
+        );
+        plan.microphones[0].position_m = Some([0.0, 0.0, 1.0]);
+        plan.microphones[0].position_uncertainty_mm = Some(0.1);
         let template = plan.microphones[0].clone();
         plan.microphones = [
             [0.0, 0.0, 1.1],
@@ -3896,7 +4383,7 @@ mod tests {
             let mut microphone = template.clone();
             microphone.id = format!("mic-{channel}");
             microphone.input_channel = channel as u16;
-            microphone.position_m = *position;
+            microphone.position_m = Some(*position);
             microphone
         })
         .collect();
@@ -3957,6 +4444,7 @@ mod tests {
                 },
             ],
             issues: Vec::new(),
+            microphones: Vec::new(),
         };
         let lines = localization_summary_lines(&report);
         assert_eq!(lines.len(), 5);
@@ -3964,5 +4452,49 @@ mod tests {
         assert!(lines[2].contains("rms 3.0 mm"));
         assert!(lines[2].contains("mirror-ambiguous"));
         assert!(lines[4].contains("refused (solve_failed)"));
+    }
+
+    #[test]
+    fn summary_lines_show_microphones_only_past_survey() {
+        let anchor = |id: &str| MicPosition {
+            microphone_id: id.into(),
+            position_m: None,
+            sigma_m: None,
+            rms_residual_m: None,
+            gdop: None,
+            mirror_ambiguous: false,
+            declared_error_m: None,
+            loo_max_residual_m: None,
+            loo_worst_source: None,
+            loo_max_shift_m: None,
+            reason: Some("surveyed_anchor".into()),
+        };
+        let skeleton = |microphones: Vec<MicPosition>| LocalizationReport {
+            mode: LocalizationMode::LoopbackReferenced,
+            sound_speed_m_s: 343.0,
+            sound_speed_uncertainty_m_s: 0.5,
+            sound_speed_source: "plan".into(),
+            pooled_skew_ppm: None,
+            mic_bias_correction_m: 0.0,
+            ranges: Vec::new(),
+            sources: Vec::new(),
+            microphones,
+            issues: Vec::new(),
+        };
+        // All surveyed: no microphone lines (Phase 3 output unchanged).
+        let lines = localization_summary_lines(&skeleton(vec![anchor("mic-0"), anchor("mic-1")]));
+        assert_eq!(lines.len(), 1);
+        // One unsurveyed microphone: every mic gets a line.
+        let mut estimated = anchor("mic-1");
+        estimated.position_m = Some([0.1, 0.2, 1.0]);
+        estimated.sigma_m = Some([0.01, 0.01, 0.02]);
+        estimated.rms_residual_m = Some(0.002);
+        estimated.gdop = Some(1.8);
+        estimated.reason = None;
+        let lines = localization_summary_lines(&skeleton(vec![anchor("mic-0"), estimated]));
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].contains("mic mic-0 position: refused (surveyed_anchor)"));
+        assert!(lines[2].contains("mic mic-1 position: [0.100, 0.200, 1.000]"));
+        assert!(lines[2].contains("rms 2.0 mm"));
     }
 }

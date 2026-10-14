@@ -37,8 +37,8 @@ fn fixture() -> (Golden, RawCaptureManifest, Vec<f32>, Vec<f32>) {
         .iter_mut()
         .zip(golden.microphone_positions_m)
     {
-        mic.position_m = position;
-        mic.position_uncertainty_mm = 0.1;
+        mic.position_m = Some(position);
+        mic.position_uncertainty_mm = Some(0.1);
     }
     plan.timing_reference = Some(CaptureTimingReference {
         output_channel: 0,

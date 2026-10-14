@@ -163,15 +163,17 @@ fn analyze_source(
     high_hz = high_hz.min(25_000.0 / timing_bound_us);
     // C5 uses 343 m/s internally. Scale geometry to preserve surveyed travel times.
     let scale = math_audio_dsp::capture_array::SPEED_OF_SOUND_M_S / reference.sound_speed_m_s;
-    let array = MicArray::new(
-        report
-            .plan
-            .microphones
-            .iter()
-            .map(|mic| mic.position_m.map(|coordinate| coordinate * scale))
-            .collect(),
-        f64::from(report.plan.sample_rate_hz),
-    )?;
+    let mut geometry = Vec::with_capacity(report.plan.microphones.len());
+    for mic in &report.plan.microphones {
+        let Some(position) = mic.position_m else {
+            return Err(format!(
+                "reflection analysis needs surveyed microphone positions; {} is unsurveyed",
+                mic.id
+            ));
+        };
+        geometry.push(position.map(|coordinate| coordinate * scale));
+    }
+    let array = MicArray::new(geometry, f64::from(report.plan.sample_rate_hz))?;
     let config = math_rir::SsirConfig::new(f64::from(report.plan.sample_rate_hz));
     let events = math_rir::analyze_rir(&channels[0], &config);
     let direct = events

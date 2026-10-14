@@ -233,35 +233,42 @@ pub(crate) fn fit_capture_clock(
             .find(|mic| mic.id == take.microphone_id),
     ) && manifest.timing_reference_output_channel == Some(emitter.output_channel)
     {
-        let distance = microphone
-            .position_m
-            .iter()
-            .zip(emitter.position_m)
-            .map(|(a, b)| (a - b).powi(2))
-            .sum::<f64>()
-            .sqrt();
-        let speed = emitter.sound_speed_m_s;
-        let minimum_speed = speed - emitter.sound_speed_uncertainty_m_s;
-        if distance.is_finite() && minimum_speed > 0.0 && speed.is_finite() {
-            skew.offset_samples -= distance / speed * config.sample_rate_hz * ratio;
-            let geometry_bound = ((microphone.position_uncertainty_mm
-                + emitter.position_uncertainty_mm)
-                / 1000.0
-                / minimum_speed
-                + distance * emitter.sound_speed_uncertainty_m_s / (speed * minimum_speed))
-                * 1e6;
-            provenance.residual_uncertainty_us = finite(marker_bound + geometry_bound);
-            provenance.basis = CaptureClockBasis::FixedAcousticReference;
-            provenance.reference_id = Some(format!(
-                "{}:{}",
-                take.output_device_id, emitter.output_channel
-            ));
-            provenance.magnitude_only_reason = match provenance.residual_uncertainty_us {
-                Some(bound) if (0.0..COHERENT_TIMING_LIMIT_US).contains(&bound) => None,
-                _ => Some(format!(
-                    "timing uncertainty is unavailable or exceeds {COHERENT_TIMING_LIMIT_US} us"
-                )),
-            };
+        // An unsurveyed microphone cannot anchor the emitter geometry;
+        // the take keeps its non-acoustic basis, as with non-finite
+        // geometry today.
+        let surveyed = match (microphone.position_m, microphone.position_uncertainty_mm) {
+            (Some(position), Some(uncertainty)) => Some((position, uncertainty)),
+            _ => None,
+        };
+        if let Some((mic_position, mic_uncertainty_mm)) = surveyed {
+            let distance = mic_position
+                .iter()
+                .zip(emitter.position_m)
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let speed = emitter.sound_speed_m_s;
+            let minimum_speed = speed - emitter.sound_speed_uncertainty_m_s;
+            if distance.is_finite() && minimum_speed > 0.0 && speed.is_finite() {
+                skew.offset_samples -= distance / speed * config.sample_rate_hz * ratio;
+                let geometry_bound = ((mic_uncertainty_mm + emitter.position_uncertainty_mm)
+                    / 1000.0
+                    / minimum_speed
+                    + distance * emitter.sound_speed_uncertainty_m_s / (speed * minimum_speed))
+                    * 1e6;
+                provenance.residual_uncertainty_us = finite(marker_bound + geometry_bound);
+                provenance.basis = CaptureClockBasis::FixedAcousticReference;
+                provenance.reference_id = Some(format!(
+                    "{}:{}",
+                    take.output_device_id, emitter.output_channel
+                ));
+                provenance.magnitude_only_reason = match provenance.residual_uncertainty_us {
+                    Some(bound) if (0.0..COHERENT_TIMING_LIMIT_US).contains(&bound) => None,
+                    _ => Some(format!(
+                        "timing uncertainty is unavailable or exceeds {COHERENT_TIMING_LIMIT_US} us"
+                    )),
+                };
+            }
         }
     }
     provenance.offset_samples = finite(skew.offset_samples);

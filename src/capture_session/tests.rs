@@ -21,7 +21,9 @@ fn supported_microphone_counts_round_trip() {
             let mut mic = value.microphones[0].clone();
             mic.id = format!("mic-{index}");
             mic.device = format!("device-{index}");
-            mic.position_m[0] = index as f64;
+            if let Some(position) = mic.position_m.as_mut() {
+                position[0] = index as f64;
+            }
             value.microphones.push(mic);
         }
         let session = value.validate().unwrap();
@@ -34,7 +36,9 @@ fn supported_microphone_counts_round_trip() {
         let mut mic = value.microphones[0].clone();
         mic.id = format!("mic-{index}");
         mic.device = format!("device-{index}");
-        mic.position_m[0] = index as f64;
+        if let Some(position) = mic.position_m.as_mut() {
+            position[0] = index as f64;
+        }
         value.microphones.push(mic);
     }
     assert!(value.validate().is_err());
@@ -56,8 +60,12 @@ fn invalid_plans_fail_before_hardware_access() {
         |p| p.microphones[0].calibration_file.clear(),
         |p| p.microphones[0].gain_db = f64::NAN,
         |p| p.microphones[0].input_channel = 64,
-        |p| p.microphones[0].position_m[0] = f64::INFINITY,
-        |p| p.microphones[0].position_uncertainty_mm = -1.0,
+        |p| {
+            if let Some(position) = p.microphones[0].position_m.as_mut() {
+                position[0] = f64::INFINITY;
+            }
+        },
+        |p| p.microphones[0].position_uncertainty_mm = Some(-1.0),
         |p| p.sources.clear(),
         |p| p.sources[0].output_channel = 64,
         |p| p.sources.push(p.sources[0].clone()),
@@ -475,13 +483,34 @@ fn repeat_count_keeps_the_total_take_inventory_bounded() {
 fn compact_geometry_requires_precise_distinct_positions() {
     let mut value = plan();
     value.geometry = CaptureGeometry::Compact;
-    value.microphones[1].position_m = [0.05, 0.0, 0.0];
+    value.microphones[1].position_m = Some([0.05, 0.0, 0.0]);
     assert!(value.clone().validate().is_ok());
-    value.microphones[1].position_uncertainty_mm = 1.01;
+    value.microphones[1].position_uncertainty_mm = Some(1.01);
     assert!(value.clone().validate().is_err());
-    value.microphones[1].position_uncertainty_mm = 1.0;
+    value.microphones[1].position_uncertainty_mm = Some(1.0);
     value.microphones[1].position_m = value.microphones[0].position_m;
     assert!(value.validate().is_err());
+}
+
+#[test]
+fn unsurveyed_microphones_validate_as_a_pair() {
+    // Both absent: an inverse/joint session plan is valid.
+    let mut value = plan();
+    for mic in &mut value.microphones {
+        mic.position_m = None;
+        mic.position_uncertainty_mm = None;
+    }
+    assert!(value.clone().validate().is_ok());
+    // Split pairs refuse, mirroring the source rule.
+    value.microphones[0].position_m = Some([0.0, 0.0, 1.0]);
+    assert!(value.clone().validate().is_err());
+    value.microphones[0].position_m = None;
+    value.microphones[0].position_uncertainty_mm = Some(1.0);
+    assert!(value.clone().validate().is_err());
+    // Two unsurveyed compact mics are not duplicates of each other.
+    value.microphones[0].position_uncertainty_mm = None;
+    value.geometry = CaptureGeometry::Compact;
+    assert!(value.validate().is_ok());
 }
 
 #[test]

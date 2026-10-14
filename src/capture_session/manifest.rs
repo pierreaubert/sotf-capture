@@ -447,6 +447,17 @@ pub(crate) fn take_provenance(
         .iter()
         .find(|entry| entry.microphone_id == mic.id)
         .ok_or_else(|| format!("{}: calibration identity is unavailable", mic.id))?;
+    // The frozen autoeq handoff requires surveyed geometry per take; an
+    // unsurveyed microphone refuses here and the manifest degrades to
+    // pending_processing while the run (including localization) continues.
+    let (Some(position_m), Some(position_uncertainty_mm)) =
+        (mic.position_m, mic.position_uncertainty_mm)
+    else {
+        return Err(format!(
+            "{}: RoomEQ handoff needs a surveyed microphone position",
+            mic.id
+        ));
+    };
     Ok(CaptureTakeProvenance {
         seat_id: None,
         microphone_id: mic.id.clone(),
@@ -467,8 +478,8 @@ pub(crate) fn take_provenance(
             CalibrationOrientation::NinetyDegrees => "ninety_degrees",
         }
         .into(),
-        position_m: mic.position_m,
-        position_uncertainty_mm: mic.position_uncertainty_mm,
+        position_m,
+        position_uncertainty_mm,
         preserves_acoustic_delay: take.clock.basis == CaptureClockBasis::FixedAcousticReference,
         quality_passed: take
             .analysis
