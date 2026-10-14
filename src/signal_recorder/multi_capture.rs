@@ -13,9 +13,9 @@ use std::time::{Duration, Instant};
 use super::CancelFlag;
 use super::measurement::measurement_sample_format_rank;
 
-// Four microphones plus one electrical loopback is the capture protocol limit.
+// Thirty-two microphones plus one electrical loopback is the capture limit.
 // Grouped input frames fit in a fixed array so callbacks never allocate.
-const MAX_INPUTS: usize = 5;
+const MAX_INPUTS: usize = 33;
 // Bound configuration-driven memory (at most 320 MB for planar capture).
 const MAX_FRAMES: usize = 16_000_000;
 const START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -46,7 +46,7 @@ pub struct CaptureOutputSegment {
 /// One source stimulus recorded simultaneously on every requested input.
 #[derive(Debug)]
 pub struct MultiCaptureRequest {
-    /// Two to five input routes (four microphones plus an optional loopback), ordered as the returned recordings.
+    /// Two to thirty-three input routes (up to thirty-two microphones plus an optional loopback), ordered as the returned recordings.
     pub inputs: Vec<CaptureInput>,
     /// Exact playback device ID or unique enumerated name.
     pub output_device: String,
@@ -85,7 +85,7 @@ struct InputGroup {
 
 fn group_inputs(request: &MultiCaptureRequest) -> Result<Vec<InputGroup>, String> {
     if !(2..=MAX_INPUTS).contains(&request.inputs.len()) {
-        return Err("simultaneous capture requires two to five inputs (up to four microphones plus loopback)".into());
+        return Err("simultaneous capture requires two to thirty-three inputs (up to thirty-two microphones plus loopback)".into());
     }
     if !(16_001..=384_000).contains(&request.sample_rate_hz)
         || request.stimulus.is_empty()

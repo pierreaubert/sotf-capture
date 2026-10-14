@@ -582,13 +582,10 @@ fn record_with(
                     })
                     .collect();
                 // The loopback rides the same capture call so it shares the
-                // take timeline; CTC assembly aligns RoomEQ to it later.
-                let loopback_index = if session.plan().ctc.is_some() {
-                    let route = session
-                        .plan()
-                        .loopback
-                        .as_ref()
-                        .ok_or("ctc requires a plan loopback route")?;
+                // take timeline; CTC assembly aligns RoomEQ to it later and
+                // localization reads its electrical latency from it. Record
+                // whenever the route is declared, not only for CTC sessions.
+                let loopback_index = if let Some(route) = session.plan().loopback.as_ref() {
                     inputs.push(CaptureInput {
                         device: route.device.clone(),
                         channel: route.input_channel,

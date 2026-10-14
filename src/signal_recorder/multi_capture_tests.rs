@@ -33,7 +33,7 @@ fn aggregate_channels_share_one_stream_but_usb_devices_do_not() {
 }
 
 #[test]
-fn four_microphones_and_loopback_share_one_stream_and_preserve_all_samples() {
+fn many_microphones_and_loopback_share_one_stream_and_preserve_all_samples() {
     let mut request = request();
     request.inputs = [3, 1, 0, 2, 7]
         .into_iter()
@@ -54,11 +54,21 @@ fn four_microphones_and_loopback_share_one_stream_and_preserve_all_samples() {
         &mut producer,
         &failed,
     );
-    assert_eq!(consumer.pop().unwrap(), [0.4, 0.2, 0.1, 0.3, 0.8]);
+    let frame = consumer.pop().unwrap();
+    assert_eq!(frame[..5], [0.4, 0.2, 0.1, 0.3, 0.8]);
+    assert!(frame[5..].iter().all(|sample| *sample == 0.0));
     assert!(!failed.load(Ordering::Relaxed));
+    request
+        .inputs
+        .extend((8_u16..36).map(|channel| CaptureInput {
+            device: "Fireface".into(),
+            channel,
+        }));
+    assert_eq!(request.inputs.len(), 33);
+    assert!(group_inputs(&request).is_ok());
     request.inputs.push(CaptureInput {
         device: "Fireface".into(),
-        channel: 8,
+        channel: 63,
     });
     assert!(group_inputs(&request).is_err());
 }
@@ -119,7 +129,9 @@ fn fireface_native_stream_width_supports_low_numbered_routes() {
     let mut input = [0.0_f32; 94];
     input[..5].copy_from_slice(&[0.1, 0.2, 0.3, 0.4, 0.5]);
     capture_frames(&input, 94, &[0, 1, 2, 3, 4], &mut producer, &failed);
-    assert_eq!(consumer.pop().unwrap(), [0.1, 0.2, 0.3, 0.4, 0.5]);
+    let frame = consumer.pop().unwrap();
+    assert_eq!(frame[..5], [0.1, 0.2, 0.3, 0.4, 0.5]);
+    assert!(frame[5..].iter().all(|sample| *sample == 0.0));
 
     let mut output = [1.0_f32; 188];
     let cursor = AtomicUsize::new(0);
@@ -148,9 +160,11 @@ fn input_callback_preserves_routing_and_variable_block_boundaries() {
         &failed,
     );
     capture_frames(&[0.7, 0.8, 0.9], 3, &[2, 0], &mut producer, &failed);
-    assert_eq!(consumer.pop().unwrap(), [0.3, 0.1, 0.0, 0.0, 0.0]);
-    assert_eq!(consumer.pop().unwrap(), [0.6, 0.4, 0.0, 0.0, 0.0]);
-    assert_eq!(consumer.pop().unwrap(), [0.9, 0.7, 0.0, 0.0, 0.0]);
+    for expected in [[0.3, 0.1], [0.6, 0.4], [0.9, 0.7]] {
+        let frame = consumer.pop().unwrap();
+        assert_eq!(frame[..2], expected);
+        assert!(frame[2..].iter().all(|sample| *sample == 0.0));
+    }
     assert!(consumer.pop().is_err());
     assert!(!failed.load(Ordering::Relaxed));
 }
@@ -170,7 +184,9 @@ fn integer_input_is_converted_without_changing_channel_order() {
     let (mut producer, mut consumer) = rtrb::RingBuffer::new(1);
     let failed = AtomicBool::new(false);
     capture_frames(&[i16::MIN, 0, 16_384], 3, &[2, 0], &mut producer, &failed);
-    assert_eq!(consumer.pop().unwrap(), [0.5, -1.0, 0.0, 0.0, 0.0]);
+    let frame = consumer.pop().unwrap();
+    assert_eq!(frame[..2], [0.5, -1.0]);
+    assert!(frame[2..].iter().all(|sample| *sample == 0.0));
     assert!(!failed.load(Ordering::Relaxed));
 }
 

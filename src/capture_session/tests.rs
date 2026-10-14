@@ -1,6 +1,5 @@
 #![expect(
     clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
     reason = "Synthetic fixtures use bounded sample counts and intentionally quantized audio; exact comparisons verify unchanged settings and samples."
 )]
 
@@ -11,8 +10,12 @@ fn plan() -> CaptureSessionPlan {
 }
 
 #[test]
-fn two_and_four_microphone_plans_round_trip() {
-    for count in [2, 4] {
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Microphone indices below 33 convert to f64 survey coordinates exactly."
+)]
+fn supported_microphone_counts_round_trip() {
+    for count in [2_usize, 4, 8, 32] {
         let mut value = plan();
         for index in 2..count {
             let mut mic = value.microphones[0].clone();
@@ -26,6 +29,15 @@ fn two_and_four_microphone_plans_round_trip() {
         let restored: CaptureSessionPlan = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.validate().unwrap().plan().microphones.len(), count);
     }
+    let mut value = plan();
+    for index in 2..33_usize {
+        let mut mic = value.microphones[0].clone();
+        mic.id = format!("mic-{index}");
+        mic.device = format!("device-{index}");
+        mic.position_m[0] = index as f64;
+        value.microphones.push(mic);
+    }
+    assert!(value.validate().is_err());
 }
 
 #[test]
@@ -234,6 +246,44 @@ fn invalid_plans_fail_before_hardware_access() {
                 },
             });
         },
+        |p| p.sources[0].position_m = Some([0.0, 0.0, f64::NAN]),
+        |p| {
+            p.sources[0].position_m = Some([1.0, 2.0, 3.0]);
+            p.sources[0].position_uncertainty_mm = None;
+        },
+        |p| {
+            p.sources[0].position_m = None;
+            p.sources[0].position_uncertainty_mm = Some(5.0);
+        },
+        |p| {
+            p.sources[0].position_m = Some([1.0, 2.0, 3.0]);
+            p.sources[0].position_uncertainty_mm = Some(-1.0);
+        },
+        |p| p.sources[0].source_delay_calibration_ms = Some(f64::NAN),
+        |p| p.sources[0].source_delay_calibration_ms = Some(-0.5),
+        |p| p.sources[0].source_delay_calibration_ms = Some(100.5),
+        |p| {
+            p.sound_speed = Some(CaptureSoundSpeed {
+                m_s: 200.0,
+                uncertainty_m_s: 1.0,
+                air_temperature_c: None,
+            });
+        },
+        |p| {
+            p.sound_speed = Some(CaptureSoundSpeed {
+                m_s: 343.0,
+                uncertainty_m_s: 343.0,
+                air_temperature_c: None,
+            });
+        },
+        |p| {
+            p.sound_speed = Some(CaptureSoundSpeed {
+                m_s: 343.0,
+                uncertainty_m_s: 1.0,
+                air_temperature_c: Some(f64::NAN),
+            });
+        },
+        |p| p.localization_calibration_file = Some(PathBuf::new()),
     ];
     for (index, change) in cases.iter().enumerate() {
         let mut value = plan();
@@ -406,6 +456,9 @@ fn repeat_count_keeps_the_total_take_inventory_bounded() {
         value.sources.push(CaptureSource {
             id: format!("source-{index}"),
             output_channel: index as u16,
+            position_m: None,
+            position_uncertainty_mm: None,
+            source_delay_calibration_ms: None,
         });
     }
     value.repeat_count = 9;

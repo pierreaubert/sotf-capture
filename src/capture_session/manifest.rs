@@ -600,6 +600,7 @@ mod tests {
             ctc_files: Vec::new(),
             recording_manifest: None,
             reflection_reports: Vec::new(),
+            localization_report: None,
         }
     }
 

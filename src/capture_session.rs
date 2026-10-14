@@ -21,6 +21,8 @@ pub mod ctc;
 #[cfg(not(target_os = "ios"))]
 pub mod handoff;
 #[cfg(not(target_os = "ios"))]
+pub mod localization;
+#[cfg(not(target_os = "ios"))]
 pub mod manifest;
 #[cfg(not(target_os = "ios"))]
 mod phase;
@@ -109,6 +111,18 @@ pub struct CaptureSource {
     pub id: String,
     /// Zero-based hardware output channel.
     pub output_channel: u16,
+    /// Surveyed acoustic-centre position in meters, when taped or lasered.
+    /// Used only to score estimated positions and for the inverse
+    /// microphone-localization problem; never an input to speaker solves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_m: Option<[f64; 3]>,
+    /// Upper bound on surveyed-position error, in millimeters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_uncertainty_mm: Option<f64>,
+    /// Measured electronic delay through this source's chain in
+    /// milliseconds (amplifier/DSP latency), subtracted from ranges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_delay_calibration_ms: Option<f64>,
 }
 
 /// A fixed acoustic timing emitter surveyed in the microphone coordinate frame.
@@ -125,6 +139,23 @@ pub struct CaptureTimingReference {
     pub sound_speed_m_s: f64,
     /// Upper bound on sound-speed error in meters per second.
     pub sound_speed_uncertainty_m_s: f64,
+}
+
+/// Session speed of sound for acoustic delay-to-distance conversion.
+///
+/// Used by localization when no timing reference declares one. The
+/// optional air temperature documents the estimate's basis; it never
+/// overrides an explicit `m_s` value.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureSoundSpeed {
+    /// Measured or estimated speed of sound in meters per second.
+    pub m_s: f64,
+    /// Upper bound on sound-speed error in meters per second.
+    pub uncertainty_m_s: f64,
+    /// Air temperature in Celsius at capture time, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub air_temperature_c: Option<f64>,
 }
 
 /// Physical room dimensions in meters for `RoomEQ` Schroeder handling.
@@ -263,7 +294,7 @@ pub struct CaptureSessionPlan {
     pub sample_rate_hz: u32,
     /// Explicit output device selector.
     pub output_device: String,
-    /// Two to four simultaneously recorded microphones.
+    /// Two to thirty-two simultaneously recorded microphones.
     pub microphones: Vec<CaptureMicrophone>,
     /// Sources played sequentially in this order.
     pub sources: Vec<CaptureSource>,
@@ -277,6 +308,14 @@ pub struct CaptureSessionPlan {
     /// Without this declaration the first source channel emits timing chirps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing_reference: Option<CaptureTimingReference>,
+    /// Session speed of sound for delay-to-distance conversion.
+    /// Ignored when a timing reference already declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound_speed: Option<CaptureSoundSpeed>,
+    /// Bench calibration file for localization (§5.4), resolved relative
+    /// to the plan. Absent means uncalibrated interface/microphone bias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub localization_calibration_file: Option<PathBuf>,
     /// Physical room dimensions in meters, projected to `RoomEQ` when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_dimensions: Option<RoomDimensions>,
@@ -349,8 +388,8 @@ impl CaptureSessionPlan {
         if !(1..=16).contains(&self.repeat_count) {
             return Err(reject("repeat count must be in 1..=16"));
         }
-        if !(2..=4).contains(&self.microphones.len()) {
-            return Err(reject("a session requires two to four microphones"));
+        if !(2..=32).contains(&self.microphones.len()) {
+            return Err(reject("a session requires two to thirty-two microphones"));
         }
         let mut ids = HashSet::new();
         let mut routes = HashSet::new();
@@ -407,6 +446,28 @@ impl CaptureSessionPlan {
             {
                 return Err(reject(
                     "source identities must be nonempty and unique, with unique output channels below 64",
+                ));
+            }
+            let position_valid = match (source.position_m, source.position_uncertainty_mm) {
+                (None, None) => true,
+                (Some(position), Some(uncertainty)) => {
+                    position.iter().all(|value| value.is_finite())
+                        && uncertainty.is_finite()
+                        && uncertainty >= 0.0
+                }
+                (Some(_), None) | (None, Some(_)) => false,
+            };
+            if !position_valid {
+                return Err(reject(
+                    "source surveyed position and uncertainty must both be present or both absent, finite, with nonnegative uncertainty",
+                ));
+            }
+            if source
+                .source_delay_calibration_ms
+                .is_some_and(|delay| !delay.is_finite() || !(0.0..=100.0).contains(&delay))
+            {
+                return Err(reject(
+                    "source delay calibration must be finite and within [0, 100] ms",
                 ));
             }
         }
@@ -525,6 +586,30 @@ impl CaptureSessionPlan {
                     "invalid timing-reference route, geometry, or sound-speed uncertainty",
                 ));
             }
+        }
+        if let Some(speed) = &self.sound_speed {
+            if !speed.m_s.is_finite()
+                || !(250.0..=400.0).contains(&speed.m_s)
+                || !speed.uncertainty_m_s.is_finite()
+                || speed.uncertainty_m_s < 0.0
+                || speed.uncertainty_m_s >= speed.m_s
+                || speed
+                    .air_temperature_c
+                    .is_some_and(|temperature| !temperature.is_finite())
+            {
+                return Err(reject(
+                    "sound speed requires a finite value in 250..=400 m/s, uncertainty in [0, value), and finite temperature",
+                ));
+            }
+        }
+        if self
+            .localization_calibration_file
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(reject(
+                "localization calibration file must be nonempty when supplied",
+            ));
         }
         if !sweep.duration_secs.is_finite()
             || sweep.duration_secs <= 0.0

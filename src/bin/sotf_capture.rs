@@ -829,6 +829,10 @@ fn plan_validate(plan_path: &std::path::Path) -> Result<(), String> {
         "{}",
         sotf_capture::capture_session::timing_emitter_summary(&session)
     );
+    for line in sotf_capture::capture_session::localization::localization_readiness(session.plan())
+    {
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -907,6 +911,16 @@ fn plan_process(
     );
     for line in sotf_capture::capture_session::clock::io::clock_skew_lines(&report) {
         println!("{line}");
+    }
+    if let Some(localization) = report.localization_report.as_ref() {
+        for line in
+            sotf_capture::capture_session::localization::localization_summary_lines(localization)
+        {
+            println!("{line}");
+        }
+        for issue in &localization.issues {
+            eprintln!("warning: localization: {issue}");
+        }
     }
     for warning in sotf_capture::capture_session::clock::io::clock_skew_warnings(&report) {
         eprintln!("warning: clock skew: {warning}");

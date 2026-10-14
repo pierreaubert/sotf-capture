@@ -9,8 +9,8 @@
 use super::record::{RawCaptureManifest, RawCaptureTake};
 use math_audio_dsp::capture_resample::{RESAMPLE_PHASES, resample_to_common_clock};
 use math_audio_dsp::capture_tdoa::{
-    MAX_PLAUSIBLE_SKEW_PPM, TdoaConfig, estimate_chirp_tdoa, estimate_clock_skew,
-    post_correction_uncertainty_us,
+    ClockSkew, MAX_PLAUSIBLE_SKEW_PPM, TdoaConfig, TdoaEstimate, estimate_chirp_tdoa,
+    estimate_clock_skew, post_correction_uncertainty_us,
 };
 use serde::{Deserialize, Serialize};
 
@@ -76,12 +76,29 @@ fn finite(value: f64) -> Option<f64> {
     value.is_finite().then_some(value)
 }
 
-/// Fit both markers and correct one take onto its declared reference clock.
+/// Affine clock fit for one take, independent of resampling.
 ///
-/// Invalid or degraded markers return a magnitude-only result, not an error that
-/// discards the raw recording. `manifest` and wave lengths are checked by the
-/// folder-processing boundary before this deterministic operation.
-#[must_use]
+/// The same fit that [`correct_capture_clock`] uses, exposed so later
+/// stages (localization) can reuse the fitted lags and mapping without
+/// re-running marker correlation on resampled audio or duplicating the
+/// search-window logic. The fit is valid even when resampling later
+/// refuses the mapping; consumers needing corrected audio must still
+/// check `correction_applied` in the provenance.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CaptureClockFit {
+    /// Start-chirp lag referenced to the stimulus clock.
+    pub first: TdoaEstimate,
+    /// Clock mapping with the offset at stimulus sample zero.
+    pub skew: ClockSkew,
+}
+
+/// Fit both markers without resampling the take.
+///
+/// Runs the identical estimation as [`correct_capture_clock`] and returns
+/// the provenance plus the reusable fit. `None` carries the same refusal
+/// provenance the resampling entry point returns, so behavior there is
+/// unchanged: invalid or degraded markers yield a magnitude-only result,
+/// never an error that discards the raw recording.
 #[expect(
     clippy::too_many_lines,
     reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
@@ -92,12 +109,12 @@ fn finite(value: f64) -> Option<f64> {
     clippy::cast_sign_loss,
     reason = "Capture lengths are bounded to 16 million samples; search windows are nonnegative and clamped to the recording."
 )]
-pub fn correct_capture_clock(
+pub(crate) fn fit_capture_clock(
     manifest: &RawCaptureManifest,
     take: &RawCaptureTake,
     recorded: &[f32],
     reference: &[f32],
-) -> CorrectedCaptureClock {
+) -> (CaptureClockProvenance, Option<CaptureClockFit>) {
     let mut provenance = CaptureClockProvenance {
         device_id: take.device_id.clone(),
         offset_samples: None,
@@ -112,10 +129,10 @@ pub fn correct_capture_clock(
         max_abs_skew_ppm: MAX_PLAUSIBLE_SKEW_PPM,
         magnitude_only_reason: Some("timing markers did not establish a valid clock fit".into()),
     };
-    let refused = |provenance| CorrectedCaptureClock {
-        provenance,
-        samples: None,
-    };
+    let refused =
+        |provenance: CaptureClockProvenance| -> (CaptureClockProvenance, Option<CaptureClockFit>) {
+            (provenance, None)
+        };
     let layout = &manifest.stimulus;
     let Some(spacing) = layout
         .end_chirp_offset
@@ -169,11 +186,11 @@ pub fn correct_capture_clock(
             Some("end timing chirp is missing, ambiguous, or too weak".into());
         return refused(provenance);
     }
-    let first_lag = math_audio_dsp::capture_tdoa::TdoaEstimate {
+    let first_lag = TdoaEstimate {
         offset_samples: first.offset_samples - layout.start_chirp_offset as f64,
         ..first
     };
-    let second_lag = math_audio_dsp::capture_tdoa::TdoaEstimate {
+    let second_lag = TdoaEstimate {
         offset_samples: end_start as f64 + second.offset_samples - layout.end_chirp_offset as f64,
         ..second
     };
@@ -248,17 +265,62 @@ pub fn correct_capture_clock(
         }
     }
     provenance.offset_samples = finite(skew.offset_samples);
-    let Some(samples) = resample_to_common_clock(recorded, &skew, layout.total_samples) else {
+    let fit = CaptureClockFit {
+        first: first_lag,
+        skew,
+    };
+    (provenance, Some(fit))
+}
+
+/// Resample one take onto its fitted reference clock.
+///
+/// Applies the mapping from [`fit_capture_clock`] without re-running
+/// estimation, so the processing pipeline can keep the fit for later
+/// stages (localization) while producing the identical corrected take.
+/// A refused resampling keeps the fit's provenance with an explicit
+/// magnitude-only reason, exactly as before the fit was exposed.
+pub(crate) fn apply_clock_fit(
+    mut provenance: CaptureClockProvenance,
+    fit: Option<CaptureClockFit>,
+    recorded: &[f32],
+    total_samples: usize,
+) -> CorrectedCaptureClock {
+    let Some(fit) = fit else {
+        return CorrectedCaptureClock {
+            provenance,
+            samples: None,
+        };
+    };
+    let Some(samples) = resample_to_common_clock(recorded, &fit.skew, total_samples) else {
         provenance.magnitude_only_reason =
             Some("common-clock resampling refused the fitted mapping".into());
         provenance.residual_uncertainty_us = None;
-        return refused(provenance);
+        return CorrectedCaptureClock {
+            provenance,
+            samples: None,
+        };
     };
     provenance.correction_applied = "resampled".into();
     CorrectedCaptureClock {
         provenance,
         samples: Some(samples),
     }
+}
+
+/// Fit both markers and correct one take onto its declared reference clock.
+///
+/// Invalid or degraded markers return a magnitude-only result, not an error that
+/// discards the raw recording. `manifest` and wave lengths are checked by the
+/// folder-processing boundary before this deterministic operation.
+#[must_use]
+pub fn correct_capture_clock(
+    manifest: &RawCaptureManifest,
+    take: &RawCaptureTake,
+    recorded: &[f32],
+    reference: &[f32],
+) -> CorrectedCaptureClock {
+    let (provenance, fit) = fit_capture_clock(manifest, take, recorded, reference);
+    apply_clock_fit(provenance, fit, recorded, manifest.stimulus.total_samples)
 }
 
 #[cfg(test)]

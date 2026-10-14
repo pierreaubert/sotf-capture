@@ -560,6 +560,43 @@ fn ctc_sessions_record_one_loopback_take_per_source() {
 }
 
 #[test]
+fn declared_loopback_records_takes_without_ctc() {
+    let (root, original) = setup();
+    let mut plan = original.plan().clone();
+    plan.loopback = Some(crate::capture_session::CaptureLoopback {
+        device: plan.microphones[0].device.clone(),
+        input_channel: 7,
+    });
+    assert!(plan.ctc.is_none());
+    let session = plan.validate().unwrap();
+    let output = root.path().join("session");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let manifest = record_with(
+        &session,
+        root.path(),
+        &output,
+        &cancel,
+        |_| {},
+        |request, cancel| {
+            if !request.output_overrides.is_empty() {
+                assert_eq!(request.inputs.len(), 3);
+                assert_eq!(request.inputs[2].channel, 7);
+            }
+            fake_capture(request, cancel)
+        },
+    )
+    .unwrap();
+    assert_eq!(manifest.status, RawCaptureStatus::RawComplete);
+    assert_eq!(manifest.loopback_files.len(), session.plan().sources.len());
+    for loopback in &manifest.loopback_files {
+        assert!(output.join(&loopback.wav_file).is_file());
+        assert!(loopback.samples > 0);
+    }
+    let saved = journal(&output);
+    assert_eq!(saved.loopback_files.len(), session.plan().sources.len());
+}
+
+#[test]
 fn sessions_without_auxiliary_sections_skip_the_runners() {
     let (_root, session) = setup();
     let output = tempfile::tempdir().unwrap();

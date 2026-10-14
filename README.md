@@ -150,7 +150,7 @@ full file):
 
 Rules the validator enforces:
 
-- Two to four microphones, each with a unique id, a unique
+- Two to thirty-two microphones, each with a unique id, a unique
   device/channel route, and its own calibration file resolved relative to
   the plan. Device names must match `sotf-capture devices` output.
 - At least one source; every source gets its own output channel and is

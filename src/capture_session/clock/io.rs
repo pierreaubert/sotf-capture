@@ -1,6 +1,6 @@
 //! File-backed clock processing of saved raw capture journals.
 
-use super::{CaptureClockProvenance, correct_capture_clock};
+use super::CaptureClockProvenance;
 use crate::capture_session::record::{
     CaptureBassAnchorPass, CaptureCalibration, CaptureLoopbackTake, CaptureProbePass,
     RawCaptureManifest, RawCaptureStatus, RawCaptureTake,
@@ -81,9 +81,12 @@ pub struct ClockProcessedManifest {
     /// Per-source arrival candidates and conditional compact-array directions.
     #[serde(default)]
     pub reflection_reports: Vec<crate::capture_session::reflections::CaptureReflectionReport>,
+    /// Session range matrix with its time-origin evidence, when localized.
+    #[serde(default)]
+    pub localization_report: Option<crate::capture_session::localization::LocalizationReport>,
 }
 
-fn artifact(root: &Path, name: &str) -> Result<std::path::PathBuf, String> {
+pub(crate) fn artifact(root: &Path, name: &str) -> Result<std::path::PathBuf, String> {
     if !autoeq::capture_handoff::portable_capture_filename(name) {
         return Err("capture artifact paths must be portable relative filenames".into());
     }
@@ -91,11 +94,16 @@ fn artifact(root: &Path, name: &str) -> Result<std::path::PathBuf, String> {
     if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
         return Err("capture artifact paths must be single relative filenames".into());
     }
+    // Canonicalize both sides so symlinked parents (macOS temporary
+    // directories, user aliases) compare equal instead of false-rejecting.
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve capture directory: {e}"))?;
     let path = root
         .join(name)
         .canonicalize()
         .map_err(|e| format!("cannot resolve capture artifact {name}: {e}"))?;
-    if !path.starts_with(root) || !path.is_file() {
+    if !path.starts_with(&root) || !path.is_file() {
         return Err("capture artifact is outside the session directory or is not a file".into());
     }
     Ok(path)
@@ -114,7 +122,7 @@ fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     Ok(data)
 }
 
-fn read_wave(path: &Path, rate: u32, frames: usize) -> Result<Vec<f32>, String> {
+pub(crate) fn read_wave(path: &Path, rate: u32, frames: usize) -> Result<Vec<f32>, String> {
     if frames == 0 || frames > 16_000_000 {
         return Err("invalid capture wave length".into());
     }
@@ -192,7 +200,7 @@ const CLOCK_SKEW_SEVERE_PPM: f64 = 100.0;
 /// per-take correction assumes the rate is stable within each take, so
 /// wandering rates (UMIK-1 on a noisy USB clock) deserve review even
 /// when every take corrected.
-const CLOCK_SKEW_SPREAD_PPM: f64 = 100.0;
+pub(crate) const CLOCK_SKEW_SPREAD_PPM: f64 = 100.0;
 
 /// One clock-fit line per processed take, in take order.
 #[must_use]
@@ -532,12 +540,15 @@ pub fn process_capture_session_with_options(
         takes: Vec::new(),
         recording_manifest: None,
         reflection_reports: Vec::new(),
+        localization_report: None,
         pending_processing: vec![
             "calibrated_analysis".into(),
             "take_quality".into(),
             "reflection_directions".into(),
+            "localization".into(),
         ],
     };
+    let mut take_fits = Vec::new();
     for (index, take) in manifest.takes.iter().enumerate() {
         // Analyze the retained original-clock snapshot so the imported evidence
         // is bound to these exact samples after the raw directory is moved.
@@ -552,7 +563,15 @@ pub fn process_capture_session_with_options(
             manifest.plan.sample_rate_hz,
             take.samples,
         )?;
-        let corrected = correct_capture_clock(&manifest, take, &samples, &chirp);
+        let (clock_provenance, clock_fit) =
+            super::fit_capture_clock(&manifest, take, &samples, &chirp);
+        take_fits.push(clock_fit);
+        let corrected = super::apply_clock_fit(
+            clock_provenance,
+            clock_fit,
+            &samples,
+            manifest.stimulus.total_samples,
+        );
         let calibration = manifest
             .calibrations
             .iter()
@@ -615,6 +634,15 @@ pub fn process_capture_session_with_options(
     result
         .pending_processing
         .retain(|stage| stage != "reflection_directions");
+    result.localization_report = Some(crate::capture_session::localization::localize_session(
+        &result,
+        &root,
+        output_directory,
+        &take_fits,
+    ));
+    result
+        .pending_processing
+        .retain(|stage| stage != "localization");
     if result.takes.iter().all(|take| {
         take.analysis.as_ref().is_some_and(|analysis| {
             analysis.common_reference.is_some() && analysis.issues.is_empty()

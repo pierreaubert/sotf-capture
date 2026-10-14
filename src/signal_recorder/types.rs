@@ -530,9 +530,9 @@ pub(super) fn play_per_channel_and_record_mono(
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct DirectArrivalPeak {
-    pub(super) peak_sample_refined: f64,
-    pub(super) peak_value: f32,
+pub(crate) struct DirectArrivalPeak {
+    pub(crate) peak_sample_refined: f64,
+    pub(crate) peak_value: f32,
 }
 
 #[expect(
@@ -541,7 +541,7 @@ pub(super) struct DirectArrivalPeak {
     clippy::cast_sign_loss,
     reason = "Percentile and lookahead indices are clamped to the envelope; fractional peak positions use f64."
 )]
-pub(super) fn pick_direct_arrival_from_envelope(
+pub(crate) fn pick_direct_arrival_from_envelope(
     envelope: &[f32],
     sample_rate: u32,
     max_search_samples: usize,
@@ -590,7 +590,9 @@ pub(super) fn pick_direct_arrival_from_envelope(
             let y_prev = f64::from(search[peak - 1]);
             let y_peak = f64::from(search[peak]);
             let y_next = f64::from(search[peak + 1]);
-            let denom = 2.0 * (2.0 * y_peak - y_prev - y_next);
+            // Parabola vertex through (-1, y_prev), (0, y_peak),
+            // (1, y_next); the mirrored sign would reflect fractions.
+            let denom = 2.0 * (y_prev - 2.0 * y_peak + y_next);
             let peak_sample_refined = if denom.abs() > 1e-12 {
                 peak as f64 + (y_prev - y_next) / denom
             } else {
