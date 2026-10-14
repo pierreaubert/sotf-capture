@@ -838,7 +838,7 @@ fn emitter_anchor_check(
 }
 
 /// Empty range cell reporting one refusal token.
-fn refused_cell(microphone_id: &str, reason: &'static str) -> RangeCell {
+fn refused_cell(microphone_id: &str, reason: &str) -> RangeCell {
     RangeCell {
         microphone_id: microphone_id.into(),
         distance_m: None,
@@ -1119,6 +1119,201 @@ fn finite_confidence(confidence_db: f64) -> Option<f64> {
     Some(confidence_db.min(100.0))
 }
 
+/// Build one per-repeat source row for the decided session mode.
+///
+/// A repeat whose loopback is unusable yields an all-refused row with
+/// `loopback_unavailable`; the repeat combination below treats those
+/// cells as non-voters instead of failing the source.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Mode dispatch threads the decided session evidence explicitly; bundling would hide the per-cell inputs."
+)]
+fn build_group_row(
+    report: &ClockProcessedManifest,
+    group: &SelectedGroup,
+    mode: LocalizationMode,
+    loopbacks: &BTreeMap<(usize, u32), Result<GroupLoopback, String>>,
+    fits: &[Option<CaptureClockFit>],
+    arrivals: &BTreeMap<usize, Result<SweepArrival, &'static str>>,
+    sound_speed: f64,
+    sound_speed_uncertainty: f64,
+    max_range: f64,
+    skew_ratio: f64,
+) -> SourceRanges {
+    match mode {
+        LocalizationMode::LoopbackReferenced => {
+            let Some(Ok(loopback)) = loopbacks.get(&(group.source_index, group.repeat_index))
+            else {
+                let source = &report.plan.sources[group.source_index];
+                return SourceRanges {
+                    source_id: source.id.clone(),
+                    cells: report
+                        .plan
+                        .microphones
+                        .iter()
+                        .map(|mic| refused_cell(&mic.id, "loopback_unavailable"))
+                        .collect(),
+                };
+            };
+            loopback_cells(
+                report,
+                group,
+                loopback,
+                arrivals,
+                sound_speed,
+                sound_speed_uncertainty,
+                max_range,
+                skew_ratio,
+            )
+        }
+        LocalizationMode::EmitterReferenced => emitter_cells(
+            report,
+            group,
+            fits,
+            arrivals,
+            sound_speed,
+            sound_speed_uncertainty,
+            max_range,
+        ),
+        LocalizationMode::RelativeOnly => relative_cells(report, group, arrivals, skew_ratio),
+    }
+}
+
+/// Combine per-repeat rows for one source into a single row (§7.2 step 5).
+///
+/// Zero repeats (a source with no takes at all) refuse every cell with
+/// `take_missing`; one repeat passes its row through unchanged so
+/// single-repeat sessions keep bit-identical output; several repeats
+/// combine per microphone in [`combine_mic_cells`].
+fn combine_repeat_rows(
+    plan: &CaptureSessionPlan,
+    source: &CaptureSource,
+    rows: &[SourceRanges],
+) -> SourceRanges {
+    match rows {
+        [] => SourceRanges {
+            source_id: source.id.clone(),
+            cells: plan
+                .microphones
+                .iter()
+                .map(|mic| refused_cell(&mic.id, "take_missing"))
+                .collect(),
+        },
+        [only] => only.clone(),
+        _ => SourceRanges {
+            source_id: source.id.clone(),
+            cells: plan
+                .microphones
+                .iter()
+                .enumerate()
+                .map(|(mic_index, mic)| {
+                    let per_repeat: Vec<&RangeCell> = rows
+                        .iter()
+                        .filter_map(|row| row.cells.get(mic_index))
+                        .filter(|cell| cell.microphone_id == mic.id)
+                        .collect();
+                    combine_mic_cells(&mic.id, &per_repeat)
+                })
+                .collect(),
+        },
+    }
+}
+
+/// Combine one microphone's per-repeat cells.
+///
+/// The median arrival (equivalently, the median distance — medians
+/// commute with the affine delay-to-distance conversion) rejects a wild
+/// repeat; the inter-repeat spread widens sigma in quadrature with the
+/// median estimator sigma, so disagreement visibly downweights the cell
+/// instead of silently averaging away. Evidence takes the median arrival
+/// and reference, the minimum confidence, and the most common band.
+/// A microphone with no usable repeat keeps the most common refusal
+/// token. Deterministic throughout, total on all inputs.
+fn combine_mic_cells(microphone_id: &str, cells: &[&RangeCell]) -> RangeCell {
+    let mut distances: Vec<f64> = cells.iter().filter_map(|cell| cell.distance_m).collect();
+    distances.sort_by(f64::total_cmp);
+    let mut sigmas: Vec<f64> = cells.iter().filter_map(|cell| cell.sigma_m).collect();
+    sigmas.sort_by(f64::total_cmp);
+    let mut arrivals: Vec<f64> = cells
+        .iter()
+        .filter_map(|cell| cell.arrival_samples)
+        .collect();
+    arrivals.sort_by(f64::total_cmp);
+    let mut references: Vec<f64> = cells
+        .iter()
+        .filter_map(|cell| cell.reference_arrival_samples)
+        .collect();
+    references.sort_by(f64::total_cmp);
+    let mut tdoas: Vec<f64> = cells
+        .iter()
+        .filter_map(|cell| cell.tdoa_samples_vs_first)
+        .collect();
+    tdoas.sort_by(f64::total_cmp);
+    let mut tdoa_sigmas: Vec<f64> = cells
+        .iter()
+        .filter_map(|cell| cell.tdoa_sigma_samples)
+        .collect();
+    tdoa_sigmas.sort_by(f64::total_cmp);
+    if distances.is_empty() && tdoas.is_empty() {
+        let token = most_common(cells.iter().filter_map(|cell| cell.reason.as_deref()))
+            .unwrap_or("take_missing");
+        return refused_cell(microphone_id, token);
+    }
+    let distance_m = median_sorted(&distances);
+    let sigma_m = widened_sigma(median_sorted(&sigmas), half_spread(&distances));
+    let tdoa_samples_vs_first = median_sorted(&tdoas);
+    let tdoa_sigma_samples = widened_sigma(median_sorted(&tdoa_sigmas), half_spread(&tdoas));
+    let confidence_db = cells
+        .iter()
+        .filter_map(|cell| cell.confidence_db)
+        .reduce(f64::min);
+    RangeCell {
+        microphone_id: microphone_id.into(),
+        distance_m,
+        sigma_m,
+        arrival_samples: median_sorted(&arrivals),
+        reference_arrival_samples: median_sorted(&references),
+        tdoa_samples_vs_first,
+        tdoa_sigma_samples,
+        band: most_common(cells.iter().filter_map(|cell| cell.band.clone())),
+        confidence_db,
+        reason: most_common(cells.iter().filter_map(|cell| cell.reason.as_deref()))
+            .map(str::to_string),
+    }
+}
+
+/// Half the max-min spread of an ascending slice; 0.0 for fewer than two
+/// values (a single repeat measures no spread).
+fn half_spread(sorted: &[f64]) -> f64 {
+    if sorted.len() < 2 {
+        return 0.0;
+    }
+    (sorted[sorted.len() - 1] - sorted[0]) / 2.0
+}
+
+/// Median estimator sigma widened in quadrature with the measured
+/// inter-repeat spread. Unknown estimator sigma with a measured spread
+/// falls back to the spread itself; nothing known stays unknown.
+fn widened_sigma(median_sigma: Option<f64>, spread_half: f64) -> Option<f64> {
+    match (median_sigma, spread_half) {
+        (Some(sigma), spread) => Some((sigma.powi(2) + spread.powi(2)).sqrt()),
+        (None, spread) if spread > 0.0 => Some(spread),
+        (None, _) => None,
+    }
+}
+
+/// Most common item; ties break toward the smallest (deterministic).
+fn most_common<T: Ord + Clone>(items: impl Iterator<Item = T>) -> Option<T> {
+    let mut counts: BTreeMap<T, usize> = BTreeMap::new();
+    for item in items {
+        *counts.entry(item).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .max_by(|left, right| left.1.cmp(&right.1).then(right.0.cmp(&left.0)))
+        .map(|(item, _)| item)
+}
+
 /// Verify loopback consistency across capture groups.
 ///
 /// Each residual subtracts one group's fitted prediction from its
@@ -1314,8 +1509,12 @@ pub(super) fn localize_session(
         }
     };
     let groups = select_groups(report);
+    let all_groups = capture_groups(report);
+    // Arrivals cover every repeat: non-selected repeats still vote in
+    // the per-source median (§7.2 step 5), so their clock outliers are
+    // reported rather than silently ignored.
     let mut arrivals: BTreeMap<usize, Result<SweepArrival, &'static str>> = BTreeMap::new();
-    for group in &groups {
+    for group in &all_groups {
         for take_index in &group.take_indices {
             let arrival = take_sweep_arrival(report, output, *take_index, fits, pooled, &sweep);
             if matches!(arrival, Err("clock_outlier")) {
@@ -1327,7 +1526,6 @@ pub(super) fn localize_session(
             arrivals.insert(*take_index, arrival);
         }
     }
-    let all_groups = capture_groups(report);
     let mut loopbacks: BTreeMap<(usize, u32), Result<GroupLoopback, String>> = BTreeMap::new();
     for group in &all_groups {
         loopbacks.insert(
@@ -1388,47 +1586,30 @@ pub(super) fn localize_session(
     // A missing pool means no usable fits, so no arrival below succeeds
     // and this ratio never scales real data; 1.0 keeps refused cells exact.
     let skew_ratio = pooled.map_or(1.0, |ppm| 1.0 + ppm / 1e6);
-    let mut ranges = Vec::new();
-    for group in &groups {
-        let row = match mode {
-            LocalizationMode::LoopbackReferenced => {
-                let Some(Ok(loopback)) = loopbacks.get(&(group.source_index, group.repeat_index))
-                else {
-                    let source = &report.plan.sources[group.source_index];
-                    ranges.push(SourceRanges {
-                        source_id: source.id.clone(),
-                        cells: report
-                            .plan
-                            .microphones
-                            .iter()
-                            .map(|mic| refused_cell(&mic.id, "loopback_unavailable"))
-                            .collect(),
-                    });
-                    continue;
-                };
-                loopback_cells(
+    // One row per plan source: every repeat votes, combined by median
+    // with the inter-repeat spread widening sigma (§7.2 step 5). Mode
+    // stays decided from the representative groups above.
+    let mut ranges = Vec::with_capacity(report.plan.sources.len());
+    for (source_index, source) in report.plan.sources.iter().enumerate() {
+        let repeats: Vec<SourceRanges> = all_groups
+            .iter()
+            .filter(|group| group.source_index == source_index)
+            .map(|group| {
+                build_group_row(
                     report,
                     group,
-                    loopback,
+                    mode,
+                    &loopbacks,
+                    fits,
                     &arrivals,
                     sound_speed,
                     sound_speed_uncertainty,
                     max_range,
                     skew_ratio,
                 )
-            }
-            LocalizationMode::EmitterReferenced => emitter_cells(
-                report,
-                group,
-                fits,
-                &arrivals,
-                sound_speed,
-                sound_speed_uncertainty,
-                max_range,
-            ),
-            LocalizationMode::RelativeOnly => relative_cells(report, group, &arrivals, skew_ratio),
-        };
-        ranges.push(row);
+            })
+            .collect();
+        ranges.push(combine_repeat_rows(&report.plan, source, &repeats));
     }
     let (sources, mut position_issues) =
         solve_source_positions(&report.plan, &ranges, sound_speed, rate);
@@ -2059,6 +2240,163 @@ mod tests {
         golden: Golden,
     }
 
+    /// Build a complete synthetic single-repeat session for one mode.
+    fn harness(mode: HarnessMode) -> Harness {
+        harness_repeats(mode, 1, None)
+    }
+
+    /// Synthesize one harness take with its clock fit into the manifest.
+    ///
+    /// `wild_extra` shifts only the sweep path, leaving chirps clean so
+    /// the clock still fits and the median must reject the outlier.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The golden harness threads synthesis inputs explicitly; bundling would hide the per-take parameters."
+    )]
+    fn synth_harness_take(
+        mode: HarnessMode,
+        golden: &Golden,
+        stimulus: &crate::capture_session::protocol::CaptureStimulus,
+        layout: &crate::capture_session::protocol::CaptureStimulusLayout,
+        rate: u32,
+        rate_f64: f64,
+        chirp_source: [f64; 3],
+        source_id: &str,
+        source_position: [f64; 3],
+        mic_id: &str,
+        mic_position: [f64; 3],
+        wild_extra: f64,
+        repeat: u32,
+        manifest: &mut RawCaptureManifest,
+        takes: &mut Vec<crate::capture_session::clock::io::ClockProcessedTake>,
+        fits: &mut Vec<Option<crate::capture_session::clock::CaptureClockFit>>,
+        output: &tempfile::TempDir,
+        audio_index: &mut usize,
+    ) {
+        let src_prop = distance_meter(source_position, mic_position) / golden.sound_speed_m_s
+            * rate_f64
+            + wild_extra;
+        let chirp_prop = if mode == HarnessMode::Emitter {
+            distance_meter(golden.timing_emitter_m, mic_position) / golden.sound_speed_m_s
+                * rate_f64
+        } else {
+            distance_meter(chirp_source, mic_position) / golden.sound_speed_m_s * rate_f64
+        };
+        let samples = synth_take(
+            &stimulus.samples,
+            layout,
+            golden.session_clock.offset_samples,
+            golden.session_clock.skew_ppm,
+            golden.latency_samples,
+            src_prop,
+            chirp_prop,
+        );
+        let wav_file = format!("take-{source_id}-{mic_id}-r{repeat:03}-raw.wav");
+        crate::signal_recorder::write_wav_file(&output.path().join(&wav_file), &samples, rate, 1)
+            .unwrap();
+        let take = crate::capture_session::record::RawCaptureTake {
+            take_id: crate::capture_session::record::stable_take_id(source_id, mic_id, repeat),
+            repeat_index: repeat,
+            device_id: "id:iface".into(),
+            output_device_id: "id:iface".into(),
+            source_id: source_id.into(),
+            microphone_id: mic_id.into(),
+            wav_file,
+            samples: samples.len(),
+            input_sample_format: "F32".into(),
+            output_sample_format: "F32".into(),
+            peak_amplitude: samples
+                .iter()
+                .fold(0.0_f32, |peak, sample| peak.max(sample.abs())),
+            clipped_samples: 0,
+        };
+        let (provenance, fit) = crate::capture_session::clock::fit_capture_clock(
+            manifest,
+            &take,
+            &samples,
+            &stimulus.timing_chirp,
+        );
+        let corrected = crate::capture_session::clock::apply_clock_fit(
+            provenance,
+            fit,
+            &samples,
+            layout.total_samples,
+        );
+        assert!(
+            fit.is_some(),
+            "synthetic take {source_id}/{mic_id} must fit"
+        );
+        assert!(corrected.samples.is_some());
+        let analysis = crate::capture_session::analysis::CaptureAnalysisReport {
+            magnitude_file: None,
+            clipped_samples: 0,
+            broadband_snr_db: Some(40.0),
+            frequency_snr: Vec::new(),
+            common_reference: None,
+            issues: Vec::new(),
+            quality_findings: Vec::new(),
+        };
+        takes.push(crate::capture_session::clock::io::ClockProcessedTake {
+            raw: take.clone(),
+            audio_file: format!("take-{audio_index:03}.wav"),
+            clock: corrected.provenance,
+            analysis: Some(analysis),
+        });
+        manifest.takes.push(take);
+        fits.push(fit);
+        *audio_index += 1;
+    }
+
+    /// Synthesize one harness loopback file for a source repeat.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The golden harness threads synthesis inputs explicitly; bundling would hide the per-repeat parameters."
+    )]
+    fn synth_harness_loopback(
+        golden: &Golden,
+        stimulus: &crate::capture_session::protocol::CaptureStimulus,
+        layout: &crate::capture_session::protocol::CaptureStimulusLayout,
+        rate: u32,
+        raw_root: &tempfile::TempDir,
+        manifest: &mut RawCaptureManifest,
+        source_id: &str,
+        repeat: u32,
+    ) {
+        let samples = synth_take(
+            &stimulus.samples,
+            layout,
+            golden.session_clock.offset_samples,
+            golden.session_clock.skew_ppm,
+            golden.latency_samples,
+            0.0,
+            0.0,
+        );
+        let wav_file = format!("take-{source_id}-loopback-r{repeat:03}-raw.wav");
+        crate::signal_recorder::write_wav_file(&raw_root.path().join(&wav_file), &samples, rate, 1)
+            .unwrap();
+        manifest
+            .loopback_files
+            .push(crate::capture_session::record::CaptureLoopbackTake {
+                repeat_index: repeat,
+                source_id: source_id.into(),
+                wav_file,
+                samples: samples.len(),
+                device_id: "id:iface".into(),
+                input_sample_format: "F32".into(),
+                peak_amplitude: samples
+                    .iter()
+                    .fold(0.0_f32, |peak, sample| peak.max(sample.abs())),
+                clipped_samples: 0,
+            });
+    }
+
+    /// Build a synthetic session with several repeats and an optional
+    /// wild arrival.
+    ///
+    /// `wild` is `(source id, microphone id, repeat, extra sweep delay
+    /// in samples)` injected into one take's source path; its chirps
+    /// stay clean so the clock still fits and the median must reject
+    /// the outlier at combination time.
     /// Build a complete synthetic session for one localization mode.
     ///
     /// Takes and loopbacks are synthesized in memory from the golden
@@ -2069,13 +2407,18 @@ mod tests {
         clippy::too_many_lines,
         reason = "The golden harness keeps plan, synthesis, fitting, and layout in one explicit sequence."
     )]
-    fn harness(mode: HarnessMode) -> Harness {
+    fn harness_repeats(
+        mode: HarnessMode,
+        repeats: u32,
+        wild: Option<(&str, &str, u32, f64)>,
+    ) -> Harness {
         let golden = golden();
         let rate = golden.sample_rate_hz;
         let mut plan: CaptureSessionPlan =
             serde_json::from_str(include_str!("../../tests/fixtures/capture-session.json"))
                 .unwrap();
         plan.sweep.duration_secs = 0.25;
+        plan.repeat_count = repeats;
         let microphone_template = plan.microphones[0].clone();
         plan.microphones = golden
             .microphones_m
@@ -2145,7 +2488,7 @@ mod tests {
         };
         let mut takes = Vec::new();
         let mut fits = Vec::new();
-        let mut audio_index = 0;
+        let mut audio_index = 0_usize;
         // Without a dedicated emitter the chirps ride the first source
         // channel for every take, matching the record path's rerouting.
         let chirp_source = golden
@@ -2156,116 +2499,52 @@ mod tests {
             .unwrap_or([0.0; 3]);
         for (source_id, source_position) in &golden.sources_m {
             for (mic_id, mic_position) in &golden.microphones_m {
-                let src_prop = distance_meter(*source_position, *mic_position)
-                    / golden.sound_speed_m_s
-                    * rate_f64;
-                let chirp_prop = if mode == HarnessMode::Emitter {
-                    distance_meter(golden.timing_emitter_m, *mic_position) / golden.sound_speed_m_s
-                        * rate_f64
-                } else {
-                    distance_meter(chirp_source, *mic_position) / golden.sound_speed_m_s * rate_f64
-                };
-                let samples = synth_take(
-                    &stimulus.samples,
-                    &layout,
-                    golden.session_clock.offset_samples,
-                    golden.session_clock.skew_ppm,
-                    golden.latency_samples,
-                    src_prop,
-                    chirp_prop,
-                );
-                let wav_file = format!("take-{source_id}-{mic_id}-raw.wav");
-                crate::signal_recorder::write_wav_file(
-                    &output.path().join(&wav_file),
-                    &samples,
-                    rate,
-                    1,
-                )
-                .unwrap();
-                let take = crate::capture_session::record::RawCaptureTake {
-                    take_id: crate::capture_session::record::stable_take_id(source_id, mic_id, 0),
-                    repeat_index: 0,
-                    device_id: "id:iface".into(),
-                    output_device_id: "id:iface".into(),
-                    source_id: source_id.clone(),
-                    microphone_id: mic_id.clone(),
-                    wav_file,
-                    samples: samples.len(),
-                    input_sample_format: "F32".into(),
-                    output_sample_format: "F32".into(),
-                    peak_amplitude: samples
-                        .iter()
-                        .fold(0.0_f32, |peak, sample| peak.max(sample.abs())),
-                    clipped_samples: 0,
-                };
-                let (provenance, fit) = crate::capture_session::clock::fit_capture_clock(
-                    &manifest,
-                    &take,
-                    &samples,
-                    &stimulus.timing_chirp,
-                );
-                let corrected = crate::capture_session::clock::apply_clock_fit(
-                    provenance,
-                    fit,
-                    &samples,
-                    layout.total_samples,
-                );
-                assert!(
-                    fit.is_some(),
-                    "synthetic take {source_id}/{mic_id} must fit"
-                );
-                assert!(corrected.samples.is_some());
-                let analysis = crate::capture_session::analysis::CaptureAnalysisReport {
-                    magnitude_file: None,
-                    clipped_samples: 0,
-                    broadband_snr_db: Some(40.0),
-                    frequency_snr: Vec::new(),
-                    common_reference: None,
-                    issues: Vec::new(),
-                    quality_findings: Vec::new(),
-                };
-                takes.push(crate::capture_session::clock::io::ClockProcessedTake {
-                    raw: take.clone(),
-                    audio_file: format!("take-{audio_index:03}.wav"),
-                    clock: corrected.provenance,
-                    analysis: Some(analysis),
-                });
-                manifest.takes.push(take);
-                fits.push(fit);
-                audio_index += 1;
+                for repeat in 0..repeats {
+                    let wild_extra = match wild {
+                        Some((source, mic, wild_repeat, extra))
+                            if source == source_id.as_str()
+                                && mic == mic_id.as_str()
+                                && wild_repeat == repeat =>
+                        {
+                            extra
+                        }
+                        _ => 0.0,
+                    };
+                    synth_harness_take(
+                        mode,
+                        &golden,
+                        &stimulus,
+                        &layout,
+                        rate,
+                        rate_f64,
+                        chirp_source,
+                        source_id,
+                        *source_position,
+                        mic_id,
+                        *mic_position,
+                        wild_extra,
+                        repeat,
+                        &mut manifest,
+                        &mut takes,
+                        &mut fits,
+                        &output,
+                        &mut audio_index,
+                    );
+                }
             }
             if mode == HarnessMode::Loopback {
-                let samples = synth_take(
-                    &stimulus.samples,
-                    &layout,
-                    golden.session_clock.offset_samples,
-                    golden.session_clock.skew_ppm,
-                    golden.latency_samples,
-                    0.0,
-                    0.0,
-                );
-                let wav_file = format!("take-{source_id}-loopback-raw.wav");
-                crate::signal_recorder::write_wav_file(
-                    &raw_root.path().join(&wav_file),
-                    &samples,
-                    rate,
-                    1,
-                )
-                .unwrap();
-                manifest
-                    .loopback_files
-                    .push(crate::capture_session::record::CaptureLoopbackTake {
-                        repeat_index: 0,
-                        source_id: source_id.clone(),
-                        wav_file,
-                        samples: samples.len(),
-                        device_id: "id:iface".into(),
-                        input_sample_format: "F32".into(),
-                        peak_amplitude: samples
-                            .iter()
-                            .fold(0.0_f32, |peak, sample| peak.max(sample.abs())),
-                        clipped_samples: 0,
-                    });
+                for repeat in 0..repeats {
+                    synth_harness_loopback(
+                        &golden,
+                        &stimulus,
+                        &layout,
+                        rate,
+                        &raw_root,
+                        &mut manifest,
+                        source_id,
+                        repeat,
+                    );
+                }
             }
         }
         crate::signal_recorder::write_wav_file(
@@ -2510,6 +2789,138 @@ mod tests {
                 .collect(),
         );
         (microphones, row)
+    }
+
+    #[test]
+    fn combine_single_repeat_passes_through_exactly() {
+        let truth = [2.3, -1.1, 0.7];
+        let (microphones, row) = tetra_row(truth, 0.001);
+        let plan = position_plan(&microphones, None);
+        let combined = combine_repeat_rows(&plan, &plan.sources[0], std::slice::from_ref(&row));
+        assert_eq!(combined, row);
+    }
+
+    #[test]
+    fn combine_repeat_rows_takes_median_and_widens_sigma() {
+        let microphones = vec![("mic-0", [0.0, 0.0, 0.0])];
+        let plan = position_plan(&microphones, None);
+        let mut rows = Vec::new();
+        for (distance, arrival, confidence) in
+            [(2.0, 100.0, 20.0), (2.5, 105.0, 18.0), (2.01, 101.0, 22.0)]
+        {
+            let mut row = position_row("left", vec![("mic-0", Some((distance, 0.001)))]);
+            row.cells[0].arrival_samples = Some(arrival);
+            row.cells[0].reference_arrival_samples = Some(arrival - 50.0);
+            row.cells[0].confidence_db = Some(confidence);
+            row.cells[0].band = Some("sweep_2000_8000".into());
+            rows.push(row);
+        }
+        let combined = combine_repeat_rows(&plan, &plan.sources[0], &rows);
+        let cell = &combined.cells[0];
+        assert!((cell.distance_m.unwrap_or(f64::NAN) - 2.01).abs() < 1.0e-12);
+        assert!((cell.arrival_samples.unwrap_or(f64::NAN) - 101.0).abs() < 1.0e-12);
+        assert!((cell.reference_arrival_samples.unwrap_or(f64::NAN) - 51.0).abs() < 1.0e-12);
+        assert_eq!(cell.confidence_db, Some(18.0));
+        assert_eq!(cell.band.as_deref(), Some("sweep_2000_8000"));
+        assert_eq!(cell.reason, None);
+        // Median estimator sigma widened by half the 0.5 m spread.
+        let sigma = cell.sigma_m.unwrap_or(f64::NAN);
+        assert!((sigma - 0.250_002).abs() < 1.0e-6, "sigma {sigma}");
+    }
+
+    #[test]
+    fn combine_all_refused_keeps_common_token() {
+        let microphones = vec![("mic-0", [0.0, 0.0, 0.0])];
+        let plan = position_plan(&microphones, None);
+        let mut rows = Vec::new();
+        for token in ["clock_outlier", "clock_outlier", "arrival_ambiguous"] {
+            let mut row = position_row("left", vec![("mic-0", None)]);
+            row.cells[0].reason = Some(token.into());
+            rows.push(row);
+        }
+        let combined = combine_repeat_rows(&plan, &plan.sources[0], &rows);
+        let cell = &combined.cells[0];
+        assert_eq!(cell.distance_m, None);
+        assert_eq!(cell.reason.as_deref(), Some("clock_outlier"));
+    }
+
+    #[test]
+    fn combine_empty_rows_refuses_take_missing() {
+        let microphones = vec![("mic-0", [0.0, 0.0, 0.0])];
+        let plan = position_plan(&microphones, None);
+        let combined = combine_repeat_rows(&plan, &plan.sources[0], &[]);
+        assert_eq!(combined.cells.len(), 1);
+        assert_eq!(combined.cells[0].distance_m, None);
+        assert_eq!(combined.cells[0].reason.as_deref(), Some("take_missing"));
+    }
+
+    #[test]
+    fn combine_relative_rows_medians_tdoa() {
+        let microphones = vec![("mic-0", [0.0, 0.0, 0.0])];
+        let plan = position_plan(&microphones, None);
+        let mut rows = Vec::new();
+        for (tdoa, sigma) in [(10.0, 0.5), (12.0, 0.5)] {
+            let mut row = position_row("left", vec![("mic-0", None)]);
+            row.cells[0].tdoa_samples_vs_first = Some(tdoa);
+            row.cells[0].tdoa_sigma_samples = Some(sigma);
+            row.cells[0].reason = Some("no_absolute_time_origin".into());
+            rows.push(row);
+        }
+        let combined = combine_repeat_rows(&plan, &plan.sources[0], &rows);
+        let cell = &combined.cells[0];
+        assert_eq!(cell.distance_m, None);
+        assert_eq!(cell.sigma_m, None);
+        assert!((cell.tdoa_samples_vs_first.unwrap_or(f64::NAN) - 11.0).abs() < 1.0e-12);
+        let sigma = cell.tdoa_sigma_samples.unwrap_or(f64::NAN);
+        assert!((sigma - 1.118_034).abs() < 1.0e-6, "sigma {sigma}");
+        assert_eq!(cell.reason.as_deref(), Some("no_absolute_time_origin"));
+    }
+
+    #[test]
+    fn repeat_median_rejects_wild_arrival() {
+        let probe = golden();
+        let wild_extra = 0.5 / probe.sound_speed_m_s * f64::from(probe.sample_rate_hz);
+        let harness = harness_repeats(
+            HarnessMode::Loopback,
+            3,
+            Some(("left", "mic-1", 1, wild_extra)),
+        );
+        let localized = localize_session(
+            &harness.report,
+            harness.raw_root.path(),
+            harness.output.path(),
+            &harness.fits,
+        );
+        assert_eq!(localized.mode, LocalizationMode::LoopbackReferenced);
+        let row = localized
+            .ranges
+            .iter()
+            .find(|row| row.source_id == "left")
+            .expect("left row");
+        let cell = row
+            .cells
+            .iter()
+            .find(|cell| cell.microphone_id == "mic-1")
+            .expect("mic-1 cell");
+        let expected = harness.golden.expected_ranges_m["left/mic-1"];
+        let distance = cell.distance_m.unwrap_or(f64::NAN);
+        assert!(
+            (distance - expected).abs() < 0.002,
+            "median should reject the wild repeat: got {distance}, want {expected}"
+        );
+        // The wild repeat still widens sigma through the spread term.
+        let sigma = cell.sigma_m.unwrap_or(f64::NAN);
+        assert!(sigma > 0.1, "sigma {sigma}");
+        assert_eq!(cell.reason, None);
+        // The median row still solves a position near truth.
+        let position = localized
+            .sources
+            .iter()
+            .find(|source| source.source_id == "left")
+            .expect("left position");
+        let fit = position.position_m.expect("median row solves");
+        let truth = harness.golden.sources_m["left"];
+        assert!(distance_meter(fit, truth) < 0.02);
     }
 
     #[test]
