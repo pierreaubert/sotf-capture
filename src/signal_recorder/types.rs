@@ -535,20 +535,58 @@ pub(crate) struct DirectArrivalPeak {
     pub(crate) peak_value: f32,
 }
 
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    reason = "Percentile and lookahead indices are clamped to the envelope; fractional peak positions use f64."
-)]
 pub(crate) fn pick_direct_arrival_from_envelope(
     envelope: &[f32],
     sample_rate: u32,
     max_search_samples: usize,
 ) -> Option<DirectArrivalPeak> {
+    pick_direct_arrival_with_lookahead(
+        envelope,
+        sample_rate,
+        max_search_samples,
+        standard_direct_lookahead_samples(sample_rate),
+    )
+}
+
+/// Standard direct-arrival lookahead in samples: 3 ms, clamped.
+///
+/// Assumes a full-band transient envelope whose hump rises within
+/// milliseconds. Low-band estimators pass a wider window through
+/// [`pick_direct_arrival_with_lookahead`] instead.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "The 3 ms lookahead is clamped to the envelope before use."
+)]
+pub(crate) fn standard_direct_lookahead_samples(sample_rate: u32) -> usize {
+    ((sample_rate as f32 * 0.003).round() as usize).clamp(8, 256)
+}
+
+/// Direct-arrival pick with an explicit peak-completion window.
+///
+/// Identical to [`pick_direct_arrival_from_envelope`] except the
+/// caller sets `lookahead_samples`: from the first threshold
+/// crossing, the peak is the maximum over that many following
+/// samples. A window far shorter than the envelope hump strands the
+/// pick on the rising slope; a window far longer merges late
+/// reflections into the direct sound.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "Percentile indices are clamped to the envelope; fractional peak positions use f64."
+)]
+pub(crate) fn pick_direct_arrival_with_lookahead(
+    envelope: &[f32],
+    sample_rate: u32,
+    max_search_samples: usize,
+    lookahead_samples: usize,
+) -> Option<DirectArrivalPeak> {
     if envelope.len() < 3 || sample_rate == 0 || max_search_samples < 3 {
         return None;
     }
+    let lookahead = lookahead_samples.clamp(8, 4096);
 
     let causal_len = (envelope.len() / 2).min(max_search_samples).max(3);
     let search = &envelope[..causal_len];
@@ -567,7 +605,6 @@ pub(crate) fn pick_direct_arrival_from_envelope(
     // relative threshold still allows a direct sound that is noticeably
     // weaker than a later reflection.
     let threshold = (median * 12.0).max(p90 * 2.0).max(strongest * 0.08);
-    let lookahead = ((sample_rate as f32 * 0.003).round() as usize).clamp(8, 256);
 
     let mut i = 1_usize;
     while i + 1 < causal_len {
@@ -585,7 +622,6 @@ pub(crate) fn pick_direct_arrival_from_envelope(
                 peak_value = value;
             }
         }
-
         if peak > 0 && peak + 1 < causal_len {
             let y_prev = f64::from(search[peak - 1]);
             let y_peak = f64::from(search[peak]);

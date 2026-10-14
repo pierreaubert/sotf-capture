@@ -475,6 +475,25 @@ const ARRIVAL_BAND_HI_HZ: f64 = 8000.0;
 const MIN_ARRIVAL_BANDWIDTH_HZ: f64 = 2000.0;
 /// Arrival bandpass length in taps (linear phase, odd, symmetric).
 const ARRIVAL_FIR_TAPS: usize = 127;
+/// Low-band edges for subwoofer arrivals in Hz (§4.3 caveat).
+const SUB_BAND_LO_HZ: f64 = 20.0;
+/// See [`SUB_BAND_LO_HZ`].
+const SUB_BAND_HI_HZ: f64 = 300.0;
+/// Minimum usable low-band width in Hz: a third of the 280 Hz band,
+/// mirroring the design-band ratio.
+const SUB_MIN_BANDWIDTH_HZ: f64 = 100.0;
+/// Low-band bandpass length in taps: the 127-tap design cannot resolve
+/// a 300 Hz cutoff at 48 kHz (transition wider than the passband), so
+/// the sub band gets a longer filter of the identical windowed-sinc
+/// design (still linear-phase, so group delay still cancels).
+const SUB_FIR_TAPS: usize = 1025;
+/// Detector cutoff in Hz: recorded sweep energy above this counts as
+/// high-frequency content.
+const SUB_HF_CUTOFF_HZ: f64 = 300.0;
+/// Detector threshold: an HF energy fraction below this routes the
+/// take to the low-band estimator. Errs toward the standard estimator —
+/// weak-HF takes refuse there rather than misroute here.
+const SUB_HF_FRACTION: f64 = 0.05;
 
 /// Usable arrival band for one sweep, intersected with the design band.
 ///
@@ -499,15 +518,18 @@ fn arrival_band(sweep_lo_hz: f64, sweep_hi_hz: f64) -> Option<(f64, f64)> {
 /// Both the reference sweep and the recorded window pass through this
 /// identical filter, so its constant group delay cancels in the lag and
 /// the correlation sees a symmetric sub-band with no phase distortion.
+/// The tap count coerces to an odd number of at least three, keeping
+/// the phase exactly linear on every input.
 #[expect(
     clippy::cast_precision_loss,
-    reason = "The fixed 127-tap count converts to f64 exactly; far below precision limits."
+    reason = "Tap counts convert to f64 exactly; far below precision limits."
 )]
-fn arrival_bandpass(rate: f64, band_lo_hz: f64, band_hi_hz: f64) -> Vec<f64> {
+fn arrival_bandpass(rate: f64, band_lo_hz: f64, band_hi_hz: f64, taps: usize) -> Vec<f64> {
     // Integer center: with odd length the sinc and the Hann window share
     // tap (N-1)/2, which is what makes the phase exactly linear.
-    let middle = (ARRIVAL_FIR_TAPS - 1) as f64 / 2.0;
-    (0..ARRIVAL_FIR_TAPS)
+    let taps = taps.max(3) | 1;
+    let middle = (taps - 1) as f64 / 2.0;
+    (0..taps)
         .map(|tap| {
             let offset = tap as f64 - middle;
             let sinc = if offset.abs() < 1e-9 {
@@ -517,13 +539,123 @@ fn arrival_bandpass(rate: f64, band_lo_hz: f64, band_hi_hz: f64) -> Vec<f64> {
                 ((2.0 * band_hi_hz * phase).sin() - (2.0 * band_lo_hz * phase).sin())
                     / (std::f64::consts::PI * offset)
             };
-            let window = 0.5
-                - 0.5
-                    * (2.0 * std::f64::consts::PI * tap as f64 / (ARRIVAL_FIR_TAPS - 1) as f64)
-                        .cos();
+            let window =
+                0.5 - 0.5 * (2.0 * std::f64::consts::PI * tap as f64 / (taps - 1) as f64).cos();
             sinc * window
         })
         .collect()
+}
+
+/// Usable low-band for one sweep, intersected with the sub band.
+///
+/// Returns `None` when the sweep leaves less than
+/// [`SUB_MIN_BANDWIDTH_HZ`] inside 20–300 Hz: the Cramér–Rao bound
+/// degrades with bandwidth, and below ~100 Hz the arrival carries no
+/// usable timing.
+fn sub_band(sweep_lo_hz: f64, sweep_hi_hz: f64) -> Option<(f64, f64)> {
+    if !sweep_lo_hz.is_finite() || !sweep_hi_hz.is_finite() || sweep_hi_hz <= sweep_lo_hz {
+        return None;
+    }
+    let lo = sweep_lo_hz.max(SUB_BAND_LO_HZ);
+    let hi = sweep_hi_hz.min(SUB_BAND_HI_HZ);
+    if hi - lo >= SUB_MIN_BANDWIDTH_HZ {
+        Some((lo, hi))
+    } else {
+        None
+    }
+}
+
+/// Remove the least-squares line from a signal.
+///
+/// Kills DC and slow rumble drift before low-band correlation without
+/// touching phase: a fitted-line subtraction is zero-phase, so the
+/// correlation peak does not move. Empty input maps to empty output.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "Sample indices convert to f64 coordinates and detrended samples return to input precision; bounded recordings stay far below precision limits."
+)]
+fn detrend_linear(signal: &[f32]) -> Vec<f32> {
+    let count = signal.len();
+    if count == 0 {
+        return Vec::new();
+    }
+    let n = count as f64;
+    let mean_position = (n - 1.0) / 2.0;
+    let mean_value = signal.iter().map(|sample| f64::from(*sample)).sum::<f64>() / n;
+    let covariance = signal
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| (index as f64 - mean_position) * (f64::from(*sample) - mean_value))
+        .sum::<f64>();
+    let variance = (0..count)
+        .map(|index| (index as f64 - mean_position).powi(2))
+        .sum::<f64>();
+    let (slope, intercept) = if variance.abs() > 1e-9 {
+        let slope = covariance / variance;
+        (slope, mean_value - slope * mean_position)
+    } else {
+        (0.0, mean_value)
+    };
+    signal
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| (f64::from(*sample) - (slope * index as f64 + intercept)) as f32)
+        .collect()
+}
+
+/// Fraction of signal energy above a cutoff in Hz (§4.3 detector).
+///
+/// Hann-windowed DFT power ratio (the window's coherent gain cancels
+/// in the ratio; Parseval needs no scaling for a relative measure).
+/// Measures the RECORDED take, never the sweep config, so a
+/// subwoofer that cannot reproduce the sweep's top end routes
+/// low-band while a full-range take of the same sweep does not.
+/// Returns `None` on empty input, silence, or degenerate parameters,
+/// which routes the standard estimator (the safe default).
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "Bin counts convert to f64 coordinates; the cutoff bin is non-negative by the validated cutoff and rate, and bounded recordings stay far below precision limits."
+)]
+fn hf_energy_fraction(signal: &[f32], cutoff_hz: f64, rate: f64) -> Option<f64> {
+    use rustfft::{FftPlanner, num_complex::Complex};
+    if signal.len() < 64
+        || !cutoff_hz.is_finite()
+        || cutoff_hz <= 0.0
+        || !rate.is_finite()
+        || rate <= 0.0
+        || cutoff_hz >= rate / 2.0
+    {
+        return None;
+    }
+    let fft_len = signal.len().next_power_of_two();
+    let mut spectrum: Vec<Complex<f32>> = signal
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| {
+            let window =
+                0.5 - 0.5 * (2.0 * std::f64::consts::PI * index as f64 / signal.len() as f64).cos();
+            Complex::new(*sample * window as f32, 0.0)
+        })
+        .collect();
+    spectrum.resize(fft_len, Complex::new(0.0, 0.0));
+    FftPlanner::<f32>::new()
+        .plan_fft_forward(fft_len)
+        .process(&mut spectrum);
+    let total: f64 = spectrum.iter().map(|bin| f64::from(bin.norm_sqr())).sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let cutoff_bin = ((cutoff_hz * fft_len as f64 / rate).ceil() as usize).min(fft_len / 2);
+    let high: f64 = spectrum
+        .iter()
+        .enumerate()
+        .filter(|(bin, _)| (*bin).min(fft_len - *bin) >= cutoff_bin)
+        .map(|(_, bin)| f64::from(bin.norm_sqr()))
+        .sum();
+    Some(high / total)
 }
 
 /// Filter one signal with the arrival bandpass, same length out.
@@ -557,7 +689,10 @@ fn apply_arrival_bandpass(signal: &[f32], taps: &[f64]) -> Vec<f32> {
 /// Band-limits the known sweep and a window around the fitted prediction
 /// to a symmetric sub-band, then correlates: the direct (first
 /// significant) and strongest (global maximum) envelope peaks must agree
-/// within one sample (Q3). Refusals carry stable reason tokens: a missing
+/// within one sample (Q3). Takes whose recorded sweep carries negligible
+/// energy above 300 Hz route to the 20–300 Hz low band instead
+/// (detrended first; uncertainty widens through the Cramér–Rao
+/// bandwidth term). Refusals carry stable reason tokens: a missing
 /// window, an unsupported band, a weak correlation
 /// (`arrival_low_confidence`, Q2), or disagreeing direct/strongest
 /// estimators (`arrival_ambiguous`, Q3).
@@ -578,9 +713,6 @@ fn estimate_sweep_arrival(
     if sweep.is_empty() || recorded.is_empty() || !predicted_start.is_finite() {
         return Err("sweep_window_missing");
     }
-    let Some((band_lo, band_hi)) = arrival_band(sweep_lo_hz, sweep_hi_hz) else {
-        return Err("band_unsupported");
-    };
     let margin = (f64::from(rate) / 4.0)
         .min(sweep.len() as f64 / 2.0)
         .max(64.0);
@@ -596,26 +728,82 @@ fn estimate_sweep_arrival(
     if fft > MAX_CORRELATION_FFT {
         return Err("sweep_too_long");
     }
-    let taps = arrival_bandpass(f64::from(rate), band_lo, band_hi);
-    let reference = apply_arrival_bandpass(sweep, &taps);
-    let windowed = apply_arrival_bandpass(window, &taps);
+    // Sub-band routing (§4.3 caveat): a recorded sweep with negligible
+    // energy above 300 Hz goes low-band. Detection runs on the sweep
+    // core (chirps excluded by layout) and measures the take, never
+    // the sweep config; anything unmeasurable keeps the standard
+    // estimator, which is the safe default.
+    let core_start = predicted_start.max(0.0) as usize;
+    let core_stop = (predicted_start + sweep.len() as f64)
+        .min(recorded.len() as f64)
+        .max(0.0) as usize;
+    let core = recorded
+        .get(core_start..core_stop)
+        .filter(|core| core.len() >= 64);
+    let sub = core
+        .and_then(|core| hf_energy_fraction(core, SUB_HF_CUTOFF_HZ, f64::from(rate)))
+        .is_some_and(|fraction| fraction < SUB_HF_FRACTION);
+    let (band_lo, band_hi, tap_count) = if sub {
+        let Some(band) = sub_band(sweep_lo_hz, sweep_hi_hz) else {
+            return Err("band_unsupported");
+        };
+        (band.0, band.1, SUB_FIR_TAPS)
+    } else {
+        let Some(band) = arrival_band(sweep_lo_hz, sweep_hi_hz) else {
+            return Err("band_unsupported");
+        };
+        (band.0, band.1, ARRIVAL_FIR_TAPS)
+    };
+    let taps = arrival_bandpass(f64::from(rate), band_lo, band_hi, tap_count);
+    // Detrend before the low band: DC and rumble drift would otherwise
+    // bias the low-frequency correlation pedestal.
+    let (reference, windowed) = if sub {
+        (
+            apply_arrival_bandpass(&detrend_linear(sweep), &taps),
+            apply_arrival_bandpass(&detrend_linear(window), &taps),
+        )
+    } else {
+        (
+            apply_arrival_bandpass(sweep, &taps),
+            apply_arrival_bandpass(window, &taps),
+        )
+    };
     let correlation = cross_correlate_envelope(&reference, &windowed, rate)
         .map_err(|_| "arrival_low_confidence")?;
     let confidence_db = f64::from(correlation.peak_to_sidelobe_db);
     if confidence_db.is_nan() || confidence_db < MIN_TDOA_CONFIDENCE_DB {
         return Err("arrival_low_confidence");
     }
-    let direct = crate::signal_recorder::pick_direct_arrival_from_envelope(
-        &correlation.envelope,
-        rate,
-        windowed.len(),
-    )
-    .ok_or("arrival_low_confidence")?;
     let strongest = start as f64 + correlation.peak_sample_refined;
-    let direct_at = start as f64 + direct.peak_sample_refined;
-    if (direct_at - strongest).abs() > ARRIVAL_AGREEMENT_SAMPLES {
-        return Err("arrival_ambiguous");
-    }
+    // A low-frequency hump carries ripple modulation across a wide
+    // pedestal: a first-crossing direct pick strands on ripples while
+    // the hump peak is unambiguous, so the sub-band arrival IS the
+    // peak. Early reflections inside the LF resolution merge into the
+    // hump and are budgeted through the CRLB sigma, not gated here —
+    // demanding single-sample direct/strongest agreement at LF refuses
+    // every take, valid or not.
+    let direct_at = if sub {
+        strongest
+    } else {
+        // Two rise times complete a full-band hump without reaching
+        // late reflections; the standard window still binds, so
+        // full-band behavior is unchanged.
+        let rise = (2.0 * f64::from(rate) / (band_hi - band_lo)).round();
+        let lookahead =
+            crate::signal_recorder::standard_direct_lookahead_samples(rate).max(rise as usize);
+        let direct = crate::signal_recorder::pick_direct_arrival_with_lookahead(
+            &correlation.envelope,
+            rate,
+            windowed.len(),
+            lookahead,
+        )
+        .ok_or("arrival_low_confidence")?;
+        let direct_at = start as f64 + direct.peak_sample_refined;
+        if (direct_at - strongest).abs() > ARRIVAL_AGREEMENT_SAMPLES {
+            return Err("arrival_ambiguous");
+        }
+        direct_at
+    };
     Ok(SweepArrival {
         direct_samples: direct_at,
         confidence_db,
@@ -2484,7 +2672,7 @@ mod tests {
 
     /// Build a complete synthetic single-repeat session for one mode.
     fn harness(mode: HarnessMode) -> Harness {
-        harness_repeats(mode, 1, None)
+        harness_repeats(mode, 1, None, None)
     }
 
     /// Synthesize one harness take with its clock fit into the manifest.
@@ -2499,6 +2687,7 @@ mod tests {
         mode: HarnessMode,
         golden: &Golden,
         stimulus: &crate::capture_session::protocol::CaptureStimulus,
+        take_stimulus: &[f32],
         layout: &crate::capture_session::protocol::CaptureStimulusLayout,
         rate: u32,
         rate_f64: f64,
@@ -2525,7 +2714,7 @@ mod tests {
             distance_meter(chirp_source, mic_position) / golden.sound_speed_m_s * rate_f64
         };
         let samples = synth_take(
-            &stimulus.samples,
+            take_stimulus,
             layout,
             golden.session_clock.offset_samples,
             golden.session_clock.skew_ppm,
@@ -2653,6 +2842,7 @@ mod tests {
         mode: HarnessMode,
         repeats: u32,
         wild: Option<(&str, &str, u32, f64)>,
+        sweep_override: Option<(f64, f64)>,
     ) -> Harness {
         let golden = golden();
         let rate = golden.sample_rate_hz;
@@ -2660,6 +2850,14 @@ mod tests {
             serde_json::from_str(include_str!("../../tests/fixtures/capture-session.json"))
                 .unwrap();
         plan.sweep.duration_secs = 0.25;
+        // A sub measurement session plans a genuine low-frequency
+        // sweep: the estimator can only correlate content the planned
+        // sweep actually contains, and the timing chirps stay
+        // full-band markers either way, so the clock still fits.
+        if let Some((start_hz, end_hz)) = sweep_override {
+            plan.sweep.start_hz = start_hz;
+            plan.sweep.end_hz = end_hz;
+        }
         plan.repeat_count = repeats;
         let microphone_template = plan.microphones[0].clone();
         plan.microphones = golden
@@ -2762,6 +2960,7 @@ mod tests {
                         mode,
                         &golden,
                         &stimulus,
+                        stimulus.samples.as_slice(),
                         &layout,
                         rate,
                         rate_f64,
@@ -3136,6 +3335,7 @@ mod tests {
             HarnessMode::Loopback,
             3,
             Some(("left", "mic-1", 1, wild_extra)),
+            None,
         );
         let localized = localize_session(
             &harness.report,
@@ -3190,6 +3390,47 @@ mod tests {
         "mic_bias_correction_m": 0.004,
         "mic_bias_measured": true
     }"#;
+
+    #[test]
+    fn sub_take_localizes_in_low_band() {
+        // A sub measurement session plans a genuine 20-300 Hz sweep
+        // while the timing chirps stay full-band markers, so the
+        // clock still fits and every sweep arrival goes low-band.
+        let harness = harness_repeats(HarnessMode::Loopback, 1, None, Some((20.0, 300.0)));
+        let localized = localize_session(
+            &harness.report,
+            harness.raw_root.path(),
+            harness.output.path(),
+            &harness.fits,
+        );
+        assert_eq!(localized.mode, LocalizationMode::LoopbackReferenced);
+        for row in &localized.ranges {
+            for cell in &row.cells {
+                assert_eq!(cell.band.as_deref(), Some("sweep_20_300"));
+                let key = format!("{}/{}", row.source_id, cell.microphone_id);
+                let expected = harness.golden.expected_ranges_m[&key];
+                let distance = cell.distance_m.unwrap_or(f64::NAN);
+                assert!(
+                    (distance - expected).abs() < 0.01,
+                    "{key}: got {distance}, want {expected}"
+                );
+                // The low band resolves the hump but budgets honestly:
+                // sigma stays near two decimetres while the synthetic
+                // peak itself lands within millimetres.
+                assert!(
+                    cell.sigma_m.is_some_and(|sigma| sigma > 0.05),
+                    "{key}: low-band sigma must stay wide, got {:?}",
+                    cell.sigma_m
+                );
+            }
+        }
+        for source in &localized.sources {
+            let fit = source.position_m.expect("low-band row solves");
+            let truth = harness.golden.sources_m[source.source_id.as_str()];
+            let error = distance_meter(fit, truth);
+            assert!(error < 0.01, "low-band position error {error}");
+        }
+    }
 
     #[test]
     fn bench_loader_accepts_and_rejects() {
@@ -3330,7 +3571,7 @@ mod tests {
 
     #[test]
     fn anchor_session_trusts_loopback_without_mismatch() {
-        let harness = harness_repeats(HarnessMode::Anchor, 1, None);
+        let harness = harness_repeats(HarnessMode::Anchor, 1, None, None);
         for take in &harness.report.takes {
             assert_eq!(
                 take.clock.basis,
@@ -3420,6 +3661,63 @@ mod tests {
             microphones.iter().any(|(id, _)| *id == worst),
             "worst mic {worst} must be a plan microphone"
         );
+    }
+
+    #[test]
+    fn hf_detector_separates_full_and_low_content() {
+        let rate = 48_000.0;
+        let len = 12_000_usize;
+        let sweep: Vec<f32> = (0..len)
+            .map(|n| {
+                let t = n as f64 / rate;
+                (2.0 * std::f64::consts::PI * (20.0 * t + 7980.0 * t * t / 0.5)).sin() as f32
+            })
+            .collect();
+        let full = hf_energy_fraction(&sweep, SUB_HF_CUTOFF_HZ, rate).expect("full sweep measures");
+        assert!(full > 0.5, "full sweep HF fraction {full}");
+        // Pure low-frequency tones stand in for a subwoofer recording:
+        // filtering a chirp would leave edge transients that misstate
+        // what a naturally band-limited recording looks like.
+        let low_signal: Vec<f32> = (0..len)
+            .map(|n| {
+                let t = n as f64 / rate;
+                ((2.0 * std::f64::consts::PI * 60.0 * t).sin()
+                    + 0.5 * (2.0 * std::f64::consts::PI * 150.0 * t).sin()
+                    + 0.3 * (2.0 * std::f64::consts::PI * 230.0 * t).sin()) as f32
+            })
+            .collect();
+        let low =
+            hf_energy_fraction(&low_signal, SUB_HF_CUTOFF_HZ, rate).expect("low signal measures");
+        assert!(low < 0.01, "low HF fraction {low}");
+        assert_eq!(hf_energy_fraction(&[], SUB_HF_CUTOFF_HZ, rate), None);
+        assert_eq!(
+            hf_energy_fraction(&vec![0.0; 128], SUB_HF_CUTOFF_HZ, rate),
+            None
+        );
+    }
+
+    #[test]
+    fn sub_band_supports_only_lf_sweeps() {
+        assert_eq!(sub_band(20.0, 120.0), Some((20.0, 120.0)));
+        assert_eq!(sub_band(20.0, 300.0), Some((20.0, 300.0)));
+        assert_eq!(sub_band(50.0, 20_000.0), Some((50.0, 300.0)));
+        assert_eq!(sub_band(20.0, 60.0), None);
+        assert_eq!(sub_band(2000.0, 8000.0), None);
+        assert_eq!(sub_band(f64::NAN, 300.0), None);
+    }
+
+    #[test]
+    fn detrend_removes_dc_and_drift() {
+        let signal: Vec<f32> = (0..1000)
+            .map(|n| 2.0 + 0.001 * n as f32 + (n as f32 * 0.1).sin() * 0.01)
+            .collect();
+        let clean = detrend_linear(&signal);
+        assert_eq!(clean.len(), signal.len());
+        let mean: f64 =
+            clean.iter().map(|sample| f64::from(*sample)).sum::<f64>() / clean.len() as f64;
+        assert!(mean.abs() < 1.0e-3, "residual mean {mean}");
+        assert_eq!(detrend_linear(&[]).len(), 0);
+        assert_eq!(detrend_linear(&[5.0]), vec![0.0]);
     }
 
     #[test]

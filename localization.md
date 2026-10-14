@@ -232,6 +232,23 @@ The plan must state which band produced each cell (§8.3 `band` field);
 mixing bands inside one position solve is allowed only through the
 per-cell uncertainties as weights, never silently.
 
+As built (Phase 3d): detection measures the RECORDED take
+(`hf_energy_fraction` above 300 Hz < 5% ⇒ low-band), never the sweep
+config, and errs toward the standard estimator. The low band is a
+1025-tap linear-phase 20–300 Hz FIR (a 127-tap design cannot resolve
+a 300 Hz cutoff at 48 kHz); both sides detrend first so DC/rumble
+cannot bias the pedestal. The low-band arrival IS the hump peak:
+ripple modulation across the wide LF pedestal strands a
+first-crossing direct pick on ripples, so single-sample
+direct/strongest agreement would refuse every LF take, valid or not;
+early reflections inside the LF resolution are budgeted through the
+CRLB sigma (bandwidth-widened) instead of gated. A full-band sweep
+take with LF-only content still refuses with `band_unsupported` —
+only a planned LF sweep (dedicated sub session; timing chirps stay
+full-band so the clock still fits) can correlate. Harness
+`sub_take_localizes_in_low_band`: 20–300 Hz session, band token
+`sweep_20_300`, ranges within 1 cm synthetic, σ ≈ 0.19 m.
+
 ## 5. Clock, latency, and time origin
 
 ### 5.1 What the existing clock stage already proves
@@ -626,7 +643,7 @@ inside this crate plus the pure `math-dsp` module.
 | --- | --- | --- | --- |
 | Q1 clock | take basis `Uncorrected`, or pooled-skew outlier | cell refused | `clock_uncorrected` / `clock_outlier` |
 | Q2 chirp confidence | arrival confidence < 6 dB (`MIN_TDOA_CONFIDENCE_DB`) | cell refused | `arrival_low_confidence` |
-| Q3 estimator agreement | IR vs matched-filter arrivals differ > 1.0 sample | cell excluded from solve, kept flagged in matrix | `arrival_ambiguous` |
+| Q3 estimator agreement | IR vs matched-filter arrivals differ > 1.0 sample (full-band only; the low-band arrival is the hump peak, §4.3 caveat) | cell excluded from solve, kept flagged in matrix | `arrival_ambiguous` |
 | Q4 plausibility | range < 0, > room diagonal + 5 m, or non-finite | cell refused | `range_implausible` |
 | Q5 origin | Mode C | all absolutes `None`, TDOA only | `no_absolute_time_origin` |
 | Q6 emitter anchor | measured vs surveyed emitter range off > 1 sample | session falls to Mode C | `emitter_mismatch` |
