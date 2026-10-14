@@ -6,7 +6,7 @@ use super::clock::CaptureClockBasis;
 use super::clock::io::ClockProcessedManifest;
 use super::{CalibrationOrientation, CaptureGeometry};
 use autoeq::capture_provenance::{CaptureCorrection, CaptureProvenance, CaptureTakeProvenance};
-use autoeq::read::{MeasurementMultiple, MeasurementRef};
+use autoeq::read::{EstimatedPosition, EstimatedRangeCell, MeasurementMultiple, MeasurementRef};
 use autoeq::roomeq::{
     BassAnchorChannelResultLegacy, BassAnchorResultsLegacy, MeasuredIrSource, MeasurementSource,
     ProbeChannelResultLegacy, ProbeResultsLegacy, RecordingConfiguration, RoomConfig,
@@ -35,6 +35,47 @@ fn measurement_quality_passed(analysis: &super::analysis::CaptureAnalysisReport)
 /// phase. Other sources export magnitude. Clock bounds remain mandatory for
 /// frequency-specific coherent eligibility. Calibration is already applied.
 ///
+/// Project one speaker's localization evidence into the handoff block (§8.4).
+///
+/// Emitted whenever the source has a localization entry: successes carry
+/// the estimate plus its full range row, refusals carry the reason so
+/// `RoomEQ` falls back to declared geometry with the cause attached.
+/// Returns `None` when localization never ran for this source.
+fn speaker_estimated_position(
+    report: &ClockProcessedManifest,
+    source_id: &str,
+) -> Option<EstimatedPosition> {
+    let localization = report.localization_report.as_ref()?;
+    let position = localization
+        .sources
+        .iter()
+        .find(|entry| entry.source_id == source_id)?;
+    let ranges = localization
+        .ranges
+        .iter()
+        .find(|row| row.source_id == source_id)
+        .map(|row| {
+            row.cells
+                .iter()
+                .map(|cell| EstimatedRangeCell {
+                    microphone_id: cell.microphone_id.clone(),
+                    distance_m: cell.distance_m,
+                    sigma_m: cell.sigma_m,
+                    reason: cell.reason.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(EstimatedPosition {
+        position_m: position.position_m,
+        sigma_m: position.sigma_m,
+        rms_residual_m: position.rms_residual_m,
+        mirror_ambiguous: position.mirror_ambiguous,
+        reason: position.reason.clone(),
+        ranges,
+    })
+}
+
 /// # Errors
 /// Rejects incomplete or duplicated takes, missing calibration, and nonlocal artifacts.
 #[expect(
@@ -143,6 +184,7 @@ pub fn recording_configuration(report: &ClockProcessedManifest) -> Result<RoomCo
                 measurements,
                 speaker_name: None,
                 provenance,
+                estimated_position: speaker_estimated_position(report, &source.id),
             })),
         );
     }
@@ -627,6 +669,99 @@ mod tests {
             assert!(entry.output_channel.is_none());
             assert!(entry.driver.is_none());
         }
+    }
+
+    #[test]
+    fn emitted_estimated_position_loads_into_autoeq_gate() {
+        // Phase 5 handshake: the recordings projection carries each
+        // speaker's localization block, RoomEQ parses it, and the
+        // delay-alignment gate accepts a tight estimate while naming
+        // a refused one's fallback.
+        use super::super::localization::{
+            LocalizationMode, LocalizationReport, RangeCell, SourcePosition, SourceRanges,
+        };
+        use autoeq::roomeq::{MeasurementSource, RoomConfig, SpeakerConfig};
+        let mut report = fabricated_report(None);
+        let cell = |microphone_id: &str| RangeCell {
+            microphone_id: microphone_id.into(),
+            distance_m: Some(2.5),
+            sigma_m: Some(0.002),
+            arrival_samples: None,
+            reference_arrival_samples: None,
+            tdoa_samples_vs_first: None,
+            tdoa_sigma_samples: None,
+            band: None,
+            confidence_db: None,
+            reason: None,
+        };
+        let solved = SourcePosition {
+            source_id: "left".into(),
+            position_m: Some([2.3, -1.1, 0.7]),
+            sigma_m: Some([0.004, 0.005, 0.006]),
+            rms_residual_m: Some(0.003),
+            gdop: None,
+            mirror_ambiguous: false,
+            declared_error_m: None,
+            loo_max_residual_m: None,
+            loo_worst_microphone: None,
+            loo_max_shift_m: None,
+            reason: None,
+        };
+        let refused = SourcePosition {
+            source_id: "right".into(),
+            position_m: None,
+            sigma_m: None,
+            rms_residual_m: None,
+            gdop: None,
+            mirror_ambiguous: false,
+            declared_error_m: None,
+            loo_max_residual_m: None,
+            loo_worst_microphone: None,
+            loo_max_shift_m: None,
+            reason: Some("solve_failed".into()),
+        };
+        report.localization_report = Some(LocalizationReport {
+            mode: LocalizationMode::LoopbackReferenced,
+            sound_speed_m_s: 343.0,
+            sound_speed_uncertainty_m_s: 0.5,
+            sound_speed_source: "test".into(),
+            pooled_skew_ppm: None,
+            mic_bias_correction_m: 0.0,
+            ranges: ["left", "right"]
+                .map(|source_id| SourceRanges {
+                    source_id: source_id.into(),
+                    cells: ["seat-left", "seat-right"].map(cell).to_vec(),
+                })
+                .to_vec(),
+            sources: vec![solved, refused],
+            microphones: Vec::new(),
+            joint: None,
+            issues: Vec::new(),
+        });
+        let configuration = super::recording_configuration(&report).unwrap();
+        let room: RoomConfig =
+            serde_json::from_value(serde_json::to_value(&configuration).unwrap()).unwrap();
+        let SpeakerConfig::Single(MeasurementSource::Multiple(left)) = &room.speakers["left"]
+        else {
+            panic!("left speaker keeps the capture projection shape");
+        };
+        let block = left
+            .estimated_position
+            .as_ref()
+            .expect("tight estimate projects");
+        assert_eq!(block.gated(), Ok([2.3, -1.1, 0.7]));
+        assert_eq!(block.ranges.len(), 2);
+        assert_eq!(block.ranges[0].microphone_id, "seat-left");
+        assert_eq!(block.ranges[0].distance_m, Some(2.5));
+        let SpeakerConfig::Single(MeasurementSource::Multiple(right)) = &room.speakers["right"]
+        else {
+            panic!("right speaker keeps the capture projection shape");
+        };
+        let block = right
+            .estimated_position
+            .as_ref()
+            .expect("refusals carry the reason");
+        assert_eq!(block.gated(), Err("refused_upstream"));
     }
 
     #[test]

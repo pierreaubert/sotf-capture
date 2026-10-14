@@ -731,6 +731,17 @@ to declared values with a named reason. That contract needs the autoeq
 owner's sign-off before Phase 5 starts; Phases 1–3 are entirely
 inside this crate plus the pure `math-dsp` module.
 
+As built (Phase 5, owner sign-off 2026-10-14): the block is a tight
+`estimated_position` on `MeasurementMultiple` only — position, sigma,
+RMS residual, mirror flag, upstream reason, plus the full range row —
+emitted whenever the source has a localization entry (refusals carry
+the reason). RoomEQ delay alignment consumes it through
+`EstimatedPosition::gated` (RMS ≤ 5 mm, any-axis σ ≤ 10 mm, no
+mirror, finite, unrefused) and keeps declared geometry with the
+named fallback reason otherwise. The cross-repo handshake is
+`emitted_estimated_position_loads_into_autoeq_gate`, mirroring the
+coherence sidecar test.
+
 ## 9. Quality gates (fail-closed, per cell / per source)
 
 | Gate | Condition | Effect | Reason token |
@@ -839,8 +850,10 @@ handshake test like `emitted_coherence_sidecar_loads_into_autoeq_curve`.
    (Mode B/C support stays in the plan as designed.)
 2. `autoeq` will consume estimated positions **as an input to delay
    alignment**, not display-only evidence. §8.4 is therefore a consumed
-   value with stricter gates (to be specified with the autoeq owner in
-   Phase 5: tighter residual/σ thresholds than the display-only case).
+   value with stricter gates (specified with the autoeq owner in
+   Phase 5: RMS residual ≤ 5 mm, any-axis σ ≤ 10 mm, mirror-ambiguous
+   never consumed; every fallback keeps declared geometry with a
+   named reason).
 3. Mic-count ceiling: **up to 32 microphones** (owner has 8). The plan
    schema cap of 4 (`src/capture_session.rs:352-354`) and the take-count
    limit (1024) must be raised accordingly: 32 mics × sources × repeats

@@ -2448,11 +2448,9 @@ fn try_joint_positions(
         return Err(q10);
     }
     let sample_m = sound_speed_m_s / f64::from(sample_rate_hz.max(1));
-    let Some(estimate) = joint_self_calibrate(
-        &inputs.source_seeds,
-        &inputs.mic_seeds,
-        &inputs.ranges_sm,
-    ) else {
+    let Some(estimate) =
+        joint_self_calibrate(&inputs.source_seeds, &inputs.mic_seeds, &inputs.ranges_sm)
+    else {
         let (sources, microphones, notes) = map_joint_refused(plan, ranges, sample_m);
         return Ok(JointAttempt {
             sources,
@@ -2472,8 +2470,16 @@ fn try_joint_positions(
         );
     }
     let calibration = JointCalibration {
-        sources_solved: inputs.source_seeds.iter().filter(|seed| seed.is_none()).count(),
-        microphones_solved: inputs.mic_seeds.iter().filter(|seed| seed.is_none()).count(),
+        sources_solved: inputs
+            .source_seeds
+            .iter()
+            .filter(|seed| seed.is_none())
+            .count(),
+        microphones_solved: inputs
+            .mic_seeds
+            .iter()
+            .filter(|seed| seed.is_none())
+            .count(),
         anchors: inputs
             .source_seeds
             .iter()
