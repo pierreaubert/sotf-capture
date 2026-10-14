@@ -324,11 +324,17 @@ report (§8.3). A session must not mix modes across sources.
 Deliverable of Phase 0 (§11), producing two constants stored in a small
 versioned JSON the plan can reference:
 
-1. `L` sanity value: loopback lag of the bare interface (cable DAC→ADC),
-   in samples at each supported rate. Runtime `L` is still measured per
-   session from the session loopback when present; the bench value is
-   the plausibility bound (session `L` outside bench ± 32 samples →
-   flag `latency_implausible`, suspect a driver buffer change).
+1. `L` reference value: loopback lag of the bare interface (cable
+   DAC→ADC), in samples at each supported rate. This value is operator
+   reference only — absolute session `L` is unobservable from
+   single-clock data (every clock fit's offset absorbs the electrical
+   latency together with the capture-start offset, which `clock.rs`
+   deliberately leaves arbitrary; the loopback-minus-fit residual is
+   zero by construction, not a measurement). There is therefore no
+   session-side bench comparison and no `latency_implausible` flag;
+   the emitter anchor (Q6) is the session's electrical sanity check,
+   and the three-repeat bench stability procedure below is the control
+   for driver latency drift.
 2. `b_common`: one mic of the session's model at a taped 1.000 m from a
    small full-range source, loopback-referenced; `b_common = measured
    range − 1.000 m`. Expected magnitude: a few millimetres to ~2 cm
@@ -455,12 +461,13 @@ the existing clock lines. No raw-directory mutation, no device access.
    cell remains, that cell is `None` with the clock reason propagated.
 2. **Mode decision** (§5.3): A / B / C from loopback validity and clock
    bases. Record mode + evidence.
-3. **Electrical latency `L`** (Modes A/B): from the session loopback
-   take when present (correlate loopback recording with the stimulus
-   on the shared timeline — the CTC path already keeps loopback on the
-   take timeline, `record.rs:583-597`); in Mode B from the emitter
-   geometry identity instead. Cross-check against the bench bound (§5.4)
-   when a calibration file is referenced.
+3. **Electrical latency `L`** (Modes A/B): cancelled differentially,
+   never measured absolutely. Microphone-minus-loopback arrivals share
+   one capture call, so the shared clock offset, skew mapping, and `L`
+   all cancel without resampling; in Mode B the emitter geometry
+   identity plays the same role. Absolute session `L` is unobservable
+   single-clock (see §5.4), so no bench comparison runs at process
+   time; the bench lag map stays operator reference only.
 4. **Emitter ranges (sanity anchor).** In Mode B, compute each mic's
    *measured* emitter range from chirp arrivals and compare with the
    surveyed emitter distance: residual > 1 sample on any mic ⇒ the

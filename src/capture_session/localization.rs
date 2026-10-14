@@ -35,7 +35,7 @@ use math_audio_dsp::capture_tdoa::MIN_TDOA_CONFIDENCE_DB;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Maximum tolerated disagreement between the direct and strongest sweep
 /// arrival in one take, in samples (Q3).
@@ -217,6 +217,132 @@ pub struct LocalizationReport {
     /// Session-level evidence notes and degradation warnings.
     #[serde(default)]
     pub issues: Vec<String>,
+}
+
+/// Residual matched-microphone bias after bench correction (§6.3 budget).
+///
+/// Applied to sigma only when a measured bench bias is in force;
+/// uncalibrated sessions budget nothing and disclose the zero correction
+/// through `LocalizationReport.mic_bias_correction_m` instead.
+const BENCH_BIAS_RESIDUAL_M: f64 = 0.002;
+
+/// Expected bench calibration schema (`docs/localization-bench-calibration.md` §3).
+const BENCH_CALIBRATION_SCHEMA: &str = "sotf-capture/localization-calibration";
+
+/// Supported bench calibration schema version.
+const BENCH_CALIBRATION_VERSION: u32 = 1;
+
+/// One-time bench calibration for an interface + microphone model (§5.4).
+///
+/// Loaded from the plan's `localization_calibration_file`; any load or
+/// validation failure falls back to uncalibrated (zero bias, no latency
+/// bound) with a session issue, never an aborted run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BenchCalibration {
+    /// Interface identity from the file, informational only.
+    pub interface: String,
+    /// Microphone model from the file, informational only.
+    pub microphone_model: String,
+    /// Bench loopback lag in samples by sample rate in Hz.
+    pub loopback_lag_samples: BTreeMap<u32, f64>,
+    /// Bench mic bias in meters; meaningful only when `mic_bias_measured`.
+    pub mic_bias_correction_m: f64,
+    /// Whether the bias was actually measured (`mic_bias_measured`).
+    /// An unmeasured value applies nothing even when present.
+    pub mic_bias_measured: bool,
+}
+
+/// Raw bench file shape; validated field by field in
+/// [`load_bench_calibration`] so failures name the offending entry.
+#[derive(Debug, Deserialize)]
+struct BenchCalibrationFile {
+    #[serde(default)]
+    schema: Option<String>,
+    #[serde(default)]
+    schema_version: Option<u32>,
+    #[serde(default)]
+    interface: Option<String>,
+    #[serde(default)]
+    microphone_model: Option<String>,
+    #[serde(default)]
+    latency_samples_by_rate_hz: BTreeMap<String, f64>,
+    #[serde(default)]
+    mic_bias_correction_m: Option<f64>,
+    #[serde(default)]
+    mic_bias_measured: Option<bool>,
+}
+
+/// Load and validate a bench calibration file (§5.4 format).
+///
+/// Unknown extra fields are ignored for forward compatibility;
+/// unknown schema versions are refused, never guessed.
+///
+/// # Errors
+///
+/// Rejects unreadable files, malformed JSON, wrong schemas and
+/// versions, unparsable rate keys, non-finite or negative lags, a
+/// non-finite bias, a measured flag without a value, and files
+/// providing neither a lag map nor a measured bias.
+pub fn load_bench_calibration(path: &Path) -> Result<BenchCalibration, String> {
+    let json = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let file: BenchCalibrationFile = serde_json::from_str(&json)
+        .map_err(|error| format!("cannot parse {}: {error}", path.display()))?;
+    if file.schema.as_deref() != Some(BENCH_CALIBRATION_SCHEMA) {
+        return Err(format!("schema must be {BENCH_CALIBRATION_SCHEMA}"));
+    }
+    if file.schema_version != Some(BENCH_CALIBRATION_VERSION) {
+        return Err(format!(
+            "unsupported schema version {:?}",
+            file.schema_version
+        ));
+    }
+    let mut loopback_lag_samples = BTreeMap::new();
+    for (rate, lag) in &file.latency_samples_by_rate_hz {
+        let rate_hz: u32 = rate
+            .parse()
+            .map_err(|_| format!("rate key {rate:?} is not a sample rate"))?;
+        if !lag.is_finite() || *lag < 0.0 {
+            return Err(format!(
+                "loopback lag for {rate_hz} Hz must be finite and nonnegative"
+            ));
+        }
+        loopback_lag_samples.insert(rate_hz, *lag);
+    }
+    let measured = file.mic_bias_measured.unwrap_or(false);
+    if measured && file.mic_bias_correction_m.is_none() {
+        return Err("mic_bias_measured is true but mic_bias_correction_m is absent".into());
+    }
+    if let Some(bias) = file.mic_bias_correction_m {
+        if !bias.is_finite() {
+            return Err("mic_bias_correction_m must be finite".into());
+        }
+    }
+    if loopback_lag_samples.is_empty() && !measured {
+        return Err("bench file provides neither loopback lag nor measured mic bias".into());
+    }
+    Ok(BenchCalibration {
+        interface: file.interface.unwrap_or_default(),
+        microphone_model: file.microphone_model.unwrap_or_default(),
+        loopback_lag_samples,
+        mic_bias_correction_m: file.mic_bias_correction_m.unwrap_or(0.0),
+        mic_bias_measured: measured,
+    })
+}
+
+/// Resolve a bench calibration path for processing.
+///
+/// Absolute paths pass through; relative paths resolve against the raw
+/// session root, where the operator stages the per-interface file
+/// alongside the takes. `plan-validate` checks the same path against
+/// the plan directory instead, so prefer absolute paths for bench
+/// files and treat the validate check as readability guidance.
+fn resolve_bench_path(raw_root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        raw_root.join(path)
+    }
 }
 
 /// Sweep arrival measured on one raw recording.
@@ -501,14 +627,15 @@ fn max_range_m(plan: &CaptureSessionPlan) -> f64 {
 
 /// Convert acoustic propagation samples into meters.
 ///
-/// Subtracts the declared source electronic delay when present. The
-/// matched-microphone common bias applies from Phase 3; until then the
-/// report states the zero correction explicitly.
+/// Subtracts the declared source electronic delay when present and the
+/// bench mic-bias correction (§7.2 step 6). A non-finite result refuses
+/// the cell downstream; the bias itself is validated at load time.
 fn propagation_to_meters(
     prop_samples: f64,
     rate: f64,
     sound_speed: f64,
     source: &CaptureSource,
+    mic_bias_m: f64,
 ) -> Option<f64> {
     if !prop_samples.is_finite() || !rate.is_finite() || rate <= 0.0 {
         return None;
@@ -517,7 +644,7 @@ fn propagation_to_meters(
     if let Some(delay_ms) = source.source_delay_calibration_ms {
         prop -= delay_ms / 1000.0 * rate;
     }
-    let distance = prop / rate * sound_speed;
+    let distance = prop / rate * sound_speed - mic_bias_m;
     distance.is_finite().then_some(distance)
 }
 
@@ -525,19 +652,22 @@ fn propagation_to_meters(
 ///
 /// Worst-cased sum, mirroring the clock stage: arrival/clock timing
 /// converted at the sound speed plus the fractional sound-speed error
-/// times the distance. Returns `None` when timing is unknown.
+/// times the distance plus the bench bias residual (zero when
+/// uncalibrated). Returns `None` when timing is unknown.
 fn range_sigma_m(
     sigma_time_samples: f64,
     distance: f64,
     rate: f64,
     sound_speed: f64,
     sound_speed_uncertainty: f64,
+    mic_bias_residual_m: f64,
 ) -> Option<f64> {
     if !sigma_time_samples.is_finite() || sigma_time_samples < 0.0 {
         return None;
     }
-    let sigma =
-        sound_speed * sigma_time_samples / rate + distance * sound_speed_uncertainty / sound_speed;
+    let sigma = sound_speed * sigma_time_samples / rate
+        + distance * sound_speed_uncertainty / sound_speed
+        + mic_bias_residual_m;
     sigma.is_finite().then_some(sigma)
 }
 
@@ -871,6 +1001,8 @@ fn loopback_cells(
     sound_speed_uncertainty: f64,
     max_range: f64,
     skew_ratio: f64,
+    mic_bias_m: f64,
+    mic_bias_residual_m: f64,
 ) -> SourceRanges {
     let source = &report.plan.sources[group.source_index];
     let rate = f64::from(report.plan.sample_rate_hz);
@@ -901,7 +1033,8 @@ fn loopback_cells(
             }
         };
         let prop = (arrival.direct_samples - loopback.arrival.direct_samples) / skew_ratio;
-        let Some(distance) = propagation_to_meters(prop, rate, sound_speed, source) else {
+        let Some(distance) = propagation_to_meters(prop, rate, sound_speed, source, mic_bias_m)
+        else {
             cells.push(refused_cell(&mic.id, "range_implausible"));
             continue;
         };
@@ -921,6 +1054,7 @@ fn loopback_cells(
                 rate,
                 sound_speed,
                 sound_speed_uncertainty,
+                mic_bias_residual_m,
             ),
             arrival_samples: Some(arrival.direct_samples),
             reference_arrival_samples: Some(loopback.arrival.direct_samples),
@@ -947,6 +1081,10 @@ fn loopback_cells(
     clippy::cast_precision_loss,
     reason = "Sample counts convert to f64 meters; bounded recordings stay far below precision limits."
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Mode conversion threads the decided session evidence explicitly; bundling would hide the per-cell inputs."
+)]
 fn emitter_cells(
     report: &ClockProcessedManifest,
     group: &SelectedGroup,
@@ -955,6 +1093,8 @@ fn emitter_cells(
     sound_speed: f64,
     sound_speed_uncertainty: f64,
     max_range: f64,
+    mic_bias_m: f64,
+    mic_bias_residual_m: f64,
 ) -> SourceRanges {
     let source = &report.plan.sources[group.source_index];
     let rate = f64::from(report.plan.sample_rate_hz);
@@ -987,7 +1127,8 @@ fn emitter_cells(
         };
         let ratio = 1.0 + fit.skew.skew_ppm / 1e6;
         let prop = (arrival.direct_samples - fit.skew.offset_samples) / ratio - sweep_offset;
-        let Some(distance) = propagation_to_meters(prop, rate, sound_speed, source) else {
+        let Some(distance) = propagation_to_meters(prop, rate, sound_speed, source, mic_bias_m)
+        else {
             cells.push(refused_cell(&mic.id, "range_implausible"));
             continue;
         };
@@ -1013,6 +1154,7 @@ fn emitter_cells(
                 rate,
                 sound_speed,
                 sound_speed_uncertainty,
+                mic_bias_residual_m,
             ),
             arrival_samples: Some(arrival.direct_samples),
             reference_arrival_samples: None,
@@ -1139,6 +1281,8 @@ fn build_group_row(
     sound_speed_uncertainty: f64,
     max_range: f64,
     skew_ratio: f64,
+    mic_bias_m: f64,
+    mic_bias_residual_m: f64,
 ) -> SourceRanges {
     match mode {
         LocalizationMode::LoopbackReferenced => {
@@ -1164,6 +1308,8 @@ fn build_group_row(
                 sound_speed_uncertainty,
                 max_range,
                 skew_ratio,
+                mic_bias_m,
+                mic_bias_residual_m,
             )
         }
         LocalizationMode::EmitterReferenced => emitter_cells(
@@ -1174,6 +1320,8 @@ fn build_group_row(
             sound_speed,
             sound_speed_uncertainty,
             max_range,
+            mic_bias_m,
+            mic_bias_residual_m,
         ),
         LocalizationMode::RelativeOnly => relative_cells(report, group, arrivals, skew_ratio),
     }
@@ -1586,6 +1734,29 @@ pub(super) fn localize_session(
     // A missing pool means no usable fits, so no arrival below succeeds
     // and this ratio never scales real data; 1.0 keeps refused cells exact.
     let skew_ratio = pooled.map_or(1.0, |ppm| 1.0 + ppm / 1e6);
+    // Bench calibration (§5.4): a measured bias shifts every absolute
+    // range and widens sigma by the residual budget; any load failure
+    // falls back to uncalibrated with an issue, never an aborted run.
+    // Relative paths resolve against the raw session root here (see
+    // `resolve_bench_path`); `plan-validate` checks the plan directory.
+    let bench = match report.plan.localization_calibration_file.as_ref() {
+        Some(path) => match load_bench_calibration(&resolve_bench_path(raw_root, path)) {
+            Ok(calibration) => Some(calibration),
+            Err(error) => {
+                issues.push(format!(
+                    "localization bench calibration unusable ({error}); continuing uncalibrated"
+                ));
+                None
+            }
+        },
+        None => None,
+    };
+    let (mic_bias_m, mic_bias_residual_m) = match &bench {
+        Some(calibration) if calibration.mic_bias_measured => {
+            (calibration.mic_bias_correction_m, BENCH_BIAS_RESIDUAL_M)
+        }
+        _ => (0.0, 0.0),
+    };
     // One row per plan source: every repeat votes, combined by median
     // with the inter-repeat spread widening sigma (§7.2 step 5). Mode
     // stays decided from the representative groups above.
@@ -1606,6 +1777,8 @@ pub(super) fn localize_session(
                     sound_speed_uncertainty,
                     max_range,
                     skew_ratio,
+                    mic_bias_m,
+                    mic_bias_residual_m,
                 )
             })
             .collect();
@@ -1620,7 +1793,7 @@ pub(super) fn localize_session(
         sound_speed_uncertainty_m_s: sound_speed_uncertainty,
         sound_speed_source: sound_source.into(),
         pooled_skew_ppm: pooled,
-        mic_bias_correction_m: 0.0,
+        mic_bias_correction_m: mic_bias_m,
         ranges,
         sources,
         issues,
@@ -1998,25 +2171,34 @@ mod tests {
         assert!((max_range_m(&plan) - (13.0 + RANGE_SLACK_M)).abs() < 1e-9);
         let source = &plan.sources[0];
         assert!(
-            (propagation_to_meters(480.0, 48_000.0, 343.0, source).unwrap() - 3.43).abs() < 1e-9
+            (propagation_to_meters(480.0, 48_000.0, 343.0, source, 0.0).unwrap() - 3.43).abs()
+                < 1e-9
         );
         let delayed = crate::capture_session::CaptureSource {
             source_delay_calibration_ms: Some(1.0),
             ..source.clone()
         };
         assert!(
-            (propagation_to_meters(480.0, 48_000.0, 343.0, &delayed).unwrap() - (3.43 - 0.343))
+            (propagation_to_meters(480.0, 48_000.0, 343.0, &delayed, 0.0).unwrap()
+                - (3.43 - 0.343))
+                .abs()
+                < 1e-9
+        );
+        assert!(
+            (propagation_to_meters(480.0, 48_000.0, 343.0, source, 0.01).unwrap() - (3.43 - 0.01))
                 .abs()
                 < 1e-9
         );
         assert_eq!(
-            propagation_to_meters(f64::NAN, 48_000.0, 343.0, source),
+            propagation_to_meters(f64::NAN, 48_000.0, 343.0, source, 0.0),
             None
         );
-        let sigma = range_sigma_m(1.0, 3.43, 48_000.0, 343.0, 0.5).unwrap();
+        let sigma = range_sigma_m(1.0, 3.43, 48_000.0, 343.0, 0.5, 0.0).unwrap();
         assert!(sigma > 343.0 / 48_000.0 && sigma < 0.05);
+        let biased = range_sigma_m(1.0, 3.43, 48_000.0, 343.0, 0.5, BENCH_BIAS_RESIDUAL_M).unwrap();
+        assert!((biased - sigma - BENCH_BIAS_RESIDUAL_M).abs() < 1e-12);
         assert_eq!(
-            range_sigma_m(f64::INFINITY, 3.43, 48_000.0, 343.0, 0.5),
+            range_sigma_m(f64::INFINITY, 3.43, 48_000.0, 343.0, 0.5, 0.0),
             None
         );
     }
@@ -2188,6 +2370,9 @@ mod tests {
         Loopback,
         Emitter,
         Relative,
+        /// Loopback plus surveyed emitter: the anchor configuration the
+        /// latency cross-check needs for absolute clock origins.
+        Anchor,
     }
 
     /// Synthesize one take through separate sweep and chirp paths.
@@ -2276,7 +2461,7 @@ mod tests {
         let src_prop = distance_meter(source_position, mic_position) / golden.sound_speed_m_s
             * rate_f64
             + wild_extra;
-        let chirp_prop = if mode == HarnessMode::Emitter {
+        let chirp_prop = if mode == HarnessMode::Emitter || mode == HarnessMode::Anchor {
             distance_meter(golden.timing_emitter_m, mic_position) / golden.sound_speed_m_s
                 * rate_f64
         } else {
@@ -2451,7 +2636,7 @@ mod tests {
             uncertainty_m_s: golden.sound_speed_uncertainty_m_s,
             air_temperature_c: None,
         });
-        if mode == HarnessMode::Emitter {
+        if mode == HarnessMode::Emitter || mode == HarnessMode::Anchor {
             plan.timing_reference = Some(CaptureTimingReference {
                 output_channel: 2,
                 position_m: golden.timing_emitter_m,
@@ -2460,7 +2645,7 @@ mod tests {
                 sound_speed_uncertainty_m_s: 0.1,
             });
         }
-        if mode == HarnessMode::Loopback {
+        if mode == HarnessMode::Loopback || mode == HarnessMode::Anchor {
             plan.loopback = Some(CaptureLoopback {
                 device: "iface".into(),
                 input_channel: 7,
@@ -2479,7 +2664,13 @@ mod tests {
             probe_pass: None,
             bass_anchor_pass: None,
             stimulus: layout.clone(),
-            timing_reference_output_channel: Some(if mode == HarnessMode::Emitter { 2 } else { 0 }),
+            timing_reference_output_channel: Some(
+                if mode == HarnessMode::Emitter || mode == HarnessMode::Anchor {
+                    2
+                } else {
+                    0
+                },
+            ),
             status: RawCaptureStatus::RawComplete,
             pending_processing: Vec::new(),
             calibrations: Vec::new(),
@@ -2532,7 +2723,7 @@ mod tests {
                     );
                 }
             }
-            if mode == HarnessMode::Loopback {
+            if mode == HarnessMode::Loopback || mode == HarnessMode::Anchor {
                 for repeat in 0..repeats {
                     synth_harness_loopback(
                         &golden,
@@ -2921,6 +3112,220 @@ mod tests {
         let fit = position.position_m.expect("median row solves");
         let truth = harness.golden.sources_m["left"];
         assert!(distance_meter(fit, truth) < 0.02);
+    }
+
+    fn write_bench(dir: &tempfile::TempDir, name: &str, content: &str) -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    const BENCH_VALID: &str = r#"{
+        "schema": "sotf-capture/localization-calibration",
+        "schema_version": 1,
+        "interface": "iface",
+        "microphone_model": "mic",
+        "latency_samples_by_rate_hz": {"48000": 213.0},
+        "mic_bias_correction_m": 0.004,
+        "mic_bias_measured": true
+    }"#;
+
+    #[test]
+    fn bench_loader_accepts_and_rejects() {
+        let dir = tempfile::tempdir().unwrap();
+        let calibration = load_bench_calibration(&write_bench(&dir, "bench.json", BENCH_VALID))
+            .expect("valid bench file loads");
+        assert_eq!(calibration.interface, "iface");
+        assert_eq!(calibration.microphone_model, "mic");
+        assert_eq!(calibration.loopback_lag_samples.get(&48_000), Some(&213.0));
+        assert!((calibration.mic_bias_correction_m - 0.004).abs() < 1.0e-12);
+        assert!(calibration.mic_bias_measured);
+        let rejects = [
+            (
+                "bad schema",
+                BENCH_VALID.replace("localization-calibration", "other"),
+                "schema must be",
+            ),
+            (
+                "bad version",
+                BENCH_VALID.replace("\"schema_version\": 1", "\"schema_version\": 2"),
+                "unsupported schema version",
+            ),
+            (
+                "bad rate key",
+                BENCH_VALID.replace("\"48000\"", "\"48k\""),
+                "not a sample rate",
+            ),
+            (
+                "negative lag",
+                BENCH_VALID.replace("213.0", "-1.0"),
+                "finite and nonnegative",
+            ),
+            (
+                "overflowing bias",
+                BENCH_VALID.replace("0.004", "1e400"),
+                "cannot parse",
+            ),
+            (
+                "measured without value",
+                BENCH_VALID.replace("\"mic_bias_correction_m\": 0.004,", ""),
+                "absent",
+            ),
+            ("malformed", "{oops".into(), "cannot parse"),
+        ];
+        for (name, content, fragment) in rejects {
+            let error = load_bench_calibration(&write_bench(&dir, "bench.json", &content))
+                .expect_err(&format!("{name} must fail"));
+            assert!(
+                error.contains(fragment),
+                "{name}: {error} misses {fragment:?}"
+            );
+        }
+        let vacuous = BENCH_VALID
+            .replace("\"latency_samples_by_rate_hz\": {\"48000\": 213.0},", "")
+            .replace(
+                "\"mic_bias_measured\": true",
+                "\"mic_bias_measured\": false",
+            );
+        let error = load_bench_calibration(&write_bench(&dir, "bench.json", &vacuous))
+            .expect_err("vacuous bench file must fail");
+        assert!(error.contains("neither"), "vacuous: {error}");
+        let error = load_bench_calibration(&dir.path().join("missing.json"))
+            .expect_err("missing bench file must fail");
+        assert!(error.contains("cannot read"), "missing: {error}");
+    }
+
+    #[test]
+    fn bench_bias_shifts_ranges() {
+        let mut harness = harness(HarnessMode::Loopback);
+        write_bench(
+            &harness.raw_root,
+            "bench.json",
+            &BENCH_VALID
+                .replace("\"latency_samples_by_rate_hz\": {\"48000\": 213.0},", "")
+                .replace("0.004", "0.005"),
+        );
+        harness.report.plan.localization_calibration_file = Some("bench.json".into());
+        let localize = |harness: &Harness| {
+            localize_session(
+                &harness.report,
+                harness.raw_root.path(),
+                harness.output.path(),
+                &harness.fits,
+            )
+        };
+        let localized = localize(&harness);
+        assert!(
+            (localized.mic_bias_correction_m - 0.005).abs() < 1.0e-12,
+            "bias {}",
+            localized.mic_bias_correction_m
+        );
+        for row in &localized.ranges {
+            for cell in &row.cells {
+                let key = format!("{}/{}", row.source_id, cell.microphone_id);
+                let expected = harness.golden.expected_ranges_m[&key] - 0.005;
+                let distance = cell.distance_m.unwrap_or(f64::NAN);
+                assert!(
+                    (distance - expected).abs() < 0.002,
+                    "{key}: got {distance}, want {expected}"
+                );
+                assert!(
+                    cell.sigma_m.unwrap_or(f64::NAN) > BENCH_BIAS_RESIDUAL_M,
+                    "{key}: sigma must carry the residual budget"
+                );
+            }
+        }
+        assert!(
+            localized
+                .issues
+                .iter()
+                .all(|issue| !issue.contains("bench calibration unusable")),
+            "unexpected bench issues: {:?}",
+            localized.issues
+        );
+        // An unmeasured value applies nothing even when present.
+        write_bench(
+            &harness.raw_root,
+            "bench.json",
+            &BENCH_VALID.replace(
+                "\"mic_bias_measured\": true",
+                "\"mic_bias_measured\": false",
+            ),
+        );
+        let localized = localize(&harness);
+        assert_eq!(localized.mic_bias_correction_m, 0.0);
+        for row in &localized.ranges {
+            for cell in &row.cells {
+                let key = format!("{}/{}", row.source_id, cell.microphone_id);
+                let expected = harness.golden.expected_ranges_m[&key];
+                let distance = cell.distance_m.unwrap_or(f64::NAN);
+                assert!(
+                    (distance - expected).abs() < 0.002,
+                    "{key}: got {distance}, want {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn anchor_session_trusts_loopback_without_mismatch() {
+        let harness = harness_repeats(HarnessMode::Anchor, 1, None);
+        for take in &harness.report.takes {
+            assert_eq!(
+                take.clock.basis,
+                crate::capture_session::clock::CaptureClockBasis::FixedAcousticReference,
+                "anchor takes need absolute origins"
+            );
+        }
+        let localized = localize_session(
+            &harness.report,
+            harness.raw_root.path(),
+            harness.output.path(),
+            &harness.fits,
+        );
+        assert_eq!(localized.mode, LocalizationMode::LoopbackReferenced);
+        assert!(
+            localized
+                .issues
+                .iter()
+                .all(|issue| !issue.contains("emitter_mismatch")),
+            "surveyed emitter must agree: {:?}",
+            localized.issues
+        );
+        for position in &localized.sources {
+            let truth = harness.golden.sources_m[&position.source_id];
+            let fit = position.position_m.expect("anchor ranges solve");
+            assert!(distance_meter(fit, truth) < 0.02);
+        }
+    }
+
+    #[test]
+    fn bench_missing_file_falls_back_uncalibrated() {
+        let mut harness = harness(HarnessMode::Loopback);
+        harness.report.plan.localization_calibration_file = Some("missing.json".into());
+        let localized = localize_session(
+            &harness.report,
+            harness.raw_root.path(),
+            harness.output.path(),
+            &harness.fits,
+        );
+        assert_eq!(localized.mic_bias_correction_m, 0.0);
+        assert!(
+            localized
+                .issues
+                .iter()
+                .any(|issue| issue.contains("bench calibration unusable")),
+            "missing bench file must warn: {:?}",
+            localized.issues
+        );
+        // Ranges still solve uncalibrated.
+        assert!(
+            localized
+                .ranges
+                .iter()
+                .flat_map(|row| row.cells.iter())
+                .all(|cell| cell.distance_m.is_some())
+        );
     }
 
     #[test]

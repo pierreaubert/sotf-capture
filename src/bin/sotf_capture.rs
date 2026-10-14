@@ -818,6 +818,16 @@ fn plan_validate(plan_path: &std::path::Path) -> Result<(), String> {
             failures.join("\n")
         ));
     }
+    if let Some(bench) = &session.plan().localization_calibration_file {
+        let path = plan_directory.join(bench);
+        if let Err(error) =
+            sotf_capture::capture_session::localization::load_bench_calibration(&path)
+        {
+            return Err(format!(
+                "localization bench calibration invalid (relative paths use the plan directory): {error}"
+            ));
+        }
+    }
     println!(
         "Session plan valid: {:?}, {} microphones, {} sources, {} Hz.",
         session.plan().geometry,
