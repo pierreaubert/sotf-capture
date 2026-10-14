@@ -790,6 +790,38 @@ passes. Record the achieved numbers back into §6.3's table — the
 budget is updated from measurement, not aspiration. A second run with
 all mics at one height must print the mirror warning and set the flag.
 
+Rig-run checklist (operator steps; no code changes):
+
+1. Bench first: §5.4 constants measured for this exact (interface,
+   mic model, rate) triple and referenced via
+   `localization_calibration_file`. If skipped, note the run as
+   uncalibrated — positions will carry the disclosed common radial
+   bias and the range bar below still applies differentially.
+2. Survey: tape or laser all four capsule positions to ±2 mm in one
+   room frame (floor corner origin, metres), heights spread 0.9–1.6 m;
+   tape both speaker acoustic centres the same way. Record the room
+   air temperature for the §6.2 sound speed.
+3. Plan: mic `position_m` + `position_uncertainty_mm`, both source
+   ids, loopback route, room dimensions. `plan-validate` must print
+   no localization readiness warnings — a warning here aborts the
+   run, not the analysis later.
+4. Record one session per source layout (`plan-record`), then
+   `plan-process`. Keep the raw directory: the run is re-analysable
+   after every code change.
+5. Compare, per source×mic cell: reported range vs tape (bar: 2 cm);
+   per source: estimated position vs tape per axis (bar: 4 cm);
+   Q6 emitter anchor passes; no cell refused for a reason the room
+   cannot explain (a `clock_outlier` or `arrival_ambiguous` on a
+   clean line-of-sight take fails the run — investigate, do not
+   widen the bar).
+6. Write the achieved max range error, max per-axis position error,
+   and typical σ back into §6.3's table as a "Rig measured" column
+   with the date and rig fingerprint.
+7. Negative control: lower all mics to one height, re-survey,
+   re-record, re-process. `plan-validate` must warn pre-recording
+   and the output must carry the mirror flag — elevations from this
+   run are not trusted, by design (§6.4).
+
 ## 14. Future extension: leaving the single-interface assumption
 
 If multi-device microphone rigs are ever required, the changes are
