@@ -3,6 +3,7 @@ use super::misc::ASIO_DEVICE_PREFIX;
 
 /// Strip the "ASIO:" prefix from a device identifier, returning the actual device name.
 /// Case-insensitive: "ASIO:", "asio:", "Asio:" prefixes are all stripped.
+#[must_use]
 pub fn strip_asio_prefix(identifier: &str) -> &str {
     if is_asio_device(identifier) {
         &identifier[ASIO_DEVICE_PREFIX.len()..]

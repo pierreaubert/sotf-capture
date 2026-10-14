@@ -36,7 +36,7 @@ impl LiveLevelConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.input_device.trim().is_empty()
             || self.input_channel >= 64
-            || !(8000..=384000).contains(&self.sample_rate_hz)
+            || !(8000..=384_000).contains(&self.sample_rate_hz)
             || !(256..=16384).contains(&self.fft_size)
             || !self.fft_size.is_power_of_two()
             || !self.duration_secs.is_finite()
@@ -147,6 +147,10 @@ fn level_db(amplitude: f64) -> Option<f64> {
     (amplitude > 0.0 && amplitude.is_finite()).then(|| 20.0 * amplitude.log10())
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Sample counts normalize f64 power; practical FFT windows fit exactly in f64."
+)]
 fn analyze_frame(
     analyzer: &mut SpectrumAnalyzer,
     samples: &[f32],
@@ -264,6 +268,14 @@ where
 /// # Errors
 /// Rejects invalid settings, unsupported formats/rates/channels, device or
 /// analysis errors, and errors returned by the consumer. No output audio plays.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Frame sequence counts are converted to f64 only for monitoring throughput."
+)]
 pub fn stream_live_levels(
     config: &LiveLevelConfig,
     cancel: &AtomicBool,
@@ -450,6 +462,11 @@ pub fn stream_live_levels(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "Synthetic fixtures use bounded sample counts and intentionally quantized audio; exact comparisons verify unchanged settings and samples."
+)]
 mod tests {
     use super::*;
 

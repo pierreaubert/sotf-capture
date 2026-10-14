@@ -19,7 +19,7 @@ use std::collections::HashMap;
 ///
 /// On Windows with the `asio` feature enabled, if the identifier starts with "ASIO:",
 /// returns the ASIO host. Otherwise returns the default host (WASAPI on Windows,
-/// CoreAudio on macOS, ALSA on Linux).
+/// `CoreAudio` on macOS, ALSA on Linux).
 ///
 /// # ASIO Usage
 ///
@@ -34,6 +34,7 @@ use std::collections::HashMap;
 /// - ASIO drivers installed for the audio hardware
 /// - The `asio` feature enabled at build time (requires Steinberg ASIO SDK)
 /// - Exclusive device access (other apps can't use the device simultaneously)
+#[must_use]
 pub fn get_host_for_device(device_identifier: Option<&str>) -> cpal::Host {
     #[cfg(all(target_os = "windows", feature = "asio"))]
     {
@@ -81,7 +82,7 @@ pub fn get_host_for_device(device_identifier: Option<&str>) -> cpal::Host {
     cpal::default_host()
 }
 
-/// Extract device info from cpal device using description() and id()
+/// Extract device info from cpal device using `description()` and `id()`
 fn get_device_info<D: DeviceTrait>(device: &D) -> Option<(String, Option<String>, Option<String>)> {
     // Get display name from description
     let desc = device.description().ok()?;
@@ -108,6 +109,13 @@ fn get_device_info<D: DeviceTrait>(device: &D) -> Option<(String, Option<String>
 }
 
 /// Get information about all available audio devices
+///
+/// # Errors
+/// Returns an error if input or output devices cannot be enumerated.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Device enumeration and negotiation keep platform-specific fallbacks in one ordered routine."
+)]
 pub fn get_audio_devices() -> Result<HashMap<String, Vec<AudioDevice>>, String> {
     let host = cpal::default_host();
     let mut devices_map = HashMap::new();
@@ -175,8 +183,7 @@ pub fn get_audio_devices() -> Result<HashMap<String, Vec<AudioDevice>>, String> 
                             // Get current sample rate from device default
                             let current_sample_rate = device
                                 .default_input_config()
-                                .map(|cfg| cfg.sample_rate())
-                                .unwrap_or(48000); // Fallback to 48kHz
+                                .map_or(48000, |cfg| cfg.sample_rate()); // Fallback to 48kHz
 
                             let default_cfg = max_channel_config.map(|config| {
                                 // Use current sample rate, clamped to supported range
@@ -198,7 +205,7 @@ pub fn get_audio_devices() -> Result<HashMap<String, Vec<AudioDevice>>, String> 
                                 sample_rates.insert(config.min_sample_rate());
                                 sample_rates.insert(config.max_sample_rate());
                                 // Add common rates if in range
-                                for &rate in &[44100, 48000, 88200, 96000, 176400, 192000] {
+                                for &rate in &[44100, 48000, 88200, 96000, 176_400, 192_000] {
                                     if rate >= config.min_sample_rate()
                                         && rate <= config.max_sample_rate()
                                     {
@@ -220,11 +227,10 @@ pub fn get_audio_devices() -> Result<HashMap<String, Vec<AudioDevice>>, String> 
                             available_sample_rates.first(),
                             available_sample_rates.last(),
                         ) {
-                            (None, _) => "unknown".to_string(),
                             (Some(rate), Some(_)) if available_sample_rates.len() == 1 => {
-                                format!("{} Hz", rate)
+                                format!("{rate} Hz")
                             }
-                            (Some(first), Some(last)) => format!("{}-{} Hz", first, last),
+                            (Some(first), Some(last)) => format!("{first}-{last} Hz"),
                             _ => "unknown".to_string(),
                         };
                         format!(
@@ -249,7 +255,7 @@ pub fn get_audio_devices() -> Result<HashMap<String, Vec<AudioDevice>>, String> 
             }
         }
         Err(e) => {
-            log::debug!("[AUDIO ERROR] Failed to enumerate input devices: {}", e);
+            log::debug!("[AUDIO ERROR] Failed to enumerate input devices: {e}");
             // Continue with empty input devices list rather than failing completely
         }
     }
@@ -283,8 +289,8 @@ pub fn get_audio_devices() -> Result<HashMap<String, Vec<AudioDevice>>, String> 
                                 48000,
                                 88200,
                                 96000,
-                                176400,
-                                192000,
+                                176_400,
+                                192_000,
                                 config_range.min_sample_rate(),
                                 config_range.max_sample_rate(),
                             ] {
@@ -345,8 +351,7 @@ pub fn get_audio_devices() -> Result<HashMap<String, Vec<AudioDevice>>, String> 
                         // Get current sample rate from device default
                         let current_sample_rate = device
                             .default_output_config()
-                            .map(|cfg| cfg.sample_rate())
-                            .unwrap_or(48000); // Fallback to 48kHz
+                            .map_or(48000, |cfg| cfg.sample_rate()); // Fallback to 48kHz
 
                         let default_cfg = max_channel_config.map(|config| {
                             // Use current sample rate, clamped to supported range
@@ -368,7 +373,7 @@ pub fn get_audio_devices() -> Result<HashMap<String, Vec<AudioDevice>>, String> 
                             sample_rates.insert(config.min_sample_rate());
                             sample_rates.insert(config.max_sample_rate());
                             // Add common rates if in range
-                            for &rate in &[44100, 48000, 88200, 96000, 176400, 192000] {
+                            for &rate in &[44100, 48000, 88200, 96000, 176_400, 192_000] {
                                 if rate >= config.min_sample_rate()
                                     && rate <= config.max_sample_rate()
                                 {
@@ -390,11 +395,10 @@ pub fn get_audio_devices() -> Result<HashMap<String, Vec<AudioDevice>>, String> 
                             available_sample_rates.first(),
                             available_sample_rates.last(),
                         ) {
-                            (None, _) => "unknown".to_string(),
                             (Some(rate), Some(_)) if available_sample_rates.len() == 1 => {
-                                format!("{} Hz", rate)
+                                format!("{rate} Hz")
                             }
-                            (Some(first), Some(last)) => format!("{}-{} Hz", first, last),
+                            (Some(first), Some(last)) => format!("{first}-{last} Hz"),
                             _ => "unknown".to_string(),
                         };
                         format!(
@@ -419,7 +423,7 @@ pub fn get_audio_devices() -> Result<HashMap<String, Vec<AudioDevice>>, String> 
             }
         }
         Err(e) => {
-            log::debug!("[AUDIO ERROR] Failed to enumerate output devices: {}", e);
+            log::debug!("[AUDIO ERROR] Failed to enumerate output devices: {e}");
             // Continue with empty output devices list rather than failing completely
         }
     }
@@ -447,8 +451,12 @@ pub fn get_audio_devices() -> Result<HashMap<String, Vec<AudioDevice>>, String> 
     // Note: Using map_or instead of is_none_or for Rust 1.90.0 stability
     // (is_none_or requires Rust 1.82.0+)
     #[allow(clippy::unnecessary_map_or)]
-    if devices_map.get("input").map_or(true, |v| v.is_empty())
-        && devices_map.get("output").map_or(true, |v| v.is_empty())
+    if devices_map
+        .get("input")
+        .map_or(true, std::vec::Vec::is_empty)
+        && devices_map
+            .get("output")
+            .map_or(true, std::vec::Vec::is_empty)
     {
         log::debug!("[AUDIO WARNING] No audio devices found on the system");
     }
@@ -463,6 +471,7 @@ pub fn get_audio_devices() -> Result<HashMap<String, Vec<AudioDevice>>, String> 
 ///
 /// # Returns
 /// Sorted Vec of supported sample rates, or None if device not found
+#[must_use]
 pub fn get_device_supported_sample_rates(device_identifier: Option<&str>) -> Option<Vec<u32>> {
     let host = cpal::default_host();
 
@@ -484,7 +493,7 @@ pub fn get_device_supported_sample_rates(device_identifier: Option<&str>) -> Opt
             sample_rates.insert(config.min_sample_rate());
             sample_rates.insert(config.max_sample_rate());
             // Add common rates if in range
-            for &rate in &[44100u32, 48000, 88200, 96000, 176400, 192000] {
+            for &rate in &[44100u32, 48000, 88200, 96000, 176_400, 192_000] {
                 if rate >= config.min_sample_rate() && rate <= config.max_sample_rate() {
                     sample_rates.insert(rate);
                 }
@@ -513,6 +522,7 @@ pub fn get_device_supported_sample_rates(device_identifier: Option<&str>) -> Opt
 ///
 /// # Returns
 /// The device's current sample rate, or None if device not found
+#[must_use]
 pub fn get_device_current_sample_rate(device_identifier: Option<&str>) -> Option<u32> {
     let host = cpal::default_host();
 
@@ -530,39 +540,35 @@ pub fn get_device_current_sample_rate(device_identifier: Option<&str>) -> Option
                 return None;
             }
         };
-        match devices
+        if let Some(d) = devices
             .into_iter()
             .find(|d| device_matches_str(d, identifier))
         {
-            Some(d) => d,
-            None => {
-                crate::rate_limited_log!(
-                    warn,
-                    5,
-                    "[AUDIO] Device '{}' not found for sample rate query",
-                    identifier
-                );
-                return None;
-            }
+            d
+        } else {
+            crate::rate_limited_log!(
+                warn,
+                5,
+                "[AUDIO] Device '{}' not found for sample rate query",
+                identifier
+            );
+            return None;
         }
+    } else if let Some(d) = find_real_output_device(&host) {
+        d
     } else {
-        match find_real_output_device(&host) {
-            Some(d) => d,
-            None => {
-                crate::rate_limited_log!(
-                    warn,
-                    5,
-                    "[AUDIO] No default output device available for sample rate query"
-                );
-                return None;
-            }
-        }
+        crate::rate_limited_log!(
+            warn,
+            5,
+            "[AUDIO] No default output device available for sample rate query"
+        );
+        return None;
     };
 
     match device.default_output_config() {
         Ok(config) => {
             let rate = config.sample_rate();
-            log::debug!("[AUDIO] Device sample rate query successful: {}Hz", rate);
+            log::debug!("[AUDIO] Device sample rate query successful: {rate}Hz");
             Some(rate)
         }
         Err(e) => {
@@ -578,15 +584,25 @@ pub fn get_device_current_sample_rate(device_identifier: Option<&str>) -> Option
 }
 
 /// Get the current audio configuration
+///
+/// # Errors
+/// Returns an error if the shared audio state lock is poisoned.
 pub fn get_audio_config(audio_state: &SharedAudioState) -> Result<AudioState, String> {
     let state = audio_state.lock().map_err(|e| {
-        log::debug!("[AUDIO ERROR] Failed to lock audio state: {}", e);
-        format!("Failed to lock audio state: {}", e)
+        log::debug!("[AUDIO ERROR] Failed to lock audio state: {e}");
+        format!("Failed to lock audio state: {e}")
     })?;
     Ok(state.clone())
 }
 
 /// Get detailed properties of a specific audio device
+///
+/// # Errors
+/// Returns an error if enumeration fails or the requested device cannot be found.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public API accepting an owned cancellation handle for existing callers."
+)]
 pub fn get_device_properties(
     device_identifier: String,
     is_input: bool,
@@ -596,21 +612,20 @@ pub fn get_device_properties(
     // Find the device by ID or name
     let device = if is_input {
         host.input_devices()
-            .map_err(|e| format!("Failed to enumerate input devices: {}", e))?
+            .map_err(|e| format!("Failed to enumerate input devices: {e}"))?
             .find(|d| device_matches(d, &device_identifier))
     } else {
         host.output_devices()
-            .map_err(|e| format!("Failed to enumerate output devices: {}", e))?
+            .map_err(|e| format!("Failed to enumerate output devices: {e}"))?
             .find(|d| device_matches(d, &device_identifier))
     };
 
-    let device = device.ok_or_else(|| format!("Device '{}' not found", device_identifier))?;
+    let device = device.ok_or_else(|| format!("Device '{device_identifier}' not found"))?;
 
     // Get display name from description
     let display_name = device
         .description()
-        .map(|d| d.name().to_string())
-        .unwrap_or_else(|_| device_identifier.clone());
+        .map_or_else(|_| device_identifier.clone(), |d| d.name().to_string());
 
     // Get all supported configurations
     let mut properties = serde_json::json!({

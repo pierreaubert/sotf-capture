@@ -17,6 +17,14 @@ fn setup() -> (tempfile::TempDir, ValidatedCaptureSession) {
     (root, plan.validate().unwrap())
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "The fixture implements the capture callback contract, which transfers its request by value."
+)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "The fixture implements the fallible capture callback contract."
+)]
 fn fake_capture(
     request: MultiCaptureRequest,
     _: &CancelFlag,
@@ -492,8 +500,8 @@ fn auxiliary_passes_honor_cancellation() {
 
 #[test]
 fn ctc_sessions_record_one_loopback_take_per_source() {
-    let (root, plain) = setup();
-    let mut plan = plain.plan().clone();
+    let (root, original) = setup();
+    let mut plan = original.plan().clone();
     for input_channel in [2, 3] {
         let mut mic = plan.microphones[0].clone();
         mic.id = format!("extra-{input_channel}");

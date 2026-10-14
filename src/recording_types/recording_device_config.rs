@@ -13,7 +13,7 @@ pub struct RecordingDeviceConfig {
     /// Mapping from physical input channels to recording channels
     pub channel_mappings: Vec<usize>,
     /// Calibration file path per mic slot — indexed by mic index, NOT by
-    /// hardware input channel (parallel to channel_mappings)
+    /// hardware input channel (parallel to `channel_mappings`)
     #[serde(default)]
     pub mic_calibration_paths: Vec<Option<String>>,
     /// Number of measurement positions (seats). Each position runs a full
@@ -39,7 +39,7 @@ impl Default for RecordingDeviceConfig {
             device_name: String::new(),
             num_channels: 1,
             sample_rate: 48000,
-            available_sample_rates: vec![44100, 48000, 88200, 96000, 176400, 192000],
+            available_sample_rates: vec![44100, 48000, 88200, 96000, 176_400, 192_000],
             channel_mappings: vec![0],
             mic_calibration_paths: vec![None],
             num_positions: 1,
@@ -51,6 +51,7 @@ impl Default for RecordingDeviceConfig {
 
 impl RecordingDeviceConfig {
     /// Get the calibration file path for a given channel index
+    #[must_use]
     pub fn calibration_for_channel(&self, idx: usize) -> Option<&str> {
         self.mic_calibration_paths
             .get(idx)
@@ -67,7 +68,7 @@ impl RecordingDeviceConfig {
         self.mic_calibration_paths[idx] = path;
     }
 
-    /// Pad mic_calibration_paths to match channel_mappings length
+    /// Pad `mic_calibration_paths` to match `channel_mappings` length
     pub fn sync_calibration_paths(&mut self) {
         while self.mic_calibration_paths.len() < self.channel_mappings.len() {
             self.mic_calibration_paths.push(None);

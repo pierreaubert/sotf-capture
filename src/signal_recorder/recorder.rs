@@ -105,7 +105,7 @@ impl std::fmt::Debug for CpalRecorder {
             .field("active", &self.stream.is_some())
             .field("channels", &self.consumers.len())
             .field("sample_rate", &self.sample_rate)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -124,6 +124,10 @@ impl CpalRecorder {
 }
 
 impl SweepRecorder for CpalRecorder {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+    )]
     fn start(
         &mut self,
         device: Option<&str>,
@@ -157,8 +161,7 @@ impl SweepRecorder for CpalRecorder {
             "[{tag}] Input device: {}",
             input_device
                 .description()
-                .map(|d| d.name().to_string())
-                .unwrap_or_else(|_| "Unknown Device".to_string())
+                .map_or_else(|_| "Unknown Device".to_string(), |d| d.name().to_string())
         );
 
         let default_input_config = input_device.default_input_config().map_err(|e| {
@@ -186,7 +189,7 @@ impl SweepRecorder for CpalRecorder {
                             && c.min_sample_rate() <= sample_rate
                             && c.max_sample_rate() >= sample_rate
                     })
-                    .min_by_key(|c| c.channels())
+                    .min_by_key(cpal::SupportedStreamConfigRange::channels)
             });
 
         let (hardware_input_channels, input_sample_rate) = if let Some(config) = best_config {
@@ -211,7 +214,8 @@ impl SweepRecorder for CpalRecorder {
         check_input_channels(channels, hardware_input_channels)?;
 
         let input_config = cpal::StreamConfig {
-            channels: hardware_input_channels as u16,
+            channels: u16::try_from(hardware_input_channels)
+                .map_err(|_| "hardware input channel count exceeds u16".to_string())?,
             sample_rate: input_sample_rate,
             buffer_size: cpal::BufferSize::Default,
         };
@@ -264,7 +268,7 @@ impl SweepRecorder for CpalRecorder {
                     }
                 },
                 move |err| {
-                    crate::rate_limited_log!(warn, 5, "[{error_tag}] Input stream error: {err}")
+                    crate::rate_limited_log!(warn, 5, "[{error_tag}] Input stream error: {err}");
                 },
                 None,
             )
@@ -292,8 +296,7 @@ impl SweepRecorder for CpalRecorder {
     fn captured_samples(&self) -> usize {
         self.counts
             .first()
-            .map(|count| count.load(Ordering::Relaxed))
-            .unwrap_or(0)
+            .map_or(0, |count| count.load(Ordering::Relaxed))
     }
 
     fn stop(&mut self) -> Result<RecordedTake, String> {

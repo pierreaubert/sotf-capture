@@ -1,8 +1,16 @@
+#![expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "Synthetic fixtures use bounded sample counts and intentionally quantized audio; exact comparisons verify unchanged settings and samples."
+)]
+
 use super::*;
 use crate::capture_session::protocol::prepare_capture_stimulus;
 use crate::capture_session::record::RawCaptureStatus;
 use crate::capture_session::{CaptureGeometry, CaptureSessionPlan, CaptureTimingReference};
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 
 #[derive(Deserialize)]
 struct Golden {
@@ -248,6 +256,10 @@ fn write_golden_directory() -> tempfile::TempDir {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "This end-to-end fixture keeps setup, execution, and artifact assertions together."
+)]
 fn saved_golden_session_round_trips_clock_provenance_and_magnitude_fallback() {
     let root = write_golden_directory();
     let output = root.path().join("processed");
@@ -324,13 +336,9 @@ fn saved_golden_session_round_trips_clock_provenance_and_magnitude_fallback() {
         capture.reflection_report.as_ref().unwrap().source_id,
         "left"
     );
-    assert!(
-        !capture
-            .reflection_report
-            .as_ref()
-            .unwrap()
-            .issues
-            .is_empty()
+    assert_ne!(
+        capture.reflection_report.as_ref().unwrap().issues,
+        [] as [std::string::String; 0]
     );
     assert_eq!(
         capture.takes[0].microphone_id,
@@ -507,6 +515,10 @@ fn golden_sample_rate(manifest: &crate::capture_session::record::RawCaptureManif
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "This end-to-end fixture keeps setup, execution, and artifact assertions together."
+)]
 fn ctc_assembly_crops_raw_takes_into_stereo_ears_loopback_and_reference() {
     use crate::capture_session::record::CaptureLoopbackTake;
     use crate::capture_session::{CaptureCtc, CaptureHeadPosition, CaptureLoopback};
@@ -841,7 +853,7 @@ fn write_response_csv(dir: &std::path::Path, name: &str, freqs: &[f64]) -> std::
     let path = dir.join(name);
     let mut text = String::from("frequency_hz,spl_db,phase_deg\n");
     for frequency in freqs {
-        text.push_str(&format!("{frequency},80.0,0.0\n"));
+        writeln!(text, "{frequency},80.0,0.0").unwrap();
     }
     std::fs::write(&path, text).unwrap();
     path
@@ -970,7 +982,10 @@ fn clock_skew_warnings_flag_severe_skew_and_wander() {
     // Small stable skews on every take stay quiet.
     report.takes[0].clock.skew_ppm = Some(40.0);
     report.takes[1].clock.skew_ppm = Some(-30.0);
-    assert!(io::clock_skew_warnings(&report).is_empty());
+    assert_eq!(
+        io::clock_skew_warnings(&report),
+        [] as [std::string::String; 0]
+    );
 }
 
 #[test]
@@ -988,6 +1003,12 @@ fn clock_skew_lines_mark_unknown_and_empty_runs() {
             .all(|warning| !warning.contains("exceeds"))
     );
     report.takes.clear();
-    assert!(io::clock_skew_lines(&report).is_empty());
-    assert!(io::clock_skew_warnings(&report).is_empty());
+    assert_eq!(
+        io::clock_skew_lines(&report),
+        [] as [std::string::String; 0]
+    );
+    assert_eq!(
+        io::clock_skew_warnings(&report),
+        [] as [std::string::String; 0]
+    );
 }

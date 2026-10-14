@@ -6,7 +6,7 @@ use super::misc::fill_measurement_output;
 use super::types::MeasurementOutputConfig;
 #[cfg(not(target_os = "ios"))]
 use super::write::write_capture_pairs_to_ring;
-use math_audio_dsp::signals::*;
+use math_audio_dsp::signals::gen_log_sweep_octave_scaled;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -14,6 +14,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 ///
 /// Returns `[pre_silence | sweep | post_silence]` as a flat `Vec<f32>`.
 /// This is the core of the GD-Opt v2 Phase GD-1b signal path.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "Nonnegative silence durations round to whole frames using the same f32 rate as the sweep generator."
+)]
 pub(super) fn build_octave_sweep_with_silence(
     start_freq: f32,
     end_freq: f32,
@@ -51,7 +57,7 @@ pub(super) fn build_octave_sweep_with_silence(
 #[cfg(not(target_os = "ios"))]
 pub(super) fn build_measurement_output_stream(
     device: &cpal::Device,
-    output_config: &MeasurementOutputConfig,
+    output_config: MeasurementOutputConfig,
     playback: Arc<Vec<f32>>,
     cursor: Arc<std::sync::atomic::AtomicUsize>,
     log_tag: &str,
@@ -105,7 +111,7 @@ where
         .build_output_stream(
             config,
             move |data: &mut [T], _| fill_measurement_output(data, &playback, &cursor),
-            move |err| log::debug!("[{log_tag_owned}] Output stream error: {}", err),
+            move |err| log::debug!("[{log_tag_owned}] Output stream error: {err}"),
             None,
         )
         .map_err(|e| {
@@ -213,7 +219,7 @@ where
                     5,
                     "[{log_tag_for_error}] Input stream error: {}",
                     err
-                )
+                );
             },
             None,
         )

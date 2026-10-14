@@ -319,7 +319,7 @@ fn test_list_asio_devices_returns_vec() {
     // On non-Windows or without ASIO feature, returns empty vec
     let devices = list_asio_devices();
     #[cfg(not(all(target_os = "windows", feature = "asio")))]
-    assert!(devices.is_empty());
+    assert_eq!(devices, [] as [std::string::String; 0]);
     let _ = devices;
 }
 

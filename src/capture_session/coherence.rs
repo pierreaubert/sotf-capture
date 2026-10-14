@@ -24,6 +24,10 @@ const MIN_SEGMENT_SAMPLES: usize = 256;
 /// Both inputs must share their length; acoustic-scale delays need no
 /// alignment. Fails when the pair is empty, mismatched, or too short for
 /// [`COHERENCE_SEGMENTS`] half-overlapping segments.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "FFT bin indices and buffer lengths are converted to f64 for frequency coordinates."
+)]
 pub(super) fn spectral_coherence(
     recorded: &[f32],
     reference: &[f32],
@@ -75,6 +79,10 @@ pub(super) fn spectral_coherence(
 }
 
 /// Copy samples into a Hann-windowed complex buffer of equal length.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Hann-window coefficients use floating-point sample positions over an allocated audio buffer."
+)]
 fn fill_windowed(samples: &[f32], windowed: &mut [Complex64]) {
     let last = (samples.len() - 1) as f64;
     for (n, sample) in samples.iter().enumerate() {
@@ -84,6 +92,11 @@ fn fill_windowed(samples: &[f32], windowed: &mut [Complex64]) {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "Synthetic fixtures use bounded sample counts and intentionally quantized audio; exact comparisons verify unchanged settings and samples."
+)]
 mod tests {
     use super::*;
 
@@ -160,8 +173,8 @@ mod tests {
     #[test]
     fn mismatched_or_short_pairs_are_refused() {
         assert!(spectral_coherence(&[], &[], 48000).is_err());
-        assert!(spectral_coherence(&[0.1; 48000], &[0.1; 47999], 48000).is_err());
+        assert!(spectral_coherence(&vec![0.1; 48000], &vec![0.1; 47999], 48000).is_err());
         assert!(spectral_coherence(&[0.1; 100], &[0.1; 100], 48000).is_err());
-        assert!(spectral_coherence(&[0.1; 48000], &[0.1; 48000], 0).is_err());
+        assert!(spectral_coherence(&vec![0.1; 48000], &vec![0.1; 48000], 0).is_err());
     }
 }

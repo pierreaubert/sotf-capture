@@ -43,6 +43,12 @@ const INTER_TAKE_SETTLE_MS: u64 = 300;
 const MIN_NOISE_FLOOR_WINDOW_SAMPLES: usize = 2048;
 
 #[cfg(not(target_os = "ios"))]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "The positive resampling ratio rounds the allocated reference length up to whole output frames."
+)]
 pub(super) fn resample_reference_signal(
     signal: &[f32],
     source_rate: u32,
@@ -53,6 +59,8 @@ pub(super) fn resample_reference_signal(
         Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
         WindowFunction, calculate_cutoff,
     };
+
+    const CHUNK_SIZE: usize = 1_024;
 
     if source_rate == target_rate {
         return Ok(signal.to_vec());
@@ -65,7 +73,6 @@ pub(super) fn resample_reference_signal(
     // (128-tap BlackmanHarris2, linear phase-table interpolation, 256x
     // oversampling). Fixed-ratio offline use never touches the plugin's
     // dynamic cutoff bank, so plain construction reproduces its output.
-    const CHUNK_SIZE: usize = 1_024;
     let params = SincInterpolationParameters {
         sinc_len: 128,
         f_cutoff: Some(calculate_cutoff(128, WindowFunction::BlackmanHarris2)),
@@ -74,7 +81,7 @@ pub(super) fn resample_reference_signal(
         window: WindowFunction::BlackmanHarris2,
     };
     let mut resampler = Async::<f32>::new_sinc(
-        target_rate as f64 / source_rate as f64,
+        f64::from(target_rate) / f64::from(source_rate),
         2.0,
         &params,
         CHUNK_SIZE,
@@ -83,10 +90,10 @@ pub(super) fn resample_reference_signal(
     )
     .map_err(|e| format!("Failed to create resampler: {e:?}"))?;
     let expected_len =
-        (signal.len() as f64 * target_rate as f64 / source_rate as f64).ceil() as usize;
+        (signal.len() as f64 * f64::from(target_rate) / f64::from(source_rate)).ceil() as usize;
     let filter_delay = resampler.output_delay();
     let aligned_end = filter_delay.saturating_add(expected_len);
-    let mut resampled = Vec::with_capacity(aligned_end + CHUNK_SIZE);
+    let mut output_samples = Vec::with_capacity(aligned_end + CHUNK_SIZE);
 
     // FixedAsync::Input consumes exact chunks; pad the short tail with
     // zeros (equivalent to the plugin's residual-plus-silence drain,
@@ -107,14 +114,14 @@ pub(super) fn resample_reference_signal(
         let (_, produced) = resampler
             .process_into_buffer(&input_adapter, &mut output_adapter, None)
             .map_err(|e| format!("Resampling failed: {e:?}"))?;
-        resampled.extend_from_slice(&output[0][..produced]);
+        output_samples.extend_from_slice(&output[0][..produced]);
     }
 
     // Feed silence until rubato has emitted the complete valid tail. Trimming
     // its output-domain filter delay then aligns sample zero while retaining
     // exactly the duration represented by the original reference.
     let zero_input = vec![vec![0.0f32; CHUNK_SIZE]];
-    while resampled.len() < aligned_end {
+    while output_samples.len() < aligned_end {
         let input_adapter = SequentialSliceOfVecs::new(&zero_input, 1, CHUNK_SIZE)
             .map_err(|e| format!("Resampling failed: {e:?}"))?;
         let mut output = vec![vec![0.0f32; resampler.output_frames_max()]];
@@ -127,10 +134,10 @@ pub(super) fn resample_reference_signal(
         if produced == 0 {
             return Err("Resampler made no progress while draining its filter tail".to_string());
         }
-        resampled.extend_from_slice(&output[0][..produced]);
+        output_samples.extend_from_slice(&output[0][..produced]);
     }
 
-    Ok(resampled[filter_delay..aligned_end].to_vec())
+    Ok(output_samples[filter_delay..aligned_end].to_vec())
 }
 
 /// One raw play/record cycle of the sweep-capture machinery: the captured
@@ -190,6 +197,14 @@ pub(super) fn cancel_aware_stop(
 /// `Err(CANCELLED_ERR)` ("cancelled").
 #[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Sample counts convert to floating-point seconds and RMS normalization for capture diagnostics."
+)]
 fn capture_sweep_take(
     playback: &mut impl super::playback::SweepPlayback,
     recorder: &mut impl super::recorder::SweepRecorder,
@@ -210,17 +225,17 @@ fn capture_sweep_take(
     }
 
     log::debug!("[record_and_analyze] Starting playback and recording...");
-    log::debug!("[record_and_analyze]   Playback file: {:?}", temp_wav_path);
-    log::debug!("[record_and_analyze]   Output channel: {}", output_channel);
-    log::debug!("[record_and_analyze]   Input channel: {}", input_channel);
-    log::debug!("[record_and_analyze]   Sample rate: {}", sample_rate);
+    log::debug!(
+        "[record_and_analyze]   Playback file: {}",
+        temp_wav_path.display()
+    );
+    log::debug!("[record_and_analyze]   Output channel: {output_channel}");
+    log::debug!("[record_and_analyze]   Input channel: {input_channel}");
+    log::debug!("[record_and_analyze]   Sample rate: {sample_rate}");
 
     // Calculate expected duration
-    let expected_duration = reference_signal.len() as f64 / sample_rate as f64;
-    log::info!(
-        "[record_and_analyze]   Expected duration: {:.2}s",
-        expected_duration
-    );
+    let expected_duration = reference_signal.len() as f64 / f64::from(sample_rate);
+    log::info!("[record_and_analyze]   Expected duration: {expected_duration:.2}s");
 
     // Open the input side first so a missing or unusable mic fails fast,
     // before playback starts through the caller-chosen backend.
@@ -281,12 +296,9 @@ fn capture_sweep_take(
 
         // Print progress every second
         if elapsed.as_millis() % 1000 < check_interval.as_millis() {
-            let recorded_duration = current_sample_count as f64 / negotiated.sample_rate as f64;
+            let recorded_duration = current_sample_count as f64 / f64::from(negotiated.sample_rate);
             log::info!(
-                "[record_and_analyze] Recording progress: {:.2}s / {:.2}s ({} samples)",
-                recorded_duration,
-                expected_duration,
-                current_sample_count
+                "[record_and_analyze] Recording progress: {recorded_duration:.2}s / {expected_duration:.2}s ({current_sample_count} samples)"
             );
         }
 
@@ -332,55 +344,54 @@ fn capture_sweep_take(
         ));
     }
     let mut per_channel = take.recorded_per_channel;
-    let recorded = per_channel.swap_remove(0);
+    let input_samples = per_channel.swap_remove(0);
     // Use the actual input sample rate for duration/WAV/analysis calculations
     let analysis_sample_rate = take.analysis_sample_rate;
     let dropped_samples = take.dropped_samples;
-    let recorded_duration = recorded.len() as f64 / analysis_sample_rate as f64;
+    let recorded_duration = input_samples.len() as f64 / f64::from(analysis_sample_rate);
     log::info!(
         "[record_and_analyze] Total recorded: {} samples ({:.2}s at {}Hz)",
-        recorded.len(),
+        input_samples.len(),
         recorded_duration,
         analysis_sample_rate,
     );
 
-    if recorded.is_empty() {
+    if input_samples.is_empty() {
         return Err("No samples were recorded".to_string());
     }
 
     // Diagnostic: check recorded signal statistics
-    let max_amplitude = recorded.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
-    let rms = (recorded.iter().map(|s| s * s).sum::<f32>() / recorded.len() as f32).sqrt();
+    let max_amplitude = input_samples
+        .iter()
+        .map(|s| s.abs())
+        .fold(0.0_f32, f32::max);
+    let rms =
+        (input_samples.iter().map(|s| s * s).sum::<f32>() / input_samples.len() as f32).sqrt();
     let rms_db = if rms > 0.0 {
         20.0 * rms.log10()
     } else {
         f32::NEG_INFINITY
     };
     log::info!(
-        "[record_and_analyze] Recorded signal: max={:.6}, RMS={:.6} ({:.1} dBFS)",
-        max_amplitude,
-        rms,
-        rms_db,
+        "[record_and_analyze] Recorded signal: max={max_amplitude:.6}, RMS={rms:.6} ({rms_db:.1} dBFS)",
     );
     if max_amplitude < 1e-6 {
         // Consistent with the aux capture path (`play_per_channel_and_record_mono`):
         // a silent take must not silently succeed and feed garbage to roomeq.
         return Err(format!(
-            "[record_and_analyze] Recording appears silent (peak {:.6}). Check mic, input channel, and output device availability.",
-            max_amplitude
+            "[record_and_analyze] Recording appears silent (peak {max_amplitude:.6}). Check mic, input channel, and output device availability."
         ));
     }
     if rms_db < -60.0 {
         log::warn!(
-            "[record_and_analyze] WARNING: Recorded signal is very quiet ({:.1} dBFS RMS)",
-            rms_db
+            "[record_and_analyze] WARNING: Recorded signal is very quiet ({rms_db:.1} dBFS RMS)"
         );
     }
     // Refuse hard-clipped takes; warn on moderate clipping.
-    check_capture_clipping(&recorded, "record_and_analyze")?;
+    check_capture_clipping(&input_samples, "record_and_analyze")?;
 
     Ok(RawSweepTake {
-        recorded,
+        recorded: input_samples,
         analysis_sample_rate,
         dropped_samples,
     })
@@ -392,6 +403,14 @@ fn capture_sweep_take(
 /// [`analyze_sweep_takes`].
 #[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Sample counts convert to f64 seconds only for capture progress and diagnostics."
+)]
 fn capture_sweep_take_multi(
     playback: &mut impl super::playback::SweepPlayback,
     recorder: &mut impl super::recorder::SweepRecorder,
@@ -413,17 +432,11 @@ fn capture_sweep_take_multi(
 
     let num_mics = input_channels.len();
     log::info!(
-        "[record_and_analyze_multi] Starting: {} mics, output_ch={}, input_chs={:?}",
-        num_mics,
-        output_channel,
-        input_channels,
+        "[record_and_analyze_multi] Starting: {num_mics} mics, output_ch={output_channel}, input_chs={input_channels:?}",
     );
 
-    let expected_duration = reference_signal.len() as f64 / sample_rate as f64;
-    log::info!(
-        "[record_and_analyze_multi] Expected duration: {:.2}s",
-        expected_duration,
-    );
+    let expected_duration = reference_signal.len() as f64 / f64::from(sample_rate);
+    log::info!("[record_and_analyze_multi] Expected duration: {expected_duration:.2}s");
 
     // Open the input side first so a missing or unusable mic fails fast,
     // before playback starts through the caller-chosen backend.
@@ -477,11 +490,9 @@ fn capture_sweep_take_multi(
         let current_sample_count = recorder.captured_samples();
 
         if elapsed.as_millis() % 1000 < check_interval.as_millis() {
-            let recorded_duration = current_sample_count as f64 / negotiated.sample_rate as f64;
+            let recorded_duration = current_sample_count as f64 / f64::from(negotiated.sample_rate);
             log::info!(
-                "[record_and_analyze_multi] Progress: {:.2}s / {:.2}s",
-                recorded_duration,
-                expected_duration,
+                "[record_and_analyze_multi] Progress: {recorded_duration:.2}s / {expected_duration:.2}s",
             );
         }
 
@@ -525,7 +536,7 @@ fn capture_sweep_take_multi(
 
     let mut recorded_per_mic = Vec::with_capacity(num_mics);
     for (mic_i, recorded) in take.recorded_per_channel.into_iter().enumerate() {
-        let recorded_duration = recorded.len() as f64 / analysis_sample_rate as f64;
+        let recorded_duration = recorded.len() as f64 / f64::from(analysis_sample_rate);
         log::info!(
             "[record_and_analyze_multi] Mic {}: {} samples ({:.2}s)",
             mic_i,
@@ -534,7 +545,7 @@ fn capture_sweep_take_multi(
         );
 
         if recorded.is_empty() {
-            return Err(format!("No samples recorded on mic {}", mic_i));
+            return Err(format!("No samples recorded on mic {mic_i}"));
         }
 
         // Consistent with the single-mic sweep path and the aux capture
@@ -542,8 +553,7 @@ fn capture_sweep_take_multi(
         let peak = recorded.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
         if peak < 1e-6 {
             return Err(format!(
-                "[record_and_analyze_multi] Mic {} recording appears silent (peak {:.6}). Check mic, input channel, and output device availability.",
-                mic_i, peak
+                "[record_and_analyze_multi] Mic {mic_i} recording appears silent (peak {peak:.6}). Check mic, input channel, and output device availability."
             ));
         }
         // Refuse hard-clipped takes; warn on moderate clipping.
@@ -565,7 +575,7 @@ fn capture_sweep_take_multi(
 type TakeDrift = (Option<ClockDriftEstimate>, bool, Option<(f64, String)>);
 
 /// Timing-chirp information for per-take drift estimation, when the take
-/// carries identical chirps at both ends (capture_session plans). The
+/// carries identical chirps at both ends (`capture_session` plans). The
 /// template is correlated inside windows around the coarse expected
 /// positions; `spacing_samples` is the exact stimulus-clock chirp distance.
 #[cfg(not(target_os = "ios"))]
@@ -730,8 +740,7 @@ fn lock_failure_with_evidence(
     let name = format!("{stem}.nolock-take{}.wav", take_index + 1);
     let path = recorded_wav_path
         .parent()
-        .map(|parent| parent.join(&name))
-        .unwrap_or_else(|| PathBuf::from(&name));
+        .map_or_else(|| PathBuf::from(&name), |parent| parent.join(&name));
     match super::write::write_wav_file(&path, raw, sample_rate, 1) {
         Ok(()) => format!("{error} (raw take preserved at {})", path.display()),
         Err(write_error) => {
@@ -751,8 +760,7 @@ fn lock_failure_with_evidence(
 #[cfg(not(target_os = "ios"))]
 pub(super) fn drift_correction_discard_message(ppm: f64) -> String {
     format!(
-        "clock drift correction at {:.1} ppm was discarded after lag-lock verification failed; the raw capture was kept and needs review",
-        ppm
+        "clock drift correction at {ppm:.1} ppm was discarded after lag-lock verification failed; the raw capture was kept and needs review"
     )
 }
 
@@ -777,8 +785,6 @@ pub(super) fn correction_keeps_lock(
     corrected: &[f32],
     sample_rate: u32,
 ) -> bool {
-    use math_audio_dsp::analysis::MeasurementQualityConfig;
-
     // Compare advised locks (full-overlap checked): a correction that only
     // partially locks is suspect. If the raw take never locked there is no
     // good lock to destroy — leave the verdict to the downstream gates
@@ -787,12 +793,11 @@ pub(super) fn correction_keeps_lock(
     else {
         return true;
     };
-    let corrected_lock =
-        match super::quality::estimate_lag_or_advise(reference, corrected, "drift-verify") {
-            Ok(lock) => lock,
-            // The corrected take no longer locks at all — discard.
-            Err(_) => return false,
-        };
+    let Ok(corrected_lock) =
+        super::quality::estimate_lag_or_advise(reference, corrected, "drift-verify")
+    else {
+        return false;
+    };
     let minimum = MeasurementQualityConfig::default().minimum_lag_confidence;
     if corrected_lock.confidence < raw_lock.confidence * 0.5 {
         return false;
@@ -800,8 +805,8 @@ pub(super) fn correction_keeps_lock(
     if corrected_lock.confidence < minimum && raw_lock.confidence >= minimum {
         return false;
     }
-    let lag_tolerance = (sample_rate / 50).max(1) as isize; // 20 ms
-    (corrected_lock.lag_samples - raw_lock.lag_samples).abs() <= lag_tolerance
+    let lag_tolerance = usize::try_from((sample_rate / 50).max(1)).unwrap_or(usize::MAX); // 20 ms
+    corrected_lock.lag_samples.abs_diff(raw_lock.lag_samples) <= lag_tolerance
 }
 
 /// REW-style synchronous averaging: align each accepted take at its lag,
@@ -809,6 +814,11 @@ pub(super) fn correction_keeps_lock(
 /// is what gets written to disk and analyzed, so the final curve is
 /// consistent with the averaged-complex response used for coherence.
 #[cfg(not(target_os = "ios"))]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "Repeat averaging accumulates in f64 and intentionally returns f32 audio samples."
+)]
 fn average_aligned_takes(
     takes: &[Vec<f32>],
     lag_estimates: &[LagEstimate],
@@ -816,7 +826,7 @@ fn average_aligned_takes(
 ) -> Result<Vec<f32>, String> {
     let mut common_len = 0;
     for &index in accepted_indices {
-        let lag = lag_estimates[index].lag_samples.max(0) as usize;
+        let lag = usize::try_from(lag_estimates[index].lag_samples).unwrap_or(0);
         common_len = common_len.max(takes[index].len().saturating_sub(lag));
     }
     if common_len == 0 {
@@ -826,9 +836,9 @@ fn average_aligned_takes(
     }
     let mut sum = vec![0.0_f64; common_len];
     for &index in accepted_indices {
-        let lag = lag_estimates[index].lag_samples.max(0) as usize;
+        let lag = usize::try_from(lag_estimates[index].lag_samples).unwrap_or(0);
         for (out, &sample) in sum.iter_mut().zip(takes[index][lag..].iter()) {
-            *out += sample as f64;
+            *out += f64::from(sample);
         }
     }
     let scale = 1.0 / accepted_indices.len() as f64;
@@ -839,10 +849,10 @@ fn average_aligned_takes(
 /// e.g. `L.wav` → `L.take2.wav` for the second take.
 #[cfg(not(target_os = "ios"))]
 fn raw_take_wav_path(recorded_wav_path: &Path, take_index: usize) -> PathBuf {
-    let stem = recorded_wav_path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "recording".to_string());
+    let stem = recorded_wav_path.file_stem().map_or_else(
+        || "recording".to_string(),
+        |stem| stem.to_string_lossy().into_owned(),
+    );
     recorded_wav_path.with_file_name(format!("{stem}.take{}.wav", take_index + 1))
 }
 
@@ -852,10 +862,10 @@ fn raw_take_wav_path(recorded_wav_path: &Path, take_index: usize) -> PathBuf {
 /// Removal failures are logged and ignored.
 #[cfg(not(target_os = "ios"))]
 fn remove_stale_take_wavs(recorded_wav_path: &Path, log_tag: &str) {
-    let stem = recorded_wav_path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "recording".to_string());
+    let stem = recorded_wav_path.file_stem().map_or_else(
+        || "recording".to_string(),
+        |stem| stem.to_string_lossy().into_owned(),
+    );
     let prefix = format!("{stem}.take");
     let Some(parent) = recorded_wav_path.parent() else {
         return;
@@ -864,8 +874,8 @@ fn remove_stale_take_wavs(recorded_wav_path: &Path, log_tag: &str) {
         Ok(entries) => entries,
         Err(e) => {
             log::warn!(
-                "[{log_tag}] Could not list {:?} for stale take-WAV cleanup: {e}",
-                parent
+                "[{log_tag}] Could not list {} for stale take-WAV cleanup: {e}",
+                parent.display()
             );
             return;
         }
@@ -882,8 +892,8 @@ fn remove_stale_take_wavs(recorded_wav_path: &Path, log_tag: &str) {
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
         if is_take_wav && let Err(e) = std::fs::remove_file(entry.path()) {
             log::warn!(
-                "[{log_tag}] Could not remove stale take WAV {:?}: {e}",
-                entry.path()
+                "[{log_tag}] Could not remove stale take WAV {}: {e}",
+                entry.path().display()
             );
         }
     }
@@ -894,7 +904,7 @@ fn remove_stale_take_wavs(recorded_wav_path: &Path, log_tag: &str) {
 fn write_and_verify_mono_wav(path: &Path, samples: &[f32], sample_rate: u32) -> Result<(), String> {
     write_wav_file(path, samples, sample_rate, 1)?;
     let reader =
-        hound::WavReader::open(path).map_err(|e| format!("Failed to verify WAV file: {}", e))?;
+        hound::WavReader::open(path).map_err(|e| format!("Failed to verify WAV file: {e}"))?;
     if reader.spec().channels != 1 {
         return Err(format!(
             "ERROR: WAV file has {} channels instead of 1 (mono)!",
@@ -907,6 +917,10 @@ fn write_and_verify_mono_wav(path: &Path, samples: &[f32], sample_rate: u32) -> 
 /// Frequency of each bin of a one-sided FFT spectrum (`fft_size/2 + 1` bins,
 /// matching math-dsp's `deconvolve_sweep` / noise-floor grids).
 #[cfg(not(target_os = "ios"))]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "FFT bin indices and the audio rate are intentionally represented on an f32 frequency grid."
+)]
 fn fft_bin_frequencies(bin_count: usize, sample_rate: u32) -> Vec<f32> {
     let fft_size = bin_count.saturating_sub(1) * 2;
     if fft_size == 0 {
@@ -921,15 +935,15 @@ fn fft_bin_frequencies(bin_count: usize, sample_rate: u32) -> Vec<f32> {
 ///
 /// The capture lead-in before the reference's first sample arrives
 /// (`take[..lag]`) is room noise; when the reference itself starts with
-/// pre-silence (OctaveSweep's default 2 s), that silence is part of the
+/// pre-silence (`OctaveSweep`'s default 2 s), that silence is part of the
 /// aligned reference content, so the take's noise region extends through
 /// `lag + active_reference_start`. Both regions are contiguous, so the
 /// window is simply `take[..lag + active_start]` (clamped, and shrunk for
 /// negative lags).
 #[cfg(not(target_os = "ios"))]
 fn pre_silence_window<'a>(take: &'a [f32], reference: &[f32], lag: &LagEstimate) -> &'a [f32] {
-    let active_start = super::quality::active_reference_start(reference) as isize;
-    let noise_len = (active_start + lag.lag_samples).max(0) as usize;
+    let active_start = super::quality::active_reference_start(reference);
+    let noise_len = active_start.saturating_add_signed(lag.lag_samples);
     &take[..noise_len.min(take.len())]
 }
 
@@ -944,11 +958,10 @@ pub(super) fn active_take_span<'a>(
     reference: &[f32],
     lag: &LagEstimate,
 ) -> &'a [f32] {
-    let start = super::quality::active_reference_start(reference) as isize + lag.lag_samples;
-    let end = start + super::quality::active_reference_span(reference).len() as isize;
-    let take_len = take.len() as isize;
-    let clamped_start = start.clamp(0, take_len) as usize;
-    let clamped_end = end.clamp(0, take_len) as usize;
+    let start = super::quality::active_reference_start(reference);
+    let end = start.saturating_add(super::quality::active_reference_span(reference).len());
+    let clamped_start = start.saturating_add_signed(lag.lag_samples).min(take.len());
+    let clamped_end = end.saturating_add_signed(lag.lag_samples).min(take.len());
     if clamped_end <= clamped_start {
         return &[];
     }
@@ -996,6 +1009,10 @@ fn longest_pre_silence<'a>(
 /// take in a `*.take{N}.wav` sibling so per-take raw data survives.
 #[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
 pub(super) fn analyze_sweep_takes(
     recorded_wav_path: &Path,
     output_csv_path: &Path,
@@ -1144,7 +1161,7 @@ pub(super) fn analyze_sweep_takes(
                     &take_tag,
                     recorded_wav_path,
                     take_index,
-                    raw_takes.get(take_index).map(Vec::as_slice).unwrap_or(&[]),
+                    raw_takes.get(take_index).map_or(&[][..], Vec::as_slice),
                     analysis_sample_rate,
                     error,
                 ));
@@ -1186,16 +1203,16 @@ pub(super) fn analyze_sweep_takes(
             fft_bin_frequencies(response.len(), analysis_sample_rate),
             measured_db,
         ));
-        if !averaged.averaged.coherence.is_empty() {
-            coherence_grid = Some((
-                fft_bin_frequencies(averaged.averaged.coherence.len(), analysis_sample_rate),
-                averaged.averaged.coherence.clone(),
-            ));
-        } else {
+        if averaged.averaged.coherence.is_empty() {
             log::info!(
                 "[{log_tag}] Coherence unavailable ({accepted_count} accepted takes < 4) — \
                  the CSV column is omitted and autoeq's gate will degrade as designed"
             );
+        } else {
+            coherence_grid = Some((
+                fft_bin_frequencies(averaged.averaged.coherence.len(), analysis_sample_rate),
+                averaged.averaged.coherence.clone(),
+            ));
         }
 
         let silence = longest_pre_silence(
@@ -1256,9 +1273,9 @@ pub(super) fn analyze_sweep_takes(
     );
     write_and_verify_mono_wav(recorded_wav_path, &analysis_capture, analysis_sample_rate)?;
     log::info!(
-        "[{log_tag}] Wrote {} samples as MONO (1 channel) to {:?}",
+        "[{log_tag}] Wrote {} samples as MONO (1 channel) to {}",
         analysis_capture.len(),
-        recorded_wav_path
+        recorded_wav_path.display()
     );
 
     // Repeat captures preserve every raw (pre-drift-correction) take next to
@@ -1274,15 +1291,15 @@ pub(super) fn analyze_sweep_takes(
             let raw_path = raw_take_wav_path(recorded_wav_path, take_index);
             if let Err(e) = write_wav_file(&raw_path, raw, analysis_sample_rate, 1) {
                 log::warn!(
-                    "[{log_tag}] Failed to preserve raw take WAV {:?} ({e}) — continuing; the averaged measurement is unaffected",
-                    raw_path
+                    "[{log_tag}] Failed to preserve raw take WAV {} ({e}) — continuing; the averaged measurement is unaffected",
+                    raw_path.display()
                 );
             }
         }
         log::info!(
-            "[{log_tag}] Preserved {} raw take WAV(s) next to {:?} (*.takeN.wav)",
+            "[{log_tag}] Preserved {} raw take WAV(s) next to {} (*.takeN.wav)",
             raw_takes.len(),
-            recorded_wav_path
+            recorded_wav_path.display()
         );
     }
 
@@ -1364,7 +1381,10 @@ pub(super) fn analyze_sweep_takes(
         coherence_column.as_deref(),
         noise_floor_column.as_deref(),
     )?;
-    log::info!("[{log_tag}] Wrote analysis to {:?}", output_csv_path);
+    log::info!(
+        "[{log_tag}] Wrote analysis to {}",
+        output_csv_path.display()
+    );
 
     // High-distortion advisory from the harmonic-only Farina sweep estimate.
     // The structured finding below keeps invalid or unavailable estimates
@@ -1459,8 +1479,15 @@ pub(super) fn analyze_sweep_takes(
 /// `cancel` is a cooperative cancellation flag (see [`CancelFlag`]): when
 /// set, the capture stops the streams and returns
 /// `Err(CANCELLED_ERR)` ("cancelled") instead of analyzing.
+///
+/// # Errors
+/// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
 #[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public API accepting an owned cancellation handle for existing callers."
+)]
 pub fn record_and_analyze_with_recorder(
     playback: &mut impl super::playback::SweepPlayback,
     recorder: &mut impl super::recorder::SweepRecorder,
@@ -1552,10 +1579,7 @@ pub fn record_and_analyze_with_recorder(
 
     // Load microphone compensation if provided
     let compensation = if let Some(comp_path) = microphone_compensation_path {
-        log::info!(
-            "[record_and_analyze] Loading microphone compensation from {:?}",
-            comp_path
-        );
+        log::info!("[record_and_analyze] Loading microphone compensation from {comp_path:?}");
         Some(MicrophoneCompensation::from_file(Path::new(comp_path))?)
     } else {
         None
@@ -1586,6 +1610,9 @@ pub fn record_and_analyze_with_recorder(
 /// `cancel` is a cooperative cancellation flag (see [`CancelFlag`]): when
 /// set, the capture stops the streams and returns
 /// `Err(CANCELLED_ERR)` ("cancelled") instead of analyzing.
+///
+/// # Errors
+/// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
 #[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 pub fn record_and_analyze_with(
@@ -1652,8 +1679,18 @@ pub fn record_and_analyze_with(
 /// `cancel` is a cooperative cancellation flag (see [`CancelFlag`]): when
 /// set, the capture stops the streams and returns
 /// `Err(CANCELLED_ERR)` ("cancelled") instead of analyzing.
+///
+/// # Errors
+/// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
+///
+/// # Panics
+/// Panics if the path or calibration counts differ from the input channel count.
 #[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public API accepting an owned cancellation handle for existing callers."
+)]
 pub fn record_and_analyze_with_multi_recorder(
     playback: &mut impl super::playback::SweepPlayback,
     recorder: &mut impl super::recorder::SweepRecorder,
@@ -1793,6 +1830,9 @@ pub fn record_and_analyze_with_multi_recorder(
 /// `cancel` is a cooperative cancellation flag (see [`CancelFlag`]): when
 /// set, the capture stops the streams and returns
 /// `Err(CANCELLED_ERR)` ("cancelled") instead of analyzing.
+///
+/// # Errors
+/// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
 #[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 pub fn record_and_analyze_with_multi(

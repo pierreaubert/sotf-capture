@@ -37,7 +37,7 @@ pub enum ChannelRecordingState {
 /// Extracted from `crate::signal_recorder::CaptureAnalysis` by
 /// [`crate::recording_helpers::summarize_take_quality`] and stored on
 /// [`RecordingResult`] so the verdict survives from capture completion to
-/// the point where the user reviews it. Canonical RoomConfig serialization
+/// the point where the user reviews it. Canonical `RoomConfig` serialization
 /// does not include this value; frontends persist it in the versioned
 /// adjacent quality sidecar. `None` means quality was not measured or no
 /// matching, current sidecar evidence was available — never infer a pass.
@@ -85,7 +85,7 @@ pub struct MicrophonePreset {
     pub device_name: String,
     /// Physical input channels used
     pub channel_mappings: Vec<usize>,
-    /// Calibration file per channel (parallel to channel_mappings)
+    /// Calibration file per channel (parallel to `channel_mappings`)
     pub mic_calibration_paths: Vec<Option<String>>,
 }
 
@@ -132,6 +132,7 @@ pub struct RecordingResult {
 impl RecordingResult {
     /// Whether the measured frequency response carries enough timing evidence
     /// to reconstruct an impulse without inventing phase or sample rate.
+    #[must_use]
     pub fn can_reconstruct_impulse(&self) -> bool {
         self.sample_rate_hz.is_some_and(|rate| rate > 0)
             && self.frequencies.len() >= 2
@@ -151,6 +152,7 @@ impl RecordingResult {
 
     /// Measured impulse and its original millisecond axis, when valid.
     /// This evidence does not require guessing a legacy take's sample rate.
+    #[must_use]
     pub fn measured_impulse(&self) -> Option<(&[f32], &[f32])> {
         let times = self.impulse_time_ms.as_deref()?;
         let impulse = self.impulse_response.as_deref()?;

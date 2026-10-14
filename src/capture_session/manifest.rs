@@ -1,4 +1,4 @@
-//! Canonical RoomEQ recording export with ordered per-microphone clock evidence.
+//! Canonical `RoomEQ` recording export with ordered per-microphone clock evidence.
 
 // Rust guideline compliant 2026-02-21
 
@@ -37,6 +37,14 @@ fn measurement_quality_passed(analysis: &super::analysis::CaptureAnalysisReport)
 ///
 /// # Errors
 /// Rejects incomplete or duplicated takes, missing calibration, and nonlocal artifacts.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Validated capture levels and frequencies are intentionally exported through the f32 recording schema."
+)]
 pub fn recording_configuration(report: &ClockProcessedManifest) -> Result<RoomConfig, String> {
     report
         .plan
@@ -203,8 +211,13 @@ fn recording_setup_description(plan: &super::CaptureSessionPlan) -> String {
 
 /// Actual played sweep seconds from the journaled stimulus layout.
 ///
-/// Bass weighting extends the sweep past its nominal duration; RoomEQ
+/// Bass weighting extends the sweep past its nominal duration; `RoomEQ`
 /// must see the played span, not the nominal one.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "The recording schema stores duration in f32, matching the stimulus generator."
+)]
 fn recording_signal_duration_secs(report: &ClockProcessedManifest) -> f32 {
     report.stimulus.sweep_samples as f32 / f64::from(report.plan.sample_rate_hz) as f32
 }
@@ -213,6 +226,10 @@ fn recording_signal_duration_secs(report: &ClockProcessedManifest) -> f32 {
 ///
 /// The plan value when bass weighting was played, else the effective dwell
 /// of the plain log sweep (equal time per octave across the whole band).
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Validated sweep timing is intentionally converted to the f32 recording schema."
+)]
 fn recording_bass_octave_duration_s(plan: &super::CaptureSessionPlan) -> f32 {
     plan.sweep.bass_octave_duration_s.unwrap_or_else(|| {
         (plan.sweep.duration_secs / (plan.sweep.end_hz / plan.sweep.start_hz).log2()) as f32
@@ -264,7 +281,7 @@ fn legacy_bass_anchor_results(
 
 /// Measured room IR declarations, one per source, from one microphone.
 ///
-/// RoomEQ admits a single IR per delivered channel, so the selected
+/// `RoomEQ` admits a single IR per delivered channel, so the selected
 /// microphone (explicit `--ir-microphone`, else the first plan microphone)
 /// backs every source entry. Sources whose take lacks a deconvolved IR are
 /// omitted; their report cells stay pending rather than borrowing audio.
@@ -325,20 +342,19 @@ fn measured_impulse_responses(
 pub(crate) fn selected_takes(
     report: &ClockProcessedManifest,
 ) -> Result<HashMap<(&str, &str), &super::clock::io::ClockProcessedTake>, String> {
-    let selected_ids = if let Some(selected_ids) = &report.selected_take_ids {
-        selected_ids
-    } else if report.plan.repeat_count == 1
-        && matches!(
-            report.raw_status,
-            None | Some(super::record::RawCaptureStatus::RawComplete)
-        )
-    {
-        // Backward-compatible single-repeat projection. Older clock reports do
-        // not carry raw_status or a selection marker; select_matrix still
-        // requires exactly one completed take for every planned pair. Explicit
-        // Cancelled/Failed/Capturing parents need a selection marker.
-        return select_matrix(report, None);
-    } else {
+    let Some(selected_ids) = &report.selected_take_ids else {
+        if report.plan.repeat_count == 1
+            && matches!(
+                report.raw_status,
+                None | Some(super::record::RawCaptureStatus::RawComplete)
+            )
+        {
+            // Backward-compatible single-repeat projection. Older clock reports do
+            // not carry raw_status or a selection marker; select_matrix still
+            // requires exactly one completed take for every planned pair. Explicit
+            // Cancelled/Failed/Capturing parents need a selection marker.
+            return select_matrix(report, None);
+        }
         return Err("partial or repeated captures require explicit selected take IDs".into());
     };
     select_matrix(report, Some(selected_ids))
@@ -462,6 +478,10 @@ pub(crate) fn take_provenance(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Synthetic fixtures use bounded sample counts and intentionally quantized audio; exact comparisons verify unchanged settings and samples."
+)]
 mod tests {
     use super::super::analysis::{CaptureAnalysisReport, CapturePhaseArtifacts};
     use super::super::clock::CaptureClockBasis;

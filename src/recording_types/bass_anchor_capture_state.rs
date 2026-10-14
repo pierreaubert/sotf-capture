@@ -1,7 +1,7 @@
 use super::bass_anchor_capture_status::BassAnchorCaptureStatus;
 pub use crate::signal_recorder::BassAnchorResults;
 
-/// Shared business state for the Recording wizard "BassAnchor" step.
+/// Shared business state for the Recording wizard "`BassAnchor`" step.
 ///
 /// Lives alongside [`ProbeCaptureState`]. The raw results come from
 /// the engine (`BassAnchorResults`) and flow at save time into
@@ -63,6 +63,7 @@ impl BassAnchorCaptureState {
     }
 
     /// Return whether a completion belongs to the current bass-anchor task.
+    #[must_use]
     pub fn is_current_capture(&self, generation: u64) -> bool {
         self.capture_generation == generation
     }
@@ -76,6 +77,7 @@ impl BassAnchorCaptureState {
     /// `true` when every channel's stability metric is under the 20°
     /// advisory threshold from the GD-Opt v2 plan §2.8
     /// (`docs/gd_opt_v2_plan.md` in the autoeq repo).
+    #[must_use]
     pub fn all_channels_reliable(&self) -> bool {
         match (&self.status, &self.results) {
             (BassAnchorCaptureStatus::Complete, Some(r)) => r

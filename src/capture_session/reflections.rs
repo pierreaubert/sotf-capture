@@ -44,6 +44,10 @@ fn event_energy_levels(
         .unwrap_or_default()
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Saved f64 impulse samples intentionally feed the f32 reflection-analysis API."
+)]
 fn load_impulse(root: &Path, name: &str, rate: u32) -> Result<Vec<f32>, String> {
     let mut components = Path::new(name).components();
     if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
@@ -93,6 +97,14 @@ pub(super) fn analyze_sources(
         .collect()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Allocated impulse-response sample indices are converted to f64 milliseconds."
+)]
 fn analyze_source(
     report: &ClockProcessedManifest,
     root: &Path,
@@ -147,8 +159,8 @@ fn analyze_source(
         return Err("array IR lengths differ or microphones are missing".into());
     }
     bounds.sort_by(|a, b| b.total_cmp(a));
-    let relative_us = bounds[0] + bounds[1];
-    high_hz = high_hz.min(25_000.0 / relative_us);
+    let timing_bound_us = bounds[0] + bounds[1];
+    high_hz = high_hz.min(25_000.0 / timing_bound_us);
     // C5 uses 343 m/s internally. Scale geometry to preserve surveyed travel times.
     let scale = math_audio_dsp::capture_array::SPEED_OF_SOUND_M_S / reference.sound_speed_m_s;
     let array = MicArray::new(
@@ -224,6 +236,11 @@ fn analyze_source(
     Ok(())
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "The positive band period is rounded up to whole samples before checking the event-window length."
+)]
 fn event_direction(
     channels: &[Vec<f32>],
     array: &MicArray,
@@ -287,8 +304,11 @@ mod tests {
         for level in levels {
             assert!((level - 10.0 * 0.25_f64.log10()).abs() < 1e-12);
         }
-        assert!(event_energy_levels(&[vec![0.0; 4]], 0..2, 2..4).is_empty());
-        assert!(event_energy_levels(&channels, 0..2, 4..8).is_empty());
+        assert_eq!(
+            event_energy_levels(&[vec![0.0; 4]], 0..2, 2..4),
+            [] as [f64; 0]
+        );
+        assert_eq!(event_energy_levels(&channels, 0..2, 4..8), [] as [f64; 0]);
     }
 
     #[test]

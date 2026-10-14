@@ -213,7 +213,10 @@ fn test_recording_device_config_backward_compat_deserialization() {
             "channel_mappings": [0]
         }"#;
     let config: RecordingDeviceConfig = serde_json::from_str(json).unwrap();
-    assert!(config.mic_calibration_paths.is_empty());
+    assert_eq!(
+        config.mic_calibration_paths,
+        [] as [std::option::Option<std::string::String>; 0]
+    );
     assert!(config.calibration_for_channel(0).is_none());
 }
 
@@ -300,7 +303,10 @@ fn recording_device_config_missing_optional_defaults() {
     }"#;
 
     let config: RecordingDeviceConfig = serde_json::from_str(json).unwrap();
-    assert!(config.mic_calibration_paths.is_empty());
+    assert_eq!(
+        config.mic_calibration_paths,
+        [] as [std::option::Option<std::string::String>; 0]
+    );
     assert_eq!(config.num_positions, 1);
 }
 

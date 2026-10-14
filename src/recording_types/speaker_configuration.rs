@@ -21,6 +21,7 @@ pub enum SpeakerConfiguration {
 }
 
 impl SpeakerConfiguration {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             SpeakerConfiguration::Stereo => "2.0",
@@ -41,6 +42,7 @@ impl SpeakerConfiguration {
         }
     }
 
+    #[must_use]
     pub fn all() -> &'static [SpeakerConfiguration] {
         &[
             SpeakerConfiguration::Stereo,
@@ -62,30 +64,29 @@ impl SpeakerConfiguration {
     }
 
     /// Get the number of channels for this configuration
+    #[must_use]
     pub fn channel_count(&self) -> usize {
         match self {
-            SpeakerConfiguration::Stereo => 2,
+            SpeakerConfiguration::Stereo | SpeakerConfiguration::Custom => 2,
             SpeakerConfiguration::Stereo21 => 3,
             SpeakerConfiguration::Stereo22 => 4,
             SpeakerConfiguration::Surround50 => 5,
             SpeakerConfiguration::Surround51 => 6,
-            SpeakerConfiguration::Surround71 => 8,
-            SpeakerConfiguration::Surround91 => 10,
-            SpeakerConfiguration::Immersive512 => 8,
-            SpeakerConfiguration::Immersive514 => 10,
-            SpeakerConfiguration::Immersive712 => 10,
-            SpeakerConfiguration::Immersive714 => 12,
-            SpeakerConfiguration::Immersive912 => 12,
+            SpeakerConfiguration::Surround71 | SpeakerConfiguration::Immersive512 => 8,
+            SpeakerConfiguration::Surround91
+            | SpeakerConfiguration::Immersive514
+            | SpeakerConfiguration::Immersive712 => 10,
+            SpeakerConfiguration::Immersive714 | SpeakerConfiguration::Immersive912 => 12,
             SpeakerConfiguration::Immersive914 => 14,
             SpeakerConfiguration::Immersive916 => 16,
-            SpeakerConfiguration::Custom => 2,
         }
     }
 
     /// Get the default channel names for this configuration
+    #[must_use]
     pub fn default_channel_names(&self) -> Vec<&'static str> {
         match self {
-            SpeakerConfiguration::Stereo => vec!["L", "R"],
+            SpeakerConfiguration::Stereo | SpeakerConfiguration::Custom => vec!["L", "R"],
             SpeakerConfiguration::Stereo21 => vec!["L", "R", "LFE"],
             SpeakerConfiguration::Stereo22 => vec!["L", "R", "Sub1", "Sub2"],
             SpeakerConfiguration::Surround50 => vec!["L", "R", "C", "SL", "SR"],
@@ -117,11 +118,11 @@ impl SpeakerConfiguration {
                 "L", "R", "C", "LFE", "SL", "SR", "BL", "BR", "WL", "WR", "TFL", "TFR", "TML",
                 "TMR", "TBL", "TBR",
             ],
-            SpeakerConfiguration::Custom => vec!["L", "R"],
         }
     }
 
     /// Try to detect configuration from channel count
+    #[must_use]
     pub fn from_channel_count(count: usize) -> Self {
         match count {
             2 => SpeakerConfiguration::Stereo,

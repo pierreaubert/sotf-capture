@@ -1,3 +1,12 @@
+#![expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::float_cmp,
+    reason = "Synthetic fixtures use bounded sample counts and intentionally quantized audio; exact comparisons verify unchanged settings and samples."
+)]
+
 use super::build::build_octave_sweep_with_silence;
 use super::consts::CANCELLED_ERR;
 use super::consts::DEFAULT_MLS_ORDER;
@@ -271,7 +280,7 @@ fn test_effective_calibration_per_channel_priority() {
 fn test_effective_calibration_empty_string_falls_back() {
     let mut session = RecordingSession::new(48000, "sweep", 5.0, -20.0, None);
     session.mic_calibration_path = Some("/global/cal.txt".to_string());
-    session.mic_calibration_paths = vec![Some("".to_string())];
+    session.mic_calibration_paths = vec![Some(String::new())];
     // Empty string should fall back to global
     assert_eq!(
         session.effective_calibration_for_channel(0),
@@ -302,7 +311,10 @@ fn test_recording_session_serde_backward_compat() {
             "channels": []
         }"#;
     let session: RecordingSession = serde_json::from_str(json).unwrap();
-    assert!(session.mic_calibration_paths.is_empty());
+    assert_eq!(
+        session.mic_calibration_paths,
+        [] as [std::option::Option<std::string::String>; 0]
+    );
     assert_eq!(
         session.effective_calibration_for_channel(0),
         Some("/global.txt")
@@ -427,14 +439,10 @@ fn test_generate_signal_tone() {
     assert_eq!(signal.len(), 4800); // 0.1s * 48000 Hz
 
     // Check signal is non-zero and within amplitude bounds
-    let max_val = signal
-        .iter()
-        .map(|&x| x.abs())
-        .fold(0.0_f32, |a, b| a.max(b));
+    let max_val = signal.iter().map(|&x| x.abs()).fold(0.0_f32, f32::max);
     assert!(
         max_val > 0.4 && max_val <= 0.5,
-        "Tone amplitude out of range: {}",
-        max_val
+        "Tone amplitude out of range: {max_val}"
     );
 }
 
@@ -450,14 +458,10 @@ fn test_generate_signal_sweep() {
 
     assert_eq!(signal.len(), 48000);
 
-    let max_val = signal
-        .iter()
-        .map(|&x| x.abs())
-        .fold(0.0_f32, |a, b| a.max(b));
+    let max_val = signal.iter().map(|&x| x.abs()).fold(0.0_f32, f32::max);
     assert!(
         max_val > 0.4 && max_val <= 0.5,
-        "Sweep amplitude out of range: {}",
-        max_val
+        "Sweep amplitude out of range: {max_val}"
     );
 }
 
@@ -570,10 +574,7 @@ fn test_write_and_read_wav_roundtrip() {
     for (i, (&original, &read)) in signal.iter().zip(read_samples.iter()).enumerate() {
         assert!(
             (original - read).abs() < 1e-6,
-            "Sample {} mismatch: original={}, read={}",
-            i,
-            original,
-            read
+            "Sample {i} mismatch: original={original}, read={read}"
         );
     }
 }
@@ -707,7 +708,7 @@ fn test_validate_signal_params_sweep_order() {
     assert!(validate_signal_params(SignalType::Sweep, &params_equal, 1.0, sample_rate).is_err());
 }
 
-/// Regression test: Verify that record_and_analyze doesn't just copy the input file
+/// Regression test: Verify that `record_and_analyze` doesn't just copy the input file
 ///
 /// This test ensures that the recording function actually performs recording,
 /// not just file copying. It checks that:
@@ -725,7 +726,7 @@ fn test_record_and_analyze_signature() {
 
     // Verify function exists with correct parameter count and types
     // by calling it with dummy parameters (compile-time check only)
-    let _check = || async {
+    let check = || async {
         let temp_path = Path::new("/tmp/input.wav");
         let output_path = Path::new("/tmp/output.wav");
         let csv_path = Path::new("/tmp/output.csv");
@@ -766,7 +767,7 @@ fn test_record_and_analyze_signature() {
     };
 
     // Just verify it compiles
-    let _ = _check;
+    let _ = check;
 }
 
 // --- Task 7: lag-lock gate, drift thresholds, quality wrapper ---
@@ -880,7 +881,7 @@ fn test_build_capture_quality_clean_take_is_trustworthy() {
     let clean = vec![0.0_f32; 4096];
     let report = build_capture_quality(&clean, &lag, None, None, None, Vec::new());
     assert!(report.trustworthy, "issues: {:?}", report.issues);
-    assert!(report.issues.is_empty());
+    assert_eq!(report.issues, [] as [std::string::String; 0]);
     // Single-take captures do not wire coherence / SNR inputs (repeat-sweep
     // averaging, Task 8, does): reported missing, but not treated as
     // failures under the default config.
@@ -930,7 +931,7 @@ fn test_build_capture_quality_flags_clipping() {
         "issues: {:?}",
         report.issues
     );
-    assert!(report.clipping.clipped_samples == 41);
+    assert_eq!(report.clipping.clipped_samples, 41);
 }
 
 #[test]
@@ -995,7 +996,7 @@ fn test_lag_and_drift_on_delayed_sweep() {
     assert_eq!(drift_action(Some(&drift)), DriftAction::None);
 }
 
-/// Timing-chirp fixture mirroring the capture_session protocol: 100 ms
+/// Timing-chirp fixture mirroring the `capture_session` protocol: 100 ms
 /// 2–8 kHz log sweep with 5 ms tapers.
 #[cfg(not(target_os = "ios"))]
 fn timing_chirp(sample_rate: u32) -> Vec<f32> {
@@ -1180,7 +1181,7 @@ fn cancel_aware_stop_lets_cancel_win_over_stop_failure() {
     assert!(cancel_aware_stop(Ok::<(), &str>(()), false).is_ok());
 }
 
-/// A1: estimates above DRIFT_IMPLAUSIBLE_PPM are never applied.
+/// A1: estimates above `DRIFT_IMPLAUSIBLE_PPM` are never applied.
 #[test]
 #[cfg(not(target_os = "ios"))]
 fn drift_action_rejects_physically_implausible_estimates() {
@@ -1794,6 +1795,10 @@ fn test_interpolate_log_frequency_grid() {
 /// cargo test -p sotf-engine --lib -- test_probe_wav_analysis --nocapture
 /// ```
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "This end-to-end fixture keeps setup, execution, and artifact assertions together."
+)]
 fn test_probe_wav_analysis() {
     let wav_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../data_generated/recording-20260413-163800/probe_all_channels.wav");
@@ -1810,7 +1815,7 @@ fn test_probe_wav_analysis() {
         "WAV: {} ch, {} Hz, {} frames",
         spec.channels,
         sample_rate,
-        reader.len() / spec.channels as u32
+        reader.len() / u32::from(spec.channels)
     );
 
     let recorded: Vec<f32> = if spec.sample_format == hound::SampleFormat::Float {
@@ -1837,7 +1842,7 @@ fn test_probe_wav_analysis() {
     eprintln!(
         "Mono samples: {} ({:.3}s)",
         mono.len(),
-        mono.len() as f64 / sample_rate as f64
+        mono.len() as f64 / f64::from(sample_rate)
     );
 
     // Probe parameters matching the recording session
@@ -1854,10 +1859,9 @@ fn test_probe_wav_analysis() {
         .collect();
 
     eprintln!(
-        "Probe: {} samples ({:.1}ms), silence: {} samples ({:.1}ms)",
-        probe_samples, probe_duration_ms, silence_samples, silence_duration_ms
+        "Probe: {probe_samples} samples ({probe_duration_ms:.1}ms), silence: {silence_samples} samples ({silence_duration_ms:.1}ms)"
     );
-    eprintln!("Expected playback offsets: {:?}", expected_offsets);
+    eprintln!("Expected playback offsets: {expected_offsets:?}");
 
     let probe = math_audio_dsp::signals::gen_narrowband_probe(
         probe_samples,
@@ -1871,8 +1875,8 @@ fn test_probe_wav_analysis() {
     let auto_result =
         math_audio_dsp::analysis::cross_correlate_envelope(&probe, &probe, sample_rate)
             .expect("autocorrelation failed");
-    let auto_peak = auto_result.peak_value as f64;
-    eprintln!("Probe autocorrelation peak: {:.6}", auto_peak);
+    let auto_peak = f64::from(auto_result.peak_value);
+    eprintln!("Probe autocorrelation peak: {auto_peak:.6}");
 
     // New approach: search from expected_offset, peak position within
     // the segment = system_latency + acoustic_propagation. System
@@ -1890,10 +1894,10 @@ fn test_probe_wav_analysis() {
             math_audio_dsp::analysis::cross_correlate_envelope(&probe, segment, sample_rate)
                 .expect("channel xcorr failed");
 
-        let arrival_ms = xcorr.peak_sample_refined / sample_rate as f64 * 1000.0;
+        let arrival_ms = xcorr.peak_sample_refined / f64::from(sample_rate) * 1000.0;
 
         let gain_linear = if auto_peak > 1e-10 {
-            xcorr.peak_value as f64 / auto_peak
+            f64::from(xcorr.peak_value) / auto_peak
         } else {
             0.0
         };
@@ -1902,10 +1906,10 @@ fn test_probe_wav_analysis() {
         } else {
             -120.0
         };
-        let mut sorted_env = xcorr.envelope.to_vec();
+        let mut sorted_env = xcorr.envelope.clone();
         sorted_env.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = sorted_env[sorted_env.len() / 2].max(1e-10) as f64;
-        let snr_db = 20.0 * (xcorr.peak_value as f64 / median).log10();
+        let median = f64::from(sorted_env[sorted_env.len() / 2].max(1e-10));
+        let snr_db = 20.0 * (f64::from(xcorr.peak_value) / median).log10();
 
         eprintln!(
             "\nCh {} '{}' (window [{}, {}]):",
@@ -1915,8 +1919,8 @@ fn test_probe_wav_analysis() {
             "  Arrival:  {:.3} ms (sample {:.1})",
             arrival_ms, xcorr.peak_sample_refined
         );
-        eprintln!("  Gain:     {:.1} dB", gain_db);
-        eprintln!("  SNR:      {:.1} dB", snr_db);
+        eprintln!("  Gain:     {gain_db:.1} dB");
+        eprintln!("  SNR:      {snr_db:.1} dB");
 
         arrivals.push(arrival_ms);
     }
@@ -2057,8 +2061,8 @@ fn test_octave_sweep_bass_clamp() {
 fn probe_direct_arrival_picker_prefers_weak_direct_over_late_reflection() {
     let sample_rate = 48_000_u32;
     let mut envelope = vec![1.0e-5_f32; sample_rate as usize / 2];
-    let direct = (0.004 * sample_rate as f64).round() as usize;
-    let reflection = (0.111 * sample_rate as f64).round() as usize;
+    let direct = (0.004 * f64::from(sample_rate)).round() as usize;
+    let reflection = (0.111 * f64::from(sample_rate)).round() as usize;
 
     for offset in -4_i32..=4 {
         let idx = (direct as i32 + offset) as usize;
@@ -2071,7 +2075,7 @@ fn probe_direct_arrival_picker_prefers_weak_direct_over_late_reflection() {
 
     let peak = pick_direct_arrival_from_envelope(&envelope, sample_rate, envelope.len())
         .expect("direct peak should be detected");
-    let arrival_ms = peak.peak_sample_refined / sample_rate as f64 * 1000.0;
+    let arrival_ms = peak.peak_sample_refined / f64::from(sample_rate) * 1000.0;
 
     assert!(
         (arrival_ms - 4.0).abs() < 0.2,
@@ -2149,7 +2153,7 @@ fn bass_anchor_replay_recovers_known_phase_shifts() {
     assert_eq!(results.bass_duration_s, bass_duration_s);
 
     for (i, cr) in results.channels.iter().enumerate() {
-        let expected = injected_phases_deg[i] as f64;
+        let expected = f64::from(injected_phases_deg[i]);
         let got = cr.bass_anchor_phase_deg;
         let mut diff = got - expected;
         while diff > 180.0 {
@@ -2249,7 +2253,7 @@ fn bass_anchor_replay_loopback_cancels_source_side_delay() {
     .expect("analysis should succeed");
 
     for (i, cr) in results.channels.iter().enumerate() {
-        let expected = acoustic_phase_deg[i] as f64;
+        let expected = f64::from(acoustic_phase_deg[i]);
         let mut diff = cr.bass_anchor_phase_deg - expected;
         while diff > 180.0 {
             diff -= 360.0;
@@ -2925,7 +2929,7 @@ fn active_take_span_lands_reference_active_content() {
         lag_samples: 500,
         ..lag_estimate_with_confidence(0.9)
     };
-    assert!(active_take_span(&take, &reference, &late).is_empty());
+    assert_eq!(active_take_span(&take, &reference, &late), [] as [f32; 0]);
 }
 
 #[test]
@@ -2973,7 +2977,7 @@ fn record_and_analyze_honors_pre_set_cancel_flag() {
         &mut CpalPlayback::new(),
         &temp_wav,
         &recorded_wav,
-        &[0.0f32; 4800],
+        &vec![0.0f32; 4800],
         48000,
         &csv,
         0,
@@ -3005,7 +3009,7 @@ fn record_and_analyze_multi_honors_pre_set_cancel_flag() {
         &mut CpalPlayback::new(),
         &temp_wav,
         &wav_paths,
-        &[0.0f32; 4800],
+        &vec![0.0f32; 4800],
         48000,
         &csv_paths,
         0,

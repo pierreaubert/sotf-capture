@@ -152,8 +152,7 @@ fn active_span_bounds(reference: &[f32]) -> (usize, usize) {
     let end = reference
         .iter()
         .rposition(|sample| sample.abs() > threshold)
-        .map(|index| index + 1)
-        .unwrap_or(reference.len());
+        .map_or(reference.len(), |index| index + 1);
     (start, end.max(start))
 }
 
@@ -246,6 +245,10 @@ pub(super) fn check_lag_lock(lag: &LagEstimate, log_tag: &str) -> Result<(), Str
 /// Broadband residual noise is not included, so this is not THD+N.
 /// The threshold warns when the deconvolved response may be nonlinear.
 #[cfg(not(target_os = "ios"))]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "The shared integer-valued threshold is exactly representable as f32."
+)]
 pub(super) const THD_WARN_PERCENT: f32 = THD_WARNING_THRESHOLD_PERCENT as f32;
 
 /// Broadband SNR (dB) below which a single take gets a low-SNR quality
@@ -253,6 +256,10 @@ pub(super) const THD_WARN_PERCENT: f32 = THD_WARNING_THRESHOLD_PERCENT as f32;
 /// instead (`minimum_median_snr_db`, same 10 dB default); single takes
 /// supply no measured/noise pair, so broadband RMS stands in.
 #[cfg(not(target_os = "ios"))]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "The shared integer-valued threshold is exactly representable as f32."
+)]
 pub(super) const SNR_WARN_DB: f32 = SINGLE_TAKE_SNR_THRESHOLD_DB as f32;
 
 /// Bins whose fundamental sits more than this far below the response peak
@@ -346,6 +353,10 @@ pub(super) fn snr_warning_issue(active: &[f32], silence: &[f32]) -> Option<Strin
 }
 
 fn broadband_snr_db(active: &[f32], silence: &[f32]) -> Option<f64> {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Audio-buffer sample counts normalize f64 power and fit within practical f64 integer precision."
+    )]
     fn rms(samples: &[f32]) -> f64 {
         if samples.is_empty() {
             return 0.0;
@@ -367,7 +378,7 @@ fn broadband_snr_db(active: &[f32], silence: &[f32]) -> Option<f64> {
 
 /// Estimator inputs shared by the structured quality checks.
 #[cfg(not(target_os = "ios"))]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(super) struct QualityAnalysis<'a> {
     pub recorded: &'a [f32],
     pub frequencies: &'a [f32],
@@ -382,6 +393,14 @@ pub(super) struct QualityAnalysis<'a> {
 
 /// Build typed findings using the same estimator inputs and thresholds as the legacy verdict.
 #[cfg(not(target_os = "ios"))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "The report lists each quality metric and its threshold in one place for auditing."
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Clipped-sample counts are converted to f64 only for quality reporting."
+)]
 pub(super) fn structured_quality_findings(analysis: QualityAnalysis<'_>) -> Vec<QualityFinding> {
     let QualityAnalysis {
         recorded,

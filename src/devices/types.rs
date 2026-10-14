@@ -45,6 +45,9 @@ pub struct AudioState {
 pub type SharedAudioState = Arc<Mutex<AudioState>>;
 
 /// Set the configuration for an audio device
+///
+/// # Errors
+/// Returns an error for missing devices, unsupported configurations, enumeration failures, or a poisoned state lock.
 pub fn set_audio_device(
     device_identifier: String,
     is_input: bool,
@@ -56,15 +59,15 @@ pub fn set_audio_device(
     // Find the device by ID or name
     let device = if is_input {
         host.input_devices()
-            .map_err(|e| format!("Failed to enumerate input devices: {}", e))?
+            .map_err(|e| format!("Failed to enumerate input devices: {e}"))?
             .find(|d| device_matches(d, &device_identifier))
     } else {
         host.output_devices()
-            .map_err(|e| format!("Failed to enumerate output devices: {}", e))?
+            .map_err(|e| format!("Failed to enumerate output devices: {e}"))?
             .find(|d| device_matches(d, &device_identifier))
     };
 
-    let device = device.ok_or_else(|| format!("Device '{}' not found", device_identifier))?;
+    let device = device.ok_or_else(|| format!("Device '{device_identifier}' not found"))?;
 
     // Validate the configuration against device capabilities
     let config_valid = if is_input {
@@ -86,7 +89,7 @@ pub fn set_audio_device(
                 valid
             }
             Err(e) => {
-                return Err(format!("Failed to get input configs: {}", e));
+                return Err(format!("Failed to get input configs: {e}"));
             }
         }
     } else {
@@ -108,7 +111,7 @@ pub fn set_audio_device(
                 valid
             }
             Err(e) => {
-                return Err(format!("Failed to get output configs: {}", e));
+                return Err(format!("Failed to get output configs: {e}"));
             }
         }
     };
@@ -127,26 +130,6 @@ pub fn set_audio_device(
         ));
     }
 
-    // Get the device ID for persistence (preferred over name)
-    let device_id_for_state = device
-        .id()
-        .ok()
-        .map(|id| id.to_string())
-        .unwrap_or_else(|| device_identifier.clone());
-
-    // Store the configuration in the application state
-    let mut state = audio_state
-        .lock()
-        .map_err(|e| format!("Failed to lock audio state: {}", e))?;
-
-    if is_input {
-        state.selected_input_device = Some(device_id_for_state.clone());
-        state.input_config = Some(config.clone());
-    } else {
-        state.selected_output_device = Some(device_id_for_state.clone());
-        state.output_config = Some(config.clone());
-    }
-
     let success_msg = format!(
         "Successfully configured {} device '{}' with sample_rate={}, channels={}, format={}",
         if is_input { "input" } else { "output" },
@@ -155,6 +138,26 @@ pub fn set_audio_device(
         config.channels,
         config.sample_format
     );
+
+    // Get the device ID for persistence (preferred over name)
+    let device_id_for_state = device
+        .id()
+        .ok()
+        .map_or_else(|| device_identifier, |id| id.to_string());
+
+    // Store the configuration in the application state
+    let mut state = audio_state
+        .lock()
+        .map_err(|e| format!("Failed to lock audio state: {e}"))?;
+
+    if is_input {
+        state.selected_input_device = Some(device_id_for_state.clone());
+        state.input_config = Some(config);
+    } else {
+        state.selected_output_device = Some(device_id_for_state.clone());
+        state.output_config = Some(config);
+    }
+
     Ok(success_msg)
 }
 

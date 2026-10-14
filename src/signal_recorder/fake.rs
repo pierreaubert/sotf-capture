@@ -110,6 +110,7 @@ impl Default for FakeAudioConfig {
 
 impl FakeAudioConfig {
     /// Build a seeded default configuration for a common capture QA condition.
+    #[must_use]
     pub fn for_profile(profile: FakeAudioProfile) -> Self {
         let mut config = Self::default();
         match profile {
@@ -167,6 +168,7 @@ impl Default for VirtualWire {
 
 impl VirtualWire {
     /// Create a wire with the given device/signal configuration.
+    #[must_use]
     pub fn new(config: FakeAudioConfig) -> Self {
         Self {
             state: Arc::new(Mutex::new(WireState::default())),
@@ -175,11 +177,13 @@ impl VirtualWire {
     }
 
     /// Create a wire with one of the standard deterministic QA conditions.
+    #[must_use]
     pub fn for_profile(profile: FakeAudioProfile) -> Self {
         Self::new(FakeAudioConfig::for_profile(profile))
     }
 
     /// Set a room impulse response for one hardware input channel.
+    #[must_use]
     pub fn with_channel_impulse_response(
         mut self,
         channel: usize,
@@ -195,6 +199,7 @@ impl VirtualWire {
     }
 
     /// Add controlled cubic distortion before converter saturation.
+    #[must_use]
     pub fn with_cubic_distortion(mut self, coefficient: f32) -> Self {
         self.config.cubic_distortion = coefficient;
         self
@@ -221,6 +226,7 @@ impl VirtualWire {
     }
 
     /// Stimulus published so far, if playback started.
+    #[must_use]
     pub fn played_stimulus(&self) -> Option<Vec<f32>> {
         let state = self.state.lock().ok()?;
         state.played.then(|| state.stimulus.clone())
@@ -330,11 +336,26 @@ pub struct FakeRecorder {
 
 impl FakeRecorder {
     /// Tail length in frames at the capture rate.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        reason = "The emulated nonnegative tail duration rounds to whole frames at the configured audio rate."
+    )]
     fn tail_frames(&self, sample_rate: u32) -> usize {
         (self.wire.config.tail_secs.max(0.0) * sample_rate as f32).round() as usize
     }
 
     /// Render one channel through rate conversion, room response, gain, distortion, and noise.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "The emulated nonnegative capture duration rounds up to whole audio frames."
+    )]
+    #[expect(
+        clippy::float_cmp,
+        reason = "Unity gain is an exact configuration sentinel that preserves unmodified fixture samples."
+    )]
     fn render_channel(
         &self,
         capture: &FakeCapture,
@@ -485,6 +506,12 @@ impl SweepRecorder for FakeRecorder {
         })
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        reason = "This progress estimate rounds a nonnegative rate-scaled stimulus length up to whole frames."
+    )]
     fn captured_samples(&self) -> usize {
         let Some(capture) = &self.capture else {
             return 0;
@@ -548,12 +575,18 @@ impl SweepRecorder for FakeRecorder {
 /// Positive `drift_ppm` stretches the capture (fast input clock);
 /// zero returns the input unchanged. Absurd factors fall back to
 /// unwarped rather than fabricating garbage lengths.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "The finite positive drift factor maps nonnegative sample positions; interpolation fractions intentionally use f32."
+)]
 fn warp_drift(samples: &[f32], drift_ppm: f64) -> Vec<f32> {
     if drift_ppm == 0.0 || samples.is_empty() {
         return samples.to_vec();
     }
     let factor = 1.0 + drift_ppm / 1_000_000.0;
-    if !factor.is_finite() || !(0.0 < factor && factor < 10.0) {
+    if !(factor.is_finite() && 0.0 < factor && factor < 10.0) {
         return samples.to_vec();
     }
     let out_len = ((samples.len() as f64 * factor).round() as usize).max(1);
@@ -598,6 +631,10 @@ impl XorShift64 {
     }
 
     /// Uniform sample in [-1, 1).
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "The PRNG deliberately quantizes its 31 random bits to f32 noise samples."
+    )]
     fn next_unit(&mut self) -> f32 {
         (self.next_u64() >> 33) as f32 / (1_u64 << 31) as f32 - 1.0
     }

@@ -39,6 +39,7 @@ pub struct RecordingSession {
 
 impl RecordingSession {
     /// Create a new recording session
+    #[must_use]
     pub fn new(
         sample_rate: u32,
         signal_type: &str,
@@ -63,6 +64,7 @@ impl RecordingSession {
     }
 
     /// Get the effective calibration path for a channel, checking per-channel first, then global fallback
+    #[must_use]
     pub fn effective_calibration_for_channel(&self, idx: usize) -> Option<&str> {
         // Per-channel calibration takes priority
         if let Some(Some(path)) = self.mic_calibration_paths.get(idx)
@@ -101,24 +103,30 @@ impl RecordingSession {
     }
 
     /// Save session to JSON file
+    ///
+    /// # Errors
+    /// Returns an error if the session cannot be serialized or the destination cannot be written.
     pub fn save_to_file(&self, path: &Path) -> Result<(), String> {
         let file = std::fs::File::create(path)
-            .map_err(|e| format!("Failed to create session file: {}", e))?;
+            .map_err(|e| format!("Failed to create session file: {e}"))?;
         serde_json::to_writer_pretty(file, self)
-            .map_err(|e| format!("Failed to serialize session: {}", e))?;
-        log::info!("[RecordingSession] Saved session to {:?}", path);
+            .map_err(|e| format!("Failed to serialize session: {e}"))?;
+        log::info!("[RecordingSession] Saved session to {}", path.display());
         Ok(())
     }
 
     /// Load session from JSON file
+    ///
+    /// # Errors
+    /// Returns an error if the session file cannot be read or its JSON cannot be decoded.
     pub fn load_from_file(path: &Path) -> Result<Self, String> {
         let file =
-            std::fs::File::open(path).map_err(|e| format!("Failed to open session file: {}", e))?;
+            std::fs::File::open(path).map_err(|e| format!("Failed to open session file: {e}"))?;
         let session: Self = serde_json::from_reader(file)
-            .map_err(|e| format!("Failed to deserialize session: {}", e))?;
+            .map_err(|e| format!("Failed to deserialize session: {e}"))?;
         log::info!(
-            "[RecordingSession] Loaded session from {:?} (version {})",
-            path,
+            "[RecordingSession] Loaded session from {} (version {})",
+            path.display(),
             session.version
         );
         Ok(session)
@@ -139,7 +147,14 @@ impl RecordingSession {
 /// * `mic_compensation_path` - Path to microphone calibration file (optional)
 ///
 /// # Returns
-/// Updated RecordingSession with new CSV paths
+/// Updated `RecordingSession` with new CSV paths
+///
+/// # Errors
+/// Returns an error if the reference WAV cannot be prepared. Per-channel failures are recorded in the returned session.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
 pub fn reprocess_recordings(
     session_dir: &Path,
     session: &RecordingSession,
@@ -149,9 +164,9 @@ pub fn reprocess_recordings(
     use math_audio_dsp::analysis::{MicrophoneCompensation, analyze_recording, write_analysis_csv};
 
     log::info!(
-        "[reprocess_recordings] Re-processing {} channels in {:?}",
+        "[reprocess_recordings] Re-processing {} channels in {}",
         session.channels.len(),
-        session_dir
+        session_dir.display()
     );
 
     // Load global microphone compensation (used as fallback)
@@ -183,21 +198,21 @@ pub fn reprocess_recordings(
 
         if !wav_path.exists() {
             log::warn!(
-                "[reprocess_recordings] WAV file not found: {:?}, skipping channel {}",
-                wav_path,
+                "[reprocess_recordings] WAV file not found: {}, skipping channel {}",
+                wav_path.display(),
                 channel_info.channel_name
             );
             let mut failed_channel = channel_info.clone();
             failed_channel.success = false;
-            failed_channel.error = Some(format!("WAV file not found: {:?}", wav_path));
+            failed_channel.error = Some(format!("WAV file not found: {}", wav_path.display()));
             updated_session.channels.push(failed_channel);
             continue;
         }
 
         log::info!(
-            "[reprocess_recordings] Processing channel '{}' from {:?}",
+            "[reprocess_recordings] Processing channel '{}' from {}",
             channel_info.channel_name,
-            wav_path
+            wav_path.display()
         );
 
         // Resolve per-channel compensation with fallback chain:
@@ -226,13 +241,13 @@ pub fn reprocess_recordings(
                 Some(MicrophoneCompensation::from_file(&full_path)?)
             } else {
                 log::warn!(
-                    "[reprocess_recordings] Per-channel calibration file not found: {:?}, using global",
-                    full_path
+                    "[reprocess_recordings] Per-channel calibration file not found: {}, using global",
+                    full_path.display()
                 );
-                global_compensation.as_ref().cloned()
+                global_compensation.clone()
             }
         } else {
-            global_compensation.as_ref().cloned()
+            global_compensation.clone()
         };
 
         // Re-analyze the recording
@@ -254,7 +269,7 @@ pub fn reprocess_recordings(
                     );
                     let mut failed_channel = channel_info.clone();
                     failed_channel.success = false;
-                    failed_channel.error = Some(format!("Failed to write CSV: {}", e));
+                    failed_channel.error = Some(format!("Failed to write CSV: {e}"));
                     updated_session.channels.push(failed_channel);
                 } else {
                     log::info!(
@@ -272,7 +287,7 @@ pub fn reprocess_recordings(
                 );
                 let mut failed_channel = channel_info.clone();
                 failed_channel.success = false;
-                failed_channel.error = Some(format!("Analysis failed: {}", e));
+                failed_channel.error = Some(format!("Analysis failed: {e}"));
                 updated_session.channels.push(failed_channel);
             }
         }

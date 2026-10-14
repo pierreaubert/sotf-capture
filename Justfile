@@ -7,8 +7,10 @@ _default:
 check:
     {{cargo}} check --workspace --all-targets
 
+alias lint := clippy
+
 clippy:
-    {{cargo}} clippy --workspace --all-targets --no-deps
+    {{cargo}} clippy --workspace --all-targets --all-features --tests --no-deps
 
 dev:
     {{cargo}} build --workspace

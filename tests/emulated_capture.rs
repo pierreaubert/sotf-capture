@@ -31,6 +31,10 @@ fn sweep_2s() -> Vec<f32> {
     .unwrap()
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Fixture band lengths normalize floating-point statistics over small test buffers."
+)]
 fn band_mean_variation(frequencies: &[f32], spl_db: &[f32]) -> (f32, f32) {
     let band: Vec<f32> = frequencies
         .iter()
@@ -38,7 +42,7 @@ fn band_mean_variation(frequencies: &[f32], spl_db: &[f32]) -> (f32, f32) {
         .filter(|(freq, _)| (100.0..=10_000.0).contains(*freq))
         .map(|(_, spl)| *spl)
         .collect();
-    assert!(!band.is_empty());
+    assert_ne!(band, [] as [f32; 0]);
     let mean = band.iter().sum::<f32>() / band.len() as f32;
     let min = band.iter().copied().fold(f32::INFINITY, f32::min);
     let max = band.iter().copied().fold(f32::NEG_INFINITY, f32::max);

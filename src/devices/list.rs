@@ -25,6 +25,7 @@ pub fn list_asio_devices() -> Vec<String> {
 
 /// List ASIO devices (stub when ASIO is not available).
 #[cfg(not(all(target_os = "windows", feature = "asio")))]
+#[must_use]
 pub fn list_asio_devices() -> Vec<String> {
     Vec::new()
 }

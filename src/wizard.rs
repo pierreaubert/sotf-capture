@@ -236,6 +236,9 @@ impl Default for RecordingScreenModel {
 
 impl RecordingScreenModel {
     /// Restore editable session metadata without selecting historical audio devices.
+    ///
+    /// # Errors
+    /// Returns an error if saved metadata contains inconsistent, invalid, or ambiguous source or microphone identities.
     pub fn restore_session_metadata(
         &mut self,
         configuration: Option<&autoeq::roomeq::RecordingConfiguration>,
@@ -289,8 +292,7 @@ impl RecordingScreenModel {
             let value = self
                 .channel_speakers
                 .get(index)
-                .map(String::as_str)
-                .unwrap_or("")
+                .map_or("", String::as_str)
                 .trim();
             if value.is_empty() {
                 speakers.remove(name);
@@ -301,6 +303,7 @@ impl RecordingScreenModel {
         configuration.channel_speakers = (!speakers.is_empty()).then_some(speakers);
     }
 
+    #[must_use]
     pub fn session_metadata_is_valid(&self) -> bool {
         let values = [
             self.room_width_input,
@@ -329,6 +332,7 @@ impl RecordingScreenModel {
         }
     }
 
+    #[must_use]
     pub fn workflow_is_busy(&self) -> bool {
         self.capture_in_progress()
             || matches!(
@@ -346,6 +350,7 @@ impl RecordingScreenModel {
     }
 
     /// Capture-affecting input identity, excluding progress, review and save metadata.
+    #[must_use]
     pub fn capture_input_snapshot(&self) -> serde_json::Value {
         serde_json::json!({
             "playback": self.playback_config,
@@ -371,6 +376,7 @@ impl RecordingScreenModel {
     /// Identity of the session metadata and file references written by Save.
     /// Captures invalidate review receipts before replacing measurement data;
     /// do not serialize large waveform buffers on the UI render path.
+    #[must_use]
     pub fn save_input_snapshot(&self) -> serde_json::Value {
         serde_json::json!({
             "capture": self.capture_input_snapshot(),
@@ -392,12 +398,14 @@ impl RecordingScreenModel {
 
     /// Filesystem-safe name used for the saved recording directory and
     /// session-level file names.
+    #[must_use]
     pub fn safe_save_name(&self) -> String {
         crate::recording_helpers::sanitize_recording_name(&self.save_name)
     }
 
     /// Directory implied by the user-selected base directory and current
     /// save name.
+    #[must_use]
     pub fn named_recording_directory(&self) -> Option<std::path::PathBuf> {
         self.recording_base_directory
             .as_ref()
@@ -487,6 +495,7 @@ impl RecordingScreenModel {
     }
 
     /// Position index (0-based) of the next pending recording.
+    #[must_use]
     pub fn current_position(&self) -> usize {
         let num_positions = self.recording_config.num_positions.max(1);
         self.channel_recordings
@@ -498,6 +507,7 @@ impl RecordingScreenModel {
     }
 
     /// True when every recording with `mic_position_index == pos` is `Done`.
+    #[must_use]
     pub fn position_complete(&self, pos: usize) -> bool {
         let mut saw_any = false;
         for r in &self.channel_recordings {
@@ -513,6 +523,7 @@ impl RecordingScreenModel {
 
     /// Index (into `channel_recordings`) of the next recording at `pos`
     /// whose `channel_index` (speaker) hasn't been started yet.
+    #[must_use]
     pub fn next_channel_in_position(&self, pos: usize) -> Option<usize> {
         let mut seen = std::collections::HashSet::new();
         self.channel_recordings
@@ -527,6 +538,7 @@ impl RecordingScreenModel {
     }
 
     /// Check if all channels have been recorded.
+    #[must_use]
     pub fn all_channels_recorded(&self) -> bool {
         !self.channel_recordings.is_empty()
             && self
@@ -536,6 +548,7 @@ impl RecordingScreenModel {
     }
 
     /// Check if any recording is in progress.
+    #[must_use]
     pub fn is_recording(&self) -> bool {
         self.current_recording_channel.is_some()
     }
@@ -543,6 +556,7 @@ impl RecordingScreenModel {
     /// True while a sweep capture is in flight (any channel in the
     /// `Recording` state). Unlike `is_recording`, this is independent of
     /// the UI cursor (`current_recording_channel`).
+    #[must_use]
     pub fn capture_in_progress(&self) -> bool {
         self.channel_recordings
             .iter()
@@ -551,6 +565,7 @@ impl RecordingScreenModel {
 
     /// Indices of channels parked in `ReviewNeeded` (capture succeeded but
     /// the per-take quality verdict was not trustworthy — Task 9).
+    #[must_use]
     pub fn review_needed_indices(&self) -> Vec<usize> {
         self.channel_recordings
             .iter()
@@ -598,12 +613,14 @@ impl RecordingScreenModel {
 
     /// Session quality summary: one line per recorded channel with score +
     /// warnings (see [`crate::recording_helpers::session_quality_summary`]).
+    #[must_use]
     pub fn session_quality_summary(&self) -> Vec<String> {
         crate::recording_helpers::session_quality_summary(&self.channel_recordings)
     }
 
     /// Structured session quality lines (text + severity kind) for UIs that
     /// color by verdict (see [`crate::recording_helpers::session_quality_lines`]).
+    #[must_use]
     pub fn session_quality_lines(
         &self,
     ) -> Vec<(String, crate::recording_helpers::SessionQualityLineKind)> {
@@ -634,6 +651,7 @@ impl RecordingScreenModel {
     /// review, so it doubles as "a batch is in progress" intent. Takes
     /// still parked (`ReviewNeeded`) hold the batch: the user must resolve
     /// every warned take before it moves on.
+    #[must_use]
     pub fn batch_next_action(&self, finished_position: usize) -> BatchNextAction {
         if !self.auto_record_remaining
             || self.capture_in_progress()
@@ -665,6 +683,7 @@ impl RecordingScreenModel {
     /// by a capture task at spawn time — still matches the current capture
     /// generation. A stop/restart between spawn and completion bumps the
     /// generation, so a late-finishing OLD task must not apply its results.
+    #[must_use]
     pub fn is_current_capture(&self, generation: u64) -> bool {
         self.capture_generation == generation
     }
@@ -686,6 +705,7 @@ impl RecordingScreenModel {
     /// Build the canonical-metric [`RoomDimensions`] to persist in
     /// `RecordingConfiguration`. Returns `None` when the user left any
     /// dimension blank (zero).
+    #[must_use]
     pub fn room_dimensions_for_save(&self) -> Option<autoeq::roomeq::RoomDimensions> {
         if !self.session_metadata_is_valid() || self.room_width_input == 0.0 {
             return None;
@@ -702,6 +722,7 @@ impl RecordingScreenModel {
 
     /// Build the `channel_name → "brand model"` map persisted in
     /// `RecordingConfiguration`. Returns `None` when every entry is blank.
+    #[must_use]
     pub fn channel_speakers_map_for_save(&self) -> Option<HashMap<String, String>> {
         let mut map = HashMap::new();
         for (i, mapping) in self.playback_config.channel_mappings.iter().enumerate() {
@@ -731,6 +752,10 @@ impl RecordingScreenModel {
     ///
     /// `recording_directory` is the session output directory; `None` or an
     /// empty string omits the field.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+    )]
     pub fn build_recording_configuration(
         &self,
         recording_directory: Option<&str>,
@@ -882,6 +907,7 @@ impl RecordingScreenModel {
     /// (`build_recording_configuration`) both consult. The
     /// `recording_config.mic_calibration_paths` field remains only as the
     /// serde persistence layer frontends load from / save back to.
+    #[must_use]
     pub fn active_mic_cal_path(&self, editing_channel: Option<usize>) -> &str {
         match editing_channel {
             Some(ch) => self
@@ -946,11 +972,12 @@ impl RecordingScreenModel {
 
     /// How many fields are in the Save-step form given the current
     /// channel list. Layout:
-    ///   0        save_name
+    ///   0        `save_name`
     ///   1..=3    room width / depth / height
     ///   4        unit toggle
     ///   5        setup description
     ///   6..6+N-1 per-playback-channel speaker entries
+    #[must_use]
     pub fn save_field_count(&self) -> usize {
         6 + self.playback_config.channel_mappings.len()
     }
@@ -1065,7 +1092,7 @@ mod tests {
         assert_eq!(model.setup_description, "Existing");
         model.restore_session_metadata(None, &[]).unwrap();
         assert_eq!(model.room_width_input, 0.0);
-        assert!(model.setup_description.is_empty());
+        assert_eq!(model.setup_description, "");
     }
 
     #[test]
@@ -1439,7 +1466,7 @@ mod tests {
                 .and_then(|r| r.quality.as_ref())
                 .is_some()
         );
-        assert!(model.review_needed_indices().is_empty());
+        assert_eq!(model.review_needed_indices(), [] as [usize; 0]);
     }
 
     #[test]
@@ -1476,8 +1503,6 @@ mod tests {
     }
 
     // === Task 9 review R1: batch advance / resume-after-accept ===
-
-    use super::BatchNextAction;
 
     #[test]
     fn batch_next_holds_without_batch_or_while_parked_or_recording() {

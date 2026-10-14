@@ -14,6 +14,7 @@ use crate::signal_recorder::multi_capture::{
 use crate::signal_recorder::{CancelFlag, write_wav_file};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::io::Read as _;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
@@ -201,6 +202,11 @@ fn save_manifest(directory: &Path, manifest: &RawCaptureManifest) -> Result<(), 
 /// usually answers within one or two bursts, while a truly dead chain fails
 /// fast on the first real take with the backend error. Returns `Err` only on
 /// cancellation.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "The positive fixed wake tail is rounded up to a whole number of audio frames."
+)]
 fn wake_session_chain(
     capture: &mut impl FnMut(MultiCaptureRequest, &CancelFlag) -> Result<MultiCaptureResult, String>,
     session: &ValidatedCaptureSession,
@@ -371,9 +377,10 @@ pub(crate) fn run_auxiliary_passes(
             RawCaptureStatus::Failed
         };
         manifest.error = Some(error.clone());
-        save_manifest(output_directory, manifest)
-            .map(|()| error.clone())
-            .unwrap_or_else(|save_error| format!("{error}; additionally {save_error}"))
+        save_manifest(output_directory, manifest).map_or_else(
+            |save_error| format!("{error}; additionally {save_error}"),
+            |()| error.clone(),
+        )
     };
     let channels: Vec<u16> = plan
         .sources
@@ -455,6 +462,10 @@ pub(crate) fn run_auxiliary_passes(
     Ok(manifest)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
 fn record_with(
     session: &ValidatedCaptureSession,
     plan_directory: &Path,
@@ -475,7 +486,6 @@ fn record_with(
     for (index, mic) in session.plan().microphones.iter().enumerate() {
         let path = plan_directory.join(&mic.calibration_file);
         // Calibration is a small text curve. Bound external file reads to 1 MiB.
-        use std::io::Read;
         let file = std::fs::File::open(&path)
             .map_err(|e| format!("cannot read calibration for {}: {e}", mic.id))?;
         let mut bytes = Vec::new();

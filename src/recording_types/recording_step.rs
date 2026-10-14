@@ -32,6 +32,7 @@ pub enum RecordingStep {
 impl RecordingStep {
     /// Enumerate all steps in UI order. Both frontends iterate this so
     /// the wizard tab bar and step dispatch never drift from the enum.
+    #[must_use]
     pub fn all() -> &'static [RecordingStep] {
         &[
             RecordingStep::Config,
@@ -44,6 +45,7 @@ impl RecordingStep {
         ]
     }
 
+    #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
             RecordingStep::Config => "Config",
@@ -56,6 +58,7 @@ impl RecordingStep {
         }
     }
 
+    #[must_use]
     pub fn next(&self) -> Option<RecordingStep> {
         match self {
             RecordingStep::Config => Some(RecordingStep::SplCalibration),
@@ -68,6 +71,7 @@ impl RecordingStep {
         }
     }
 
+    #[must_use]
     pub fn previous(&self) -> Option<RecordingStep> {
         match self {
             RecordingStep::Config => None,

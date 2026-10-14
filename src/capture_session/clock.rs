@@ -81,6 +81,17 @@ fn finite(value: f64) -> Option<f64> {
 /// Invalid or degraded markers return a magnitude-only result, not an error that
 /// discards the raw recording. `manifest` and wave lengths are checked by the
 /// folder-processing boundary before this deterministic operation.
+#[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "Capture lengths are bounded to 16 million samples; search windows are nonnegative and clamped to the recording."
+)]
 pub fn correct_capture_clock(
     manifest: &RawCaptureManifest,
     take: &RawCaptureTake,

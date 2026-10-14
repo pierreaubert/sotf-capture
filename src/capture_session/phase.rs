@@ -34,7 +34,7 @@ pub struct CapturePhaseArtifacts {
     pub response_file: String,
     /// Relative JSON path containing the band-limited, periodic real IR.
     pub impulse_file: String,
-    /// Relative `time_ms,amplitude` CSV of the same IR for RoomEQ measured-IR
+    /// Relative `time_ms,amplitude` CSV of the same IR for `RoomEQ` measured-IR
     /// declarations. Absent on artifacts written before CSV export existed.
     #[serde(default)]
     pub impulse_csv_file: Option<String>,
@@ -60,6 +60,10 @@ pub struct CapturePhaseArtifacts {
 /// Suitability is decided by the analyzer itself (span, band energy, rate);
 /// an unsuitable IR keeps its phase artifacts and only loses the advisory
 /// score, with the reason logged for the operator.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "The STI estimator accepts f32 audio, while the saved impulse response uses f64."
+)]
 fn take_sti(impulse_response: &[f64], sample_rate_hz: u32) -> Option<CaptureStiReport> {
     let linear: Vec<f32> = impulse_response
         .iter()
@@ -78,6 +82,15 @@ fn take_sti(impulse_response: &[f64], sample_rate_hz: u32) -> Option<CaptureStiR
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "FFT indices use f64 time and frequency coordinates; calibration interpolation accepts f32 frequencies."
+)]
 pub(super) fn write_phase(
     samples: &[f32],
     stimulus: &CaptureStimulus,
@@ -205,6 +218,10 @@ pub(super) fn write_phase(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Synthetic fixtures use bounded sample counts and intentionally quantized audio; exact comparisons verify unchanged settings and samples."
+)]
 mod tests {
     use super::*;
 
@@ -235,7 +252,7 @@ mod tests {
         let mut lines = coherence.lines();
         assert_eq!(lines.next(), Some("frequency_hz,coherence"));
         let rows: Vec<&str> = lines.collect();
-        assert!(!rows.is_empty());
+        assert_ne!(rows, [] as [&str; 0]);
         let mut previous = -1.0;
         let mut sum = 0.0;
         for row in &rows {
@@ -327,7 +344,7 @@ mod tests {
                     state ^= state >> 7;
                     state ^= state << 17;
                     let noise = (state as f64 / u64::MAX as f64) * 2.0 - 1.0;
-                    (-6.0 * 2f64.ln() * n as f64 / (rt60 * f64::from(rate))).exp() * noise
+                    (-6.0 * 2f64.ln() * f64::from(n) / (rt60 * f64::from(rate))).exp() * noise
                 })
                 .collect()
         };

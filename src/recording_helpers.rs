@@ -21,16 +21,17 @@ use crate::signal_recorder::{
     CaptureAnalysis, DEFAULT_MLS_ORDER, MIN_REPEAT_SWEEPS, SignalParams, SignalType,
     sweep_params_from_config,
 };
+use std::fmt::Write as _;
 
 /// Canonical filename for the saved recording session JSON (B5).
 ///
-/// Room EQ's "FromFile" flow and the i18n strings point users at this name,
+/// Room EQ's "`FromFile`" flow and the i18n strings point users at this name,
 /// so every frontend must save the session as `<dir>/recordings.json`
 /// regardless of the user-chosen session name.
 pub const RECORDINGS_FILENAME: &str = "recordings.json";
 
 /// Adjacent, versioned sidecar for quality evidence associated with
-/// [`RECORDINGS_FILENAME`]. The canonical RoomConfig remains unchanged.
+/// [`RECORDINGS_FILENAME`]. The canonical `RoomConfig` remains unchanged.
 pub const RECORDING_QUALITY_FILENAME: &str = "recording-quality.json";
 
 /// Current version of the recording quality sidecar schema.
@@ -39,7 +40,7 @@ pub const RECORDING_QUALITY_SIDECAR_VERSION: u32 = 1;
 /// One saved source and the measured quality evidence for that take.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RecordingQualityEntry {
-    /// Stable RoomConfig identity, independent of display ordering.
+    /// Stable `RoomConfig` identity, independent of display ordering.
     pub source: RecordingSourceIdentity,
     pub quality: TakeQualitySummary,
 }
@@ -114,6 +115,16 @@ pub struct EffectiveAcquisitionConfig {
 ///
 /// # Panics
 /// This function does not panic for caller-provided signal settings.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "Validated durations round to nonnegative frame counts; displayed durations follow the f32 signal-generator API."
+)]
 pub fn effective_acquisition_config(
     signal_type: SignalType,
     params: &SignalParams,
@@ -196,7 +207,7 @@ pub fn effective_acquisition_config(
         post_silence_secs: None,
     };
 
-    let sample_rate = sample_rate_hz as f64;
+    let sample_rate = f64::from(sample_rate_hz);
     config.generated_frames = match (signal_type, params) {
         (
             SignalType::Sweep,
@@ -235,9 +246,9 @@ pub fn effective_acquisition_config(
 
             // Keep these boundaries and rate ratios aligned with
             // `gen_log_sweep_octave_scaled` in math-audio.
-            let low = (*start_freq as f64).max(1.0);
-            let high = (*end_freq as f64).max(low * 1.001);
-            let bass_rate = bass_duration as f64;
+            let low = f64::from(*start_freq).max(1.0);
+            let high = f64::from(*end_freq).max(low * 1.001);
+            let bass_rate = f64::from(bass_duration);
             let bass_octaves = octave_span(low, 100.0_f64.min(high));
             let mid_octaves = octave_span(100.0_f64.max(low), 1_000.0_f64.min(high));
             let high_octaves = octave_span(1_000.0_f64.max(low), high);
@@ -275,7 +286,8 @@ pub fn effective_acquisition_config(
         (
             SignalType::WhiteNoise | SignalType::PinkNoise | SignalType::MNoise,
             SignalParams::Noise { amp },
-        ) => {
+        )
+        | (SignalType::Dirac, SignalParams::Dirac { amp }) => {
             config.amplitude_peak = Some(*amp);
             math_audio_dsp::signals::frames_for(requested_signal_duration_secs, sample_rate_hz)
         }
@@ -283,10 +295,6 @@ pub fn effective_acquisition_config(
             config.duration_control_applies = false;
             config.amplitude_peak = Some(*amp);
             (1_usize << u32::from(*order)) - 1
-        }
-        (SignalType::Dirac, SignalParams::Dirac { amp }) => {
-            config.amplitude_peak = Some(*amp);
-            math_audio_dsp::signals::frames_for(requested_signal_duration_secs, sample_rate_hz)
         }
         (SignalType::Stipa, SignalParams::Stipa) => {
             math_audio_dsp::signals::frames_for(requested_signal_duration_secs, sample_rate_hz)
@@ -322,14 +330,14 @@ fn octave_span(low_hz: f64, high_hz: f64) -> f64 {
 /// Per-source stimulus provenance stored alongside quality evidence.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RecordingStimulusEntry {
-    /// Stable RoomConfig source identity.
+    /// Stable `RoomConfig` source identity.
     pub source: RecordingSourceIdentity,
     /// Effective signal configuration used for this source.
     pub config: EffectiveAcquisitionConfig,
 }
 
 /// Quality evidence persisted next to `recordings.json` without extending
-/// `InlineMeasurement` or RoomConfig serialization.
+/// `InlineMeasurement` or `RoomConfig` serialization.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RecordingQualitySidecar {
     pub version: u32,
@@ -347,6 +355,7 @@ pub struct RecordingQualitySidecar {
 
 impl RecordingQualitySidecar {
     /// Find evidence for a source, if the sidecar contains that exact source.
+    #[must_use]
     pub fn quality_for(&self, source: &RecordingSourceIdentity) -> Option<&TakeQualitySummary> {
         self.entries
             .iter()
@@ -355,6 +364,7 @@ impl RecordingQualitySidecar {
     }
 
     /// Find the signal settings recorded for one source.
+    #[must_use]
     pub fn stimulus_for(
         &self,
         source: &RecordingSourceIdentity,
@@ -395,6 +405,9 @@ impl RecordingQualitySidecar {
 /// Atomically save versioned quality evidence beside a canonical session.
 /// Include every source that has evidence; an empty entry list deliberately
 /// replaces an old sidecar rather than allowing stale results to survive.
+///
+/// # Errors
+/// Returns an error if the destination cannot be created or the metadata cannot be serialized or written.
 pub fn save_recording_quality_sidecar(
     recordings_json_path: &std::path::Path,
     recordings_json: &[u8],
@@ -414,6 +427,9 @@ pub fn save_recording_quality_sidecar(
 ///
 /// The canonical `recordings.json` remains unchanged. Duplicate identities
 /// are rejected independently in the quality and stimulus collections.
+///
+/// # Errors
+/// Returns an error if the destination cannot be created or the metadata cannot be serialized or written.
 pub fn save_recording_quality_sidecar_with_stimuli(
     recordings_json_path: &std::path::Path,
     recordings_json: &[u8],
@@ -466,6 +482,9 @@ pub fn save_recording_quality_sidecar_with_stimuli(
 /// callers must leave quality as `None` in those cases rather than infer a
 /// clean result. Malformed sidecar data returns `InvalidData` so the caller
 /// can surface or log the damaged evidence file.
+///
+/// # Errors
+/// Returns an error for unreadable or malformed metadata. Missing or stale sidecars return `Ok(None)`.
 pub fn load_recording_quality_sidecar(
     recordings_json_path: &std::path::Path,
     recordings_json: &[u8],
@@ -568,6 +587,7 @@ fn recording_session_modified_unix_nanos(path: &std::path::Path) -> std::io::Res
 /// `build_speakers_from_recordings` in sotf-player. `speaker_names_by_channel`
 /// must be the channel-name list supplied to that builder. Imported rows
 /// retain their original source identity instead of being renumbered.
+#[must_use]
 pub fn recording_quality_entries_for_sources(
     recordings: &[ChannelRecording],
     speaker_names_by_channel: &[String],
@@ -605,6 +625,7 @@ pub fn recording_stimulus_entries_for_sources(
 }
 
 /// Build source-keyed stimulus entries from snapshots stored on each take.
+#[must_use]
 pub fn recording_stimulus_entries_from_sources(
     recordings: &[ChannelRecording],
     speaker_names_by_channel: &[String],
@@ -701,6 +722,9 @@ fn recording_source_recordings(
 
 /// Replace session metadata only after a complete write succeeds.
 /// A failed write leaves the previous saved session intact.
+///
+/// # Errors
+/// Returns an error if the destination cannot be created or the metadata cannot be serialized or written.
 pub fn save_recording_session_json(path: &std::path::Path, json: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     replace_recording_session(path, |file| file.write_all(json))
@@ -732,6 +756,7 @@ pub const DEFAULT_SWEEP_END_FREQ: f32 = 20000.0;
 /// `DelayProbe` has no per-channel generator — it uses the separate
 /// multi-channel `probe_channel_delays` workflow — so it falls back to
 /// `Sweep` here, matching what both frontends did inline.
+#[must_use]
 pub fn signal_type_for(recording_signal_type: RecordingSignalType) -> SignalType {
     match recording_signal_type {
         RecordingSignalType::Sweep => SignalType::Sweep,
@@ -754,6 +779,11 @@ pub fn signal_type_for(recording_signal_type: RecordingSignalType) -> SignalType
 /// Mirrors the engine's `measurement_amplitude_from_level_db` clamp added
 /// with `prepare_measurement_signal`; frontends previously used an
 /// unclamped `10^(level_db / 20)`.
+#[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "The clamped decibel level produces a bounded amplitude intentionally stored in f32."
+)]
 pub fn measurement_amplitude(level_db: f64) -> f32 {
     10.0_f64.powf(level_db.clamp(-40.0, 0.0) / 20.0) as f32
 }
@@ -763,6 +793,7 @@ pub fn measurement_amplitude(level_db: f64) -> f32 {
 /// Keeps alphanumerics, `_` and `-`; everything else (including path
 /// separators) becomes `_`. An empty or all-unsafe input falls back to
 /// `"recording"` so the result is always a usable file name.
+#[must_use]
 pub fn sanitize_recording_name(name: &str) -> String {
     let safe: String = name
         .trim()
@@ -790,6 +821,7 @@ pub fn sanitize_recording_name(name: &str) -> String {
 /// slot, **not** by hardware input channel). Empty strings are treated as
 /// "no calibration". Returns the selected path, or `None` when neither the
 /// per-mic slot nor the global path is set.
+#[must_use]
 pub fn resolve_mic_calibration(
     paths: &[Option<String>],
     mic_index: usize,
@@ -797,7 +829,7 @@ pub fn resolve_mic_calibration(
 ) -> Option<String> {
     paths
         .get(mic_index)
-        .and_then(|p| p.clone())
+        .and_then(std::clone::Clone::clone)
         .filter(|s| !s.is_empty())
         .or_else(|| global.filter(|s| !s.is_empty()).map(str::to_string))
 }
@@ -819,6 +851,11 @@ pub const LOW_MEASURED_LEVEL_THRESHOLD_DB: f32 = -50.0;
 /// Note this measures the *average measured level*, not a true acoustic
 /// noise floor — phrase user-facing text accordingly (see
 /// [`low_measured_level_warning`]).
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Averaging f32 decibel values intentionally uses an f32 bin count."
+)]
 pub fn check_low_measured_level(
     frequencies: &[f32],
     level_db: &[f32],
@@ -846,6 +883,7 @@ pub fn check_low_measured_level(
 /// worded honestly (low *measured level*, pointing at mic connection and
 /// input gain — not a "noise floor"). `subjects` names the affected
 /// channel(s) or speaker.
+#[must_use]
 pub fn low_measured_level_warning(subjects: &str) -> String {
     format!("Very low measured level on {subjects} — check mic connection and input gain")
 }
@@ -861,6 +899,7 @@ pub fn low_measured_level_warning(subjects: &str) -> String {
 ///
 /// `amp` should come from [`measurement_amplitude`] so the stimulus never
 /// exceeds full scale. Noise/MLS/Dirac ignore the sweep-specific arguments.
+#[must_use]
 pub fn capture_signal_params(
     signal_type: SignalType,
     sweep_start_freq: f32,
@@ -871,14 +910,6 @@ pub fn capture_signal_params(
     post_silence_s: Option<f32>,
 ) -> SignalParams {
     match signal_type {
-        SignalType::Sweep => sweep_params_from_config(
-            sweep_start_freq,
-            sweep_end_freq,
-            amp,
-            bass_octave_duration_s,
-            pre_silence_s,
-            post_silence_s,
-        ),
         SignalType::WhiteNoise | SignalType::PinkNoise | SignalType::MNoise => {
             SignalParams::Noise { amp }
         }
@@ -917,6 +948,7 @@ pub const MAX_NUM_SWEEPS: u16 = 8;
 /// bumps it to `MIN_REPEAT_SWEEPS` anyway because two takes have zero
 /// outlier-rejection power (commit 43d677d27), so offering it would lie
 /// about what runs.
+#[must_use]
 pub fn clamp_num_sweeps(value: u16) -> u16 {
     match value.clamp(1, MAX_NUM_SWEEPS) {
         2 => MIN_REPEAT_SWEEPS,
@@ -926,14 +958,15 @@ pub fn clamp_num_sweeps(value: u16) -> u16 {
 
 /// Step the sweep count by `delta` for +/- adjusters, skipping 2 in both
 /// directions (see [`clamp_num_sweeps`]).
+#[must_use]
 pub fn nudge_num_sweeps(current: u16, delta: i32) -> u16 {
-    let next = current as i32 + delta;
+    let next = i32::from(current).saturating_add(delta);
     if next <= 1 {
         1
     } else if next == 2 {
         if delta > 0 { MIN_REPEAT_SWEEPS } else { 1 }
     } else {
-        (next).min(MAX_NUM_SWEEPS as i32) as u16
+        u16::try_from(next.min(i32::from(MAX_NUM_SWEEPS))).unwrap_or(MAX_NUM_SWEEPS)
     }
 }
 
@@ -943,6 +976,7 @@ pub fn nudge_num_sweeps(current: u16, delta: i32) -> u16 {
 /// `drift_ppm` stays an `Option`: `None` means the drift *estimation* was
 /// unavailable (low-confidence end windows), which must never be rendered
 /// as "0 ppm" (Task-7 review carry-forward).
+#[must_use]
 pub fn summarize_take_quality(capture: &CaptureAnalysis) -> TakeQualitySummary {
     TakeQualitySummary {
         trustworthy: capture.quality.trustworthy
@@ -1049,10 +1083,10 @@ fn format_quality_finding(finding: &QualityFinding) -> String {
     }
     let mut text = format!("{} ({})", parts[0], parts[1..].join(", "));
     if let Some(reason) = finding.unknown_reason.as_deref() {
-        text.push_str(&format!("; reason: {reason}"));
+        let _ = write!(text, "; reason: {reason}");
     }
     if let Some(recommendation) = finding.recommendation.as_deref() {
-        text.push_str(&format!("; next: {recommendation}"));
+        let _ = write!(text, "; next: {recommendation}");
     }
     text
 }
@@ -1100,6 +1134,7 @@ fn threshold_comparison_label(comparison: ThresholdComparison) -> &'static str {
 /// - `OK* <score>` — accepted despite quality warnings (distinct from clean);
 /// - `OK <score>` — clean take;
 /// - empty string when there is nothing to say yet.
+#[must_use]
 pub fn take_quality_cell(state: ChannelRecordingState, result: Option<&RecordingResult>) -> String {
     let quality = result.and_then(|r| r.quality.as_ref());
     match (state, quality) {
@@ -1120,6 +1155,7 @@ pub fn take_quality_cell(state: ChannelRecordingState, result: Option<&Recording
 
 /// Dropout warning (R6 / §4 item 1): `Some` text when the capture dropped
 /// input samples to ring-buffer overruns.
+#[must_use]
 pub fn dropout_warning(dropped_samples: u64) -> Option<String> {
     (dropped_samples > 0).then(|| {
         format!(
@@ -1134,6 +1170,7 @@ pub fn dropout_warning(dropped_samples: u64) -> Option<String> {
 /// recorded. The first position anchors delays/levels, so it must be the
 /// main listening position; later positions should stay within roughly 60 cm
 /// of it (Audyssey/Dirac guidance).
+#[must_use]
 pub fn position_guidance(pos: usize, total: usize) -> String {
     if pos == 0 {
         format!("Position 1 of {total}: place the mic(s) at the main listening position first")
@@ -1167,6 +1204,7 @@ pub enum SessionQualityLineKind {
 /// Only `Done` and `ReviewNeeded` channels are listed (task-9 review B2): a
 /// channel whose retake FAILED keeps its previous result in memory, and
 /// listing that stale quality would misrepresent the session.
+#[must_use]
 pub fn session_quality_lines(
     channels: &[ChannelRecording],
 ) -> Vec<(String, SessionQualityLineKind)> {
@@ -1208,7 +1246,7 @@ pub fn session_quality_lines(
             if let Some(q) = quality
                 && q.dropped_samples > 0
             {
-                line.push_str(&format!("; {} dropped samples", q.dropped_samples));
+                let _ = write!(line, "; {} dropped samples", q.dropped_samples);
             }
             (line, kind)
         })
@@ -1216,6 +1254,7 @@ pub fn session_quality_lines(
 }
 
 /// Text-only view of [`session_quality_lines`] for plain-text UIs.
+#[must_use]
 pub fn session_quality_summary(channels: &[ChannelRecording]) -> Vec<String> {
     session_quality_lines(channels)
         .into_iter()
@@ -1229,6 +1268,7 @@ pub fn session_quality_summary(channels: &[ChannelRecording]) -> Vec<String> {
 /// requested count). `None` when no completed channel carries quality data
 /// (legacy / loaded sessions), preserving the old "unknown" semantics
 /// instead of persisting the requested count as if it were measured.
+#[must_use]
 pub fn accepted_num_sweeps_for_save(channels: &[ChannelRecording]) -> Option<u8> {
     let mut min: Option<usize> = None;
     for c in channels {
@@ -1239,10 +1279,15 @@ pub fn accepted_num_sweeps_for_save(channels: &[ChannelRecording]) -> Option<u8>
             min = Some(min.map_or(q.accepted_count, |m: usize| m.min(q.accepted_count)));
         }
     }
-    min.map(|m| m.min(u8::MAX as usize) as u8)
+    min.map(|m| u8::try_from(m).unwrap_or(u8::MAX))
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::float_cmp,
+    reason = "Synthetic fixtures use bounded sample counts and intentionally quantized audio; exact comparisons verify unchanged settings and samples."
+)]
 mod tests {
     use super::*;
 
@@ -1458,7 +1503,7 @@ mod tests {
                 // Engine default applies when the UI leaves it unset.
                 assert_eq!(post_silence_s, 2.0);
             }
-            other => panic!("expected OctaveSweep, got {:?}", other),
+            other => panic!("expected OctaveSweep, got {other:?}"),
         }
     }
 
@@ -1527,7 +1572,10 @@ mod tests {
         TakeQualitySummary {
             trustworthy,
             score: 0.42,
-            issues: issues.iter().map(|s| s.to_string()).collect(),
+            issues: issues
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             findings: Vec::new(),
             mean_coherence: Some(0.71),
             median_snr_db: Some(18.2),
@@ -1541,6 +1589,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "This end-to-end fixture keeps setup, execution, and artifact assertions together."
+    )]
     fn recording_quality_sidecar_roundtrips_warning_and_unknown_by_source() {
         use crate::quality::{
             QualityBand, QualityFinding, QualityMethod, QualityMetric, QualityPolicy,
@@ -1706,6 +1758,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "This end-to-end fixture keeps setup, execution, and artifact assertions together."
+    )]
     fn quality_entries_follow_saved_speaker_mic_position_order_without_shifting_missing_quality() {
         let result = |channel, name: &str, quality| RecordingResult {
             channel,
@@ -1819,7 +1875,10 @@ mod tests {
             sidecar.quality_for(&identity("R", 0)).unwrap().drift_ppm,
             Some(0.0)
         );
-        assert!(sidecar.stimuli.is_empty());
+        assert_eq!(
+            sidecar.stimuli,
+            [] as [crate::recording_helpers::RecordingStimulusEntry; 0]
+        );
         assert_eq!(stimulus_entries.len(), 3);
         assert_eq!(
             stimulus_entries[0].source,
@@ -2203,8 +2262,8 @@ mod tests {
         assert_eq!(take_quality_cell(Done, Some(&clean_res)), "OK 0.42");
         // Legacy / loaded results without quality data say so explicitly.
         assert_eq!(take_quality_cell(Done, None), "no data");
-        assert!(take_quality_cell(Empty, None).is_empty());
-        assert!(take_quality_cell(Recording, None).is_empty());
+        assert_eq!(take_quality_cell(Empty, None), "");
+        assert_eq!(take_quality_cell(Recording, None), "");
     }
 
     #[test]
@@ -2315,7 +2374,10 @@ mod tests {
             stimulus_config: None,
         });
 
-        assert!(session_quality_summary(&[stale.clone()]).is_empty());
+        assert_eq!(
+            session_quality_summary(&[stale.clone()]),
+            [] as [std::string::String; 0]
+        );
 
         // The structured view (task-9 review B3) reports the same filtering
         // plus a typed kind per line.

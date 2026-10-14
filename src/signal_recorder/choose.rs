@@ -46,8 +46,7 @@ pub(super) fn choose_measurement_output_config(
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "No output stream config supports {} channels at {}Hz. Available configs: {}",
-            min_channels, sample_rate, available
+            "No output stream config supports {min_channels} channels at {sample_rate}Hz. Available configs: {available}"
         )
     })
 }

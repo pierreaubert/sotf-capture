@@ -53,6 +53,12 @@ pub(crate) const WAKE_ERROR_BACKOFF_MS: u64 = 200;
 /// peak-normalized to [`WAKE_PEAK`]. White correlates unambiguously for
 /// the lag lock; pink would waste energy where short windows resolve
 /// poorly.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "The fixed positive fade rounds to bounded whole frames; taper phases use f32 audio arithmetic."
+)]
 pub(crate) fn wake_burst_samples(sample_rate: u32) -> Vec<f32> {
     let mut burst = math_audio_dsp::signals::gen_white_noise_seeded(
         1.0,
@@ -197,10 +203,10 @@ fn wake_attempt(
     let Ok(take) = take else {
         return false;
     };
-    let Some(recorded) = take.recorded_per_channel.first() else {
+    let Some(input_samples) = take.recorded_per_channel.first() else {
         return false;
     };
-    match estimate_lag_or_advise(burst, recorded, log_tag) {
+    match estimate_lag_or_advise(burst, input_samples, log_tag) {
         Ok(lag) => check_lag_lock(&lag, log_tag).is_ok(),
         Err(_) => false,
     }

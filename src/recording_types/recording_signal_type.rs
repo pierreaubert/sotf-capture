@@ -13,6 +13,7 @@ pub enum RecordingSignalType {
 }
 
 impl RecordingSignalType {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             RecordingSignalType::Sweep => "Sweep",
@@ -27,6 +28,7 @@ impl RecordingSignalType {
     /// Signal types available for per-channel recording.
     /// `DelayProbe` is excluded here because it uses a separate multi-channel
     /// workflow (`probe_channel_delays`) rather than per-channel sweep recording.
+    #[must_use]
     pub fn all() -> &'static [RecordingSignalType] {
         &[
             RecordingSignalType::Sweep,

@@ -8,10 +8,10 @@
 //! raw takes and writes stereo ear pairs, per-source loopbacks, a reference
 //! sweep, and a `ctc-measurements.json` fragment. [`merge_ctc_fragments`]
 //! combines fragments from repeated sessions into one self-contained bundle
-//! whose `ctc.json` drops directly under RoomEQ's `ctc:` key with
+//! whose `ctc.json` drops directly under `RoomEQ`'s `ctc:` key with
 //! `matrix_source: "raw_sweep"`.
 //!
-//! Assembly deliberately uses raw takes, not clock-corrected ones: RoomEQ
+//! Assembly deliberately uses raw takes, not clock-corrected ones: `RoomEQ`
 //! aligns each take to its own loopback peak, so ears and loopback must share
 //! one timeline. Drift across a single sweep is second order; prefer one
 //! interface for ears and loopback so all three share a clock.
@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 pub const CTC_FRAGMENT_FILE: &str = "ctc-measurements.json";
 /// Reference sweep WAV inside CTC bundles (mono, first channel significant).
 pub const CTC_REFERENCE_FILE: &str = "ctc_reference_sweep.wav";
-/// Merged CTC bundle descriptor, shaped as a partial RoomEQ `ctc:` block.
+/// Merged CTC bundle descriptor, shaped as a partial `RoomEQ` `ctc:` block.
 pub const CTC_MERGED_FILE: &str = "ctc.json";
 /// Fragment schema version.
 const CTC_FRAGMENT_VERSION: u32 = 1;
@@ -32,6 +32,7 @@ const CTC_FRAGMENT_VERSION: u32 = 1;
 const CTC_MIC_ROLES: [&str; 2] = ["left_ear", "right_ear"];
 
 /// Assembled CTC files for one processed session.
+#[derive(Debug)]
 pub struct CtcAssembly {
     /// Fragment filename (`ctc-measurements.json`).
     pub fragment_file: String,
@@ -61,6 +62,7 @@ pub struct CtcFragment {
 }
 
 /// Merged bundle summary for CLI reporting.
+#[derive(Debug)]
 pub struct MergedCtc {
     /// Head identities in merge order.
     pub heads: Vec<String>,
@@ -76,6 +78,17 @@ pub struct MergedCtc {
 /// exists (diagnostics-only runs assemble nothing, like the recording
 /// projection). Both ears of a source must come from one repeat; anything
 /// else is refused rather than silently mixed.
+///
+/// # Errors
+/// Returns an error for missing or inconsistent takes, unsafe artifact paths, invalid WAVs, or output I/O failures.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Sweep sample counts are converted to f64 seconds, well within f64 integer precision."
+)]
 pub fn assemble_ctc_takes(
     report: &super::clock::io::ClockProcessedManifest,
     raw_root: &Path,
@@ -211,7 +224,10 @@ pub fn assemble_ctc_takes(
                 .iter()
                 .map(|source| source.id.clone())
                 .collect(),
-            mics: CTC_MIC_ROLES.iter().map(|role| role.to_string()).collect(),
+            mics: CTC_MIC_ROLES
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             head_positions: vec![CtcHeadPositionConfig {
                 id: ctc.head_position.id.clone(),
                 x: ctc.head_position.x,
@@ -245,6 +261,17 @@ pub fn assemble_ctc_takes(
 /// Every fragment must share speakers, sample rate, sweep parameters, and
 /// reference bytes; head identities must be distinct; every head/speaker
 /// cell must be present. Anything else is refused. `output` must not exist.
+///
+/// # Errors
+/// Returns an error if fragments disagree, identities or files are invalid, or bundle I/O fails.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
+#[expect(
+    clippy::float_cmp,
+    reason = "Serialized sweep settings must match exactly before fragments can share one reference waveform."
+)]
 pub fn merge_ctc_fragments(directories: &[PathBuf], output: &Path) -> Result<MergedCtc, String> {
     if directories.is_empty() {
         return Err("ctc merge requires at least one session directory".into());
@@ -493,8 +520,14 @@ mod tests {
         CtcFragment {
             version: CTC_FRAGMENT_VERSION,
             measurements: CtcMeasurementConfig {
-                speakers: speakers.iter().map(|speaker| speaker.to_string()).collect(),
-                mics: CTC_MIC_ROLES.iter().map(|role| role.to_string()).collect(),
+                speakers: speakers
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
+                mics: CTC_MIC_ROLES
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
                 head_positions: vec![CtcHeadPositionConfig {
                     id: head.into(),
                     x: 0.0,

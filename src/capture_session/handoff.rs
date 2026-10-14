@@ -1,4 +1,4 @@
-//! Immutable acquisition inventory published with the canonical RoomEQ projection.
+//! Immutable acquisition inventory published with the canonical `RoomEQ` projection.
 
 use super::clock::io::ClockProcessedManifest;
 use super::record::RawCaptureStatus;
@@ -28,7 +28,7 @@ fn file_identity(
     let mut input = std::fs::File::open(path).map_err(|error| error.to_string())?;
     let mut hash = Sha256::new();
     let mut count = 0_u64;
-    let mut buffer = [0_u8; 65536];
+    let mut buffer = vec![0_u8; 65_536].into_boxed_slice();
     loop {
         let read = input.read(&mut buffer).map_err(|error| error.to_string())?;
         if read == 0 {
@@ -84,6 +84,10 @@ fn projected_response_file(
 /// # Errors
 /// Rejects incomplete projections, missing artifacts, invalid paths, changed files,
 /// unsupported status, inconsistent take identities, and publication failures.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
 pub fn publish_capture_handoff(
     report: &ClockProcessedManifest,
     status: RawCaptureStatus,

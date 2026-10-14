@@ -127,10 +127,10 @@ pub struct CaptureTimingReference {
     pub sound_speed_uncertainty_m_s: f64,
 }
 
-/// Physical room dimensions in meters for RoomEQ Schroeder handling.
+/// Physical room dimensions in meters for `RoomEQ` Schroeder handling.
 ///
 /// Length, width, and height are all required when present. Values are
-/// validated on plan load; RoomEQ resolves them into engine settings and
+/// validated on plan load; `RoomEQ` resolves them into engine settings and
 /// falls back to its default Schroeder frequency when absent.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -166,7 +166,7 @@ pub struct CaptureSweep {
 /// Delay-probe pass parameters, played once per source after the sweeps.
 ///
 /// Probes run through the plan output device while the first microphone
-/// records; results land in the raw journal for RoomEQ delay evidence.
+/// records; results land in the raw journal for `RoomEQ` delay evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureProbe {
@@ -233,7 +233,7 @@ pub struct CaptureHeadPosition {
 /// Crosstalk-cancellation capture declaration for one head position.
 ///
 /// Names the simultaneously recorded ear-microphone pair. The plan loopback
-/// is recorded with every sweep take and backs RoomEQ loopback alignment;
+/// is recorded with every sweep take and backs `RoomEQ` loopback alignment;
 /// each head position is one session, merged later by `plan-ctc-merge`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -277,10 +277,10 @@ pub struct CaptureSessionPlan {
     /// Without this declaration the first source channel emits timing chirps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing_reference: Option<CaptureTimingReference>,
-    /// Physical room dimensions in meters, projected to RoomEQ when present.
+    /// Physical room dimensions in meters, projected to `RoomEQ` when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_dimensions: Option<RoomDimensions>,
-    /// Free-form room treatment, seating, and placement notes for RoomEQ.
+    /// Free-form room treatment, seating, and placement notes for `RoomEQ`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup_description: Option<String>,
     /// Delay-probe pass after the sweeps; absent runs sweeps only.
@@ -320,6 +320,18 @@ impl CaptureSessionPlan {
     /// # Errors
     /// Rejects unsupported versions, invalid rates/sweeps, duplicate identities
     /// or routes, non-finite settings, missing calibration, and invalid geometry.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep the related validation rules together before any audio acquisition can begin."
+    )]
+    #[expect(
+        clippy::float_cmp,
+        reason = "Exactly duplicated microphone coordinates are invalid; nearby distinct positions remain permitted."
+    )]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Checking the f32 cast detects amplitude underflow at the waveform boundary."
+    )]
     pub fn validate(self) -> Result<ValidatedCaptureSession, CapturePlanError> {
         let reject = |message: &str| CapturePlanError(message.to_owned());
         if self.version != 1 {
@@ -565,6 +577,7 @@ impl CaptureSessionPlan {
 
 impl ValidatedCaptureSession {
     /// Inspect the frozen session configuration.
+    #[must_use]
     pub fn plan(&self) -> &CaptureSessionPlan {
         &self.0
     }
@@ -598,6 +611,7 @@ pub(crate) fn octave_weighted_sweep_seconds(
 ///
 /// A declared fixed emitter wins; otherwise the first source channel
 /// carries the chirps and takes stay arrival-aligned.
+#[must_use]
 pub fn timing_emitter_channel(session: &ValidatedCaptureSession) -> u16 {
     session
         .plan()
@@ -612,24 +626,24 @@ pub fn timing_emitter_channel(session: &ValidatedCaptureSession) -> u16 {
 ///
 /// Names the chirp channel and whether a fixed emitter survey backs
 /// coherent use. Per-take reference identities resolve at record time.
+#[must_use]
 pub fn timing_emitter_summary(session: &ValidatedCaptureSession) -> String {
     let channel = timing_emitter_channel(session);
-    match &session.plan().timing_reference {
-        Some(emitter) => format!(
+    if let Some(emitter) = &session.plan().timing_reference {
+        format!(
             "timing chirps on output channel {channel} (dedicated emitter at [{:.3}, {:.3}, {:.3}] m); per-take reference identity resolves at record time",
             emitter.position_m[0], emitter.position_m[1], emitter.position_m[2]
-        ),
-        None => {
-            let source = session
-                .plan()
-                .sources
-                .iter()
-                .find(|source| source.output_channel == channel)
-                .map_or("unknown source", |source| source.id.as_str());
-            format!(
-                "timing chirps on output channel {channel} (source '{source}'); no fixed emitter declared, takes stay arrival-aligned and coherent use is forbidden"
-            )
-        }
+        )
+    } else {
+        let source = session
+            .plan()
+            .sources
+            .iter()
+            .find(|source| source.output_channel == channel)
+            .map_or("unknown source", |source| source.id.as_str());
+        format!(
+            "timing chirps on output channel {channel} (source '{source}'); no fixed emitter declared, takes stay arrival-aligned and coherent use is forbidden"
+        )
     }
 }
 

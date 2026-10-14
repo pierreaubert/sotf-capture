@@ -1,3 +1,10 @@
+#![expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "Synthetic fixtures use bounded sample counts and intentionally quantized audio; exact comparisons verify unchanged settings and samples."
+)]
+
 //! Hardware-free capture tests over [`VirtualWire`](super::fake::VirtualWire).
 
 // Rust guideline compliant 2026-02-21
@@ -353,7 +360,7 @@ fn emulated_sweep_loopback_is_flat_and_trustworthy() {
         100.0,
         10_000.0,
     );
-    assert!(!band.is_empty());
+    assert_ne!(band, [] as [f32; 0]);
     let (mean, variation) = mean_and_variation(&band);
     assert!(
         (-3.0..=3.0).contains(&mean),

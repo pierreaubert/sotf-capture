@@ -59,8 +59,25 @@ test-util = []
 # Match GPUI compatibility forks: workspace patches are not inherited.
 
 
+[lints.rust]
+ambiguous_negative_literals = "warn"
+missing_debug_implementations = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_lifetimes = "warn"
+
 [lints.clippy]
+cargo = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+correctness = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
 perf = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+# Transitive dependency versions are selected by upstream crates.
+multiple_crate_versions = "allow"
 
 [patch.crates-io]
 # Retained SOTF fix for the uninhabited Objective-C runtime static. Pin the

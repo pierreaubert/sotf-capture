@@ -14,6 +14,7 @@ use math_audio_dsp::analysis::{
     estimate_sweep_lag_with_confidence,
 };
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::Path;
 
@@ -89,6 +90,10 @@ fn frequency_snr(
     )
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Buffer lengths normalize sample power; practical audio buffers are far below f64 integer precision limits."
+)]
 fn power(samples: &[f32]) -> Option<f64> {
     if samples.is_empty() || samples.iter().any(|x| !x.is_finite()) {
         return None;
@@ -110,6 +115,14 @@ fn broadband_snr(samples: &[f32], layout: &CaptureStimulusLayout) -> Option<f64>
     snr.is_finite().then_some(snr)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Clipped-sample counts are reported as f64 metrics; capture buffers are bounded in size."
+)]
 pub(super) fn analyze_capture(
     original: &[f32],
     corrected: Option<&[f32]>,
@@ -166,70 +179,66 @@ pub(super) fn analyze_capture(
         match frequency_snr(samples, &stimulus.layout, plan) {
             Ok(bands) => {
                 for band in &bands {
-                    match band.snr_db {
-                        Some(snr) => {
-                            let pass = snr >= COHERENT_CAPTURE_SNR_THRESHOLD_DB;
-                            let message = if pass {
-                                format!(
-                                    "SNR in {:.1}–{:.1} Hz meets the 30 dB coherent-use threshold",
-                                    band.low_hz, band.high_hz
-                                )
-                            } else {
-                                let issue = format!(
-                                    "SNR in {:.1}–{:.1} Hz is below 30 dB; reduce room noise and repeat",
-                                    band.low_hz, band.high_hz
-                                );
-                                report.issues.push(issue.clone());
-                                issue
-                            };
-                            report.quality_findings.push(QualityFinding {
-                                policy: QualityPolicy::CoherentCapture,
-                                metric: QualityMetric::BandSnr,
-                                status: if pass {
-                                    QualityStatus::Pass
-                                } else {
-                                    QualityStatus::Warning
-                                },
-                                measured: Some(snr),
-                                unit: QualityUnit::Decibels,
-                                band: Some(QualityBand {
-                                    low_hz: band.low_hz,
-                                    high_hz: band.high_hz,
-                                }),
-                                method: QualityMethod::NoiseSubtractedBandPowerRatio,
-                                threshold: Some(QualityThreshold {
-                                    comparison: ThresholdComparison::AtLeast,
-                                    value: COHERENT_CAPTURE_SNR_THRESHOLD_DB,
-                                }),
-                                unknown_reason: None,
-                                recommendation: (!pass)
-                                    .then(|| "reduce room noise and repeat".into()),
-                                message,
-                            });
-                        }
-                        None => {
-                            let message = format!(
-                                "SNR in {:.1}–{:.1} Hz is unavailable; no quality acceptance for this band",
+                    if let Some(snr) = band.snr_db {
+                        let pass = snr >= COHERENT_CAPTURE_SNR_THRESHOLD_DB;
+                        let message = if pass {
+                            format!(
+                                "SNR in {:.1}–{:.1} Hz meets the 30 dB coherent-use threshold",
+                                band.low_hz, band.high_hz
+                            )
+                        } else {
+                            let issue = format!(
+                                "SNR in {:.1}–{:.1} Hz is below 30 dB; reduce room noise and repeat",
                                 band.low_hz, band.high_hz
                             );
-                            report.issues.push(message.clone());
-                            report.quality_findings.push(QualityFinding {
-                                policy: QualityPolicy::CoherentCapture,
-                                metric: QualityMetric::BandSnr,
-                                status: QualityStatus::Unknown,
-                                measured: None,
-                                unit: QualityUnit::Decibels,
-                                band: Some(QualityBand { low_hz: band.low_hz, high_hz: band.high_hz }),
-                                method: QualityMethod::NoiseSubtractedBandPowerRatio,
-                                threshold: Some(QualityThreshold {
-                                    comparison: ThresholdComparison::AtLeast,
-                                    value: COHERENT_CAPTURE_SNR_THRESHOLD_DB,
-                                }),
-                                unknown_reason: Some("quiet or sweep window was silent, missing, or below the noise power".into()),
-                                recommendation: Some("reduce room noise and capture a valid quiet interval".into()),
-                                message,
-                            });
-                        }
+                            report.issues.push(issue.clone());
+                            issue
+                        };
+                        report.quality_findings.push(QualityFinding {
+                            policy: QualityPolicy::CoherentCapture,
+                            metric: QualityMetric::BandSnr,
+                            status: if pass {
+                                QualityStatus::Pass
+                            } else {
+                                QualityStatus::Warning
+                            },
+                            measured: Some(snr),
+                            unit: QualityUnit::Decibels,
+                            band: Some(QualityBand {
+                                low_hz: band.low_hz,
+                                high_hz: band.high_hz,
+                            }),
+                            method: QualityMethod::NoiseSubtractedBandPowerRatio,
+                            threshold: Some(QualityThreshold {
+                                comparison: ThresholdComparison::AtLeast,
+                                value: COHERENT_CAPTURE_SNR_THRESHOLD_DB,
+                            }),
+                            unknown_reason: None,
+                            recommendation: (!pass).then(|| "reduce room noise and repeat".into()),
+                            message,
+                        });
+                    } else {
+                        let message = format!(
+                            "SNR in {:.1}–{:.1} Hz is unavailable; no quality acceptance for this band",
+                            band.low_hz, band.high_hz
+                        );
+                        report.issues.push(message.clone());
+                        report.quality_findings.push(QualityFinding {
+                            policy: QualityPolicy::CoherentCapture,
+                            metric: QualityMetric::BandSnr,
+                            status: QualityStatus::Unknown,
+                            measured: None,
+                            unit: QualityUnit::Decibels,
+                            band: Some(QualityBand { low_hz: band.low_hz, high_hz: band.high_hz }),
+                            method: QualityMethod::NoiseSubtractedBandPowerRatio,
+                            threshold: Some(QualityThreshold {
+                                comparison: ThresholdComparison::AtLeast,
+                                value: COHERENT_CAPTURE_SNR_THRESHOLD_DB,
+                            }),
+                            unknown_reason: Some("quiet or sweep window was silent, missing, or below the noise power".into()),
+                            recommendation: Some("reduce room noise and capture a valid quiet interval".into()),
+                            message,
+                        });
                     }
                 }
                 report.frequency_snr = bands;
@@ -255,56 +264,53 @@ pub(super) fn analyze_capture(
             }
         }
     }
-    match report.broadband_snr_db {
-        Some(snr) => {
-            let pass = snr >= COHERENT_CAPTURE_SNR_THRESHOLD_DB;
-            let message = if pass {
-                "broadband SNR meets the 30 dB coherent-use threshold".to_string()
+    if let Some(snr) = report.broadband_snr_db {
+        let pass = snr >= COHERENT_CAPTURE_SNR_THRESHOLD_DB;
+        let message = if pass {
+            "broadband SNR meets the 30 dB coherent-use threshold".to_string()
+        } else {
+            let issue = "broadband SNR below 30 dB; reduce room noise and repeat".to_string();
+            report.issues.push(issue.clone());
+            issue
+        };
+        report.quality_findings.push(QualityFinding {
+            policy: QualityPolicy::CoherentCapture,
+            metric: QualityMetric::BroadbandSnr,
+            status: if pass {
+                QualityStatus::Pass
             } else {
-                let issue = "broadband SNR below 30 dB; reduce room noise and repeat".to_string();
-                report.issues.push(issue.clone());
-                issue
-            };
-            report.quality_findings.push(QualityFinding {
-                policy: QualityPolicy::CoherentCapture,
-                metric: QualityMetric::BroadbandSnr,
-                status: if pass {
-                    QualityStatus::Pass
-                } else {
-                    QualityStatus::Warning
-                },
-                measured: Some(snr),
-                unit: QualityUnit::Decibels,
-                band: None,
-                method: QualityMethod::BroadbandPowerRatio,
-                threshold: Some(QualityThreshold {
+                QualityStatus::Warning
+            },
+            measured: Some(snr),
+            unit: QualityUnit::Decibels,
+            band: None,
+            method: QualityMethod::BroadbandPowerRatio,
+            threshold: Some(QualityThreshold {
+                comparison: ThresholdComparison::AtLeast,
+                value: COHERENT_CAPTURE_SNR_THRESHOLD_DB,
+            }),
+            unknown_reason: None,
+            recommendation: (!pass).then(|| "reduce room noise and repeat".into()),
+            message,
+        });
+    } else {
+        let message = "broadband SNR unavailable: missing quiet interval, digital silence, or signal below noise";
+        report.issues.push(message.into());
+        report
+            .quality_findings
+            .push(QualityFinding::unknown_with_threshold(
+                QualityPolicy::CoherentCapture,
+                QualityMetric::BroadbandSnr,
+                QualityUnit::Decibels,
+                QualityMethod::BroadbandPowerRatio,
+                QualityThreshold {
                     comparison: ThresholdComparison::AtLeast,
                     value: COHERENT_CAPTURE_SNR_THRESHOLD_DB,
-                }),
-                unknown_reason: None,
-                recommendation: (!pass).then(|| "reduce room noise and repeat".into()),
+                },
+                "missing quiet interval, digital silence, or signal below the noise power",
+                Some("capture a quiet interval and a valid sweep, then repeat".into()),
                 message,
-            });
-        }
-        None => {
-            let message = "broadband SNR unavailable: missing quiet interval, digital silence, or signal below noise";
-            report.issues.push(message.into());
-            report
-                .quality_findings
-                .push(QualityFinding::unknown_with_threshold(
-                    QualityPolicy::CoherentCapture,
-                    QualityMetric::BroadbandSnr,
-                    QualityUnit::Decibels,
-                    QualityMethod::BroadbandPowerRatio,
-                    QualityThreshold {
-                        comparison: ThresholdComparison::AtLeast,
-                        value: COHERENT_CAPTURE_SNR_THRESHOLD_DB,
-                    },
-                    "missing quiet interval, digital silence, or signal below the noise power",
-                    Some("capture a quiet interval and a valid sweep, then repeat".into()),
-                    message,
-                ));
-        }
+            ));
     }
     let name = format!("take-{index:03}-magnitude.csv");
     match write_magnitude(
@@ -323,6 +329,12 @@ pub(super) fn analyze_capture(
     report
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "Drift dilation rounds a nonnegative frame count; validated sweep bounds feed the f32 analysis API."
+)]
 fn write_magnitude(
     samples: &[f32],
     stimulus: &CaptureStimulus,
@@ -413,7 +425,6 @@ fn write_magnitude(
         if !frequency.is_finite() || !calibrated.is_finite() {
             return Err("analysis produced non-finite magnitude data".into());
         }
-        use std::fmt::Write;
         writeln!(csv, "{frequency},{calibrated}").map_err(|e| e.to_string())?;
         rows += 1;
     }
@@ -425,6 +436,10 @@ fn write_magnitude(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::float_cmp,
+    reason = "Synthetic fixtures use bounded sample counts and intentionally quantized audio; exact comparisons verify unchanged settings and samples."
+)]
 mod tests {
     use super::*;
 
@@ -454,7 +469,10 @@ mod tests {
         )
         .unwrap();
         assert!(report.frequency_snr.is_empty());
-        assert!(report.quality_findings.is_empty());
+        assert_eq!(
+            report.quality_findings,
+            [] as [crate::quality::QualityFinding; 0]
+        );
     }
 
     #[test]

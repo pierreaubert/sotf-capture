@@ -309,7 +309,7 @@ where
                     &stimulus,
                     &cursor,
                     &data_failed,
-                )
+                );
             },
             move |_| {
                 failed.store(true, Ordering::Relaxed);
@@ -386,6 +386,14 @@ fn drain_inputs(
 /// # Errors
 /// Rejects invalid routes, ambiguous names, rate/format mismatches, stream errors,
 /// malformed or dropped frames, cancellation, storage limits and device stalls.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Allocated stimulus length is converted to f64 only to compute playback duration."
+)]
 pub fn capture_multidevice(
     request: MultiCaptureRequest,
     cancel: &CancelFlag,
@@ -462,7 +470,7 @@ pub fn capture_multidevice(
         .map_err(|e| format!("{}: {e}", group.name))?;
         for (index, _) in &group.routes {
             input_sample_formats[*index] = format!("{:?}", config.sample_format());
-            input_device_ids[*index] = device_id.clone();
+            input_device_ids[*index].clone_from(&device_id);
         }
         let (producer, consumer) = rtrb::RingBuffer::new(request.sample_rate_hz as usize);
         let failed = Arc::new(AtomicBool::new(false));

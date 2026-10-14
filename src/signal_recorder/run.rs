@@ -8,7 +8,7 @@ use super::types::analyze_bass_anchor_recording;
 #[cfg(not(target_os = "ios"))]
 use super::types::play_per_channel_and_record_mono;
 use hound::{SampleFormat, WavSpec, WavWriter};
-use math_audio_dsp::signals::*;
+use math_audio_dsp::signals::gen_tone;
 
 /// Run the bass-anchor capture across all output channels with
 /// steady-state lock-in detection. See `run_bass_anchor_with_recording`
@@ -31,8 +31,15 @@ use math_audio_dsp::signals::*;
 ///   is `phase_mic − phase_loopback`, which cancels DAC delay / cpal
 ///   pre-roll / clock skew. Reusing `RecordingDeviceConfig.ctc_loopback_input_channel`
 ///   keeps the wiring identical to the CTC raw-sweep path.
+///
+/// # Errors
+/// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
 #[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public API accepting an owned cancellation handle for existing callers."
+)]
 pub fn run_bass_anchor(
     channel_indices: &[u16],
     channel_names: &[String],
@@ -74,8 +81,19 @@ pub fn run_bass_anchor(
 /// a 2-channel f32 file (channel 0 = mic, channel 1 = loopback) so the
 /// session can be re-analysed offline with
 /// [`analyze_bass_anchor_recording`]; otherwise it is single-channel.
+///
+/// # Errors
+/// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
 #[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public API accepting an owned cancellation handle for existing callers."
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Allocated recording lengths convert to f64 seconds for saved metadata."
+)]
 pub fn run_bass_anchor_with_recording(
     channel_indices: &[u16],
     channel_names: &[String],
@@ -118,7 +136,7 @@ pub fn run_bass_anchor_with_recording(
         sample_format: SampleFormat::Float,
     };
     let mut writer = WavWriter::create(recording_wav_path, spec)
-        .map_err(|e| format!("Failed to create bass-anchor recording WAV: {}", e))?;
+        .map_err(|e| format!("Failed to create bass-anchor recording WAV: {e}"))?;
     if let Some(ref lb) = loopback_recorded {
         if lb.len() != recorded.len() {
             crate::rate_limited_log!(
@@ -138,25 +156,25 @@ pub fn run_bass_anchor_with_recording(
             let lb_sample = lb.get(i).copied().unwrap_or(0.0);
             writer
                 .write_sample(mic_sample)
-                .map_err(|e| format!("Failed to write bass-anchor mic sample: {}", e))?;
+                .map_err(|e| format!("Failed to write bass-anchor mic sample: {e}"))?;
             writer
                 .write_sample(lb_sample)
-                .map_err(|e| format!("Failed to write bass-anchor loopback sample: {}", e))?;
+                .map_err(|e| format!("Failed to write bass-anchor loopback sample: {e}"))?;
         }
     } else {
         for &s in &recorded {
             writer
                 .write_sample(s)
-                .map_err(|e| format!("Failed to write bass-anchor sample: {}", e))?;
+                .map_err(|e| format!("Failed to write bass-anchor sample: {e}"))?;
         }
     }
     writer
         .finalize()
-        .map_err(|e| format!("Failed to finalize bass-anchor WAV: {}", e))?;
+        .map_err(|e| format!("Failed to finalize bass-anchor WAV: {e}"))?;
     log::info!(
         "[run_bass_anchor_with_recording] Saved {} samples ({:.2}s, {}ch) to {}",
         recorded.len(),
-        recorded.len() as f64 / input_sr as f64,
+        recorded.len() as f64 / f64::from(input_sr),
         channels_out,
         recording_wav_path.display()
     );
@@ -285,8 +303,21 @@ fn run_bass_anchor_core(
 /// recording the mic. Returns the mic peak / RMS sample level over
 /// the stable portion of the tone (skipping the first 200 ms of
 /// attack and the last 200 ms of release).
+///
+/// # Errors
+/// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
 #[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public API accepting an owned cancellation handle for existing callers."
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "A positive fixed skirt rounds to whole frames; RMS and frequency use the f32 calibration API."
+)]
 pub fn run_spl_calibration(
     output_channel: u16,
     sample_rate: u32,
@@ -382,7 +413,7 @@ pub fn run_spl_calibration(
     }
 
     let rms = {
-        let sum_sq: f64 = stable.iter().map(|&s| (s as f64) * (s as f64)).sum();
+        let sum_sq: f64 = stable.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
         ((sum_sq / stable.len() as f64).sqrt()) as f32
     };
 

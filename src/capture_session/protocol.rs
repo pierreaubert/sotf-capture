@@ -43,6 +43,11 @@ pub struct CaptureStimulus {
 ///
 /// # Errors
 /// Returns the waveform generator's error if sweep values cannot be represented.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "Validated audio parameters feed the f32 waveform generator; the fixed fade rounds to whole frames."
+)]
 pub fn prepare_capture_stimulus(
     session: &ValidatedCaptureSession,
 ) -> Result<CaptureStimulus, String> {
@@ -101,6 +106,10 @@ pub fn prepare_capture_stimulus(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Synthetic fixtures use bounded sample counts and intentionally quantized audio; exact comparisons verify unchanged settings and samples."
+)]
 mod tests {
     use super::*;
     use crate::capture_session::CaptureSessionPlan;
@@ -152,14 +161,14 @@ mod tests {
             serde_json::from_str(include_str!("../../tests/fixtures/capture-session.json"))
                 .unwrap();
         plan.sweep.duration_secs = 2.0;
-        let plain = prepare_capture_stimulus(&plan.clone().validate().unwrap()).unwrap();
+        let unweighted = prepare_capture_stimulus(&plan.clone().validate().unwrap()).unwrap();
         plan.sweep.bass_octave_duration_s = Some(3.0);
         let weighted = prepare_capture_stimulus(&plan.clone().validate().unwrap()).unwrap();
         let expected = octave_weighted_sweep_seconds(20.0, 20000.0, Some(3.0), 2.0);
         assert!(expected > 2.0);
         let actual = weighted.layout.sweep_samples as f64 / f64::from(plan.sample_rate_hz);
         assert!((actual - expected).abs() < 2.0 / f64::from(plan.sample_rate_hz));
-        assert!(weighted.layout.sweep_samples > plain.layout.sweep_samples);
+        assert!(weighted.layout.sweep_samples > unweighted.layout.sweep_samples);
         assert_eq!(
             weighted.layout.end_chirp_offset
                 - weighted.layout.sweep_offset

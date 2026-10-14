@@ -1,8 +1,8 @@
-/// Status of the BassAnchor capture (Recording wizard Step 4).
+/// Status of the `BassAnchor` capture (Recording wizard Step 4).
 ///
 /// Mirrors [`ProbeCaptureStatus`] — wall-clock progress via
 /// `started_at_ms`, `Failed(String)` for error reporting. Used by
-/// the GD-1e BassAnchor wizard step (GD-Opt v2 plan §2.6,
+/// the GD-1e `BassAnchor` wizard step (GD-Opt v2 plan §2.6,
 /// `docs/gd_opt_v2_plan.md` in the autoeq repo).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum BassAnchorCaptureStatus {
@@ -17,6 +17,11 @@ pub enum BassAnchorCaptureStatus {
 
 impl BassAnchorCaptureStatus {
     /// Estimated fraction of the bass-anchor capture completed.
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Elapsed milliseconds are converted to f32 only for a clamped UI progress fraction."
+    )]
     pub fn progress(&self, estimated_total_ms: u64, now_ms: u64) -> Option<f32> {
         match self {
             Self::Running { started_at_ms } if estimated_total_ms > 0 => {

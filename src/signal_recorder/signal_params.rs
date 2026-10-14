@@ -7,6 +7,7 @@ use math_audio_dsp::signals::STI_MIN_SAMPLE_RATE_HZ;
 /// When `RecordingConfiguration` carries the GD-Opt v2 fields, returns an
 /// [`SignalParams::OctaveSweep`]; otherwise falls back to legacy
 /// [`SignalParams::Sweep`] so existing callers are not affected.
+#[must_use]
 pub fn sweep_params_from_config(
     start_freq: f32,
     end_freq: f32,
@@ -33,6 +34,17 @@ pub fn sweep_params_from_config(
 }
 
 /// Validate signal parameters
+///
+/// # Errors
+/// Returns an error if the rate, duration, frequencies, levels, or signal-specific parameters are invalid.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the related validation rules together before any audio acquisition can begin."
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Nyquist is represented in f32 to match the public f32 signal-frequency parameters."
+)]
 pub fn validate_signal_params(
     signal_type: SignalType,
     params: &SignalParams,
@@ -49,12 +61,11 @@ pub fn validate_signal_params(
         (SignalType::Tone, SignalParams::Tone { freq, amp }) => {
             if *freq <= 0.0 || *freq >= nyquist {
                 return Err(format!(
-                    "Tone frequency {} Hz must be in range (0, {} Hz)",
-                    freq, nyquist
+                    "Tone frequency {freq} Hz must be in range (0, {nyquist} Hz)"
                 ));
             }
             if *amp <= 0.0 || *amp > 1.0 {
-                return Err(format!("Amplitude {} must be in range (0, 1]", amp));
+                return Err(format!("Amplitude {amp} must be in range (0, 1]"));
             }
         }
         (
@@ -68,21 +79,19 @@ pub fn validate_signal_params(
         ) => {
             if *freq1 <= 0.0 || *freq1 >= nyquist {
                 return Err(format!(
-                    "First frequency {} Hz must be in range (0, {} Hz)",
-                    freq1, nyquist
+                    "First frequency {freq1} Hz must be in range (0, {nyquist} Hz)"
                 ));
             }
             if *freq2 <= 0.0 || *freq2 >= nyquist {
                 return Err(format!(
-                    "Second frequency {} Hz must be in range (0, {} Hz)",
-                    freq2, nyquist
+                    "Second frequency {freq2} Hz must be in range (0, {nyquist} Hz)"
                 ));
             }
             if *amp1 <= 0.0 || *amp1 > 1.0 {
-                return Err(format!("First amplitude {} must be in range (0, 1]", amp1));
+                return Err(format!("First amplitude {amp1} must be in range (0, 1]"));
             }
             if *amp2 <= 0.0 || *amp2 > 1.0 {
-                return Err(format!("Second amplitude {} must be in range (0, 1]", amp2));
+                return Err(format!("Second amplitude {amp2} must be in range (0, 1]"));
             }
         }
         (
@@ -95,24 +104,21 @@ pub fn validate_signal_params(
         ) => {
             if *start_freq <= 0.0 || *start_freq >= nyquist {
                 return Err(format!(
-                    "Start frequency {} Hz must be in range (0, {} Hz)",
-                    start_freq, nyquist
+                    "Start frequency {start_freq} Hz must be in range (0, {nyquist} Hz)"
                 ));
             }
             if *end_freq <= 0.0 || *end_freq >= nyquist {
                 return Err(format!(
-                    "End frequency {} Hz must be in range (0, {} Hz)",
-                    end_freq, nyquist
+                    "End frequency {end_freq} Hz must be in range (0, {nyquist} Hz)"
                 ));
             }
             if *start_freq >= *end_freq {
                 return Err(format!(
-                    "Start frequency {} Hz must be less than end frequency {} Hz",
-                    start_freq, end_freq
+                    "Start frequency {start_freq} Hz must be less than end frequency {end_freq} Hz"
                 ));
             }
             if *amp <= 0.0 || *amp > 1.0 {
-                return Err(format!("Amplitude {} must be in range (0, 1]", amp));
+                return Err(format!("Amplitude {amp} must be in range (0, 1]"));
             }
         }
         (
@@ -133,39 +139,35 @@ pub fn validate_signal_params(
             }
             if *start_freq <= 0.0 || *start_freq >= nyquist {
                 return Err(format!(
-                    "Start frequency {} Hz must be in range (0, {} Hz)",
-                    start_freq, nyquist
+                    "Start frequency {start_freq} Hz must be in range (0, {nyquist} Hz)"
                 ));
             }
             if *end_freq <= 0.0 || *end_freq >= nyquist {
                 return Err(format!(
-                    "End frequency {} Hz must be in range (0, {} Hz)",
-                    end_freq, nyquist
+                    "End frequency {end_freq} Hz must be in range (0, {nyquist} Hz)"
                 ));
             }
             if *start_freq >= *end_freq {
                 return Err(format!(
-                    "Start frequency {} Hz must be less than end frequency {} Hz",
-                    start_freq, end_freq
+                    "Start frequency {start_freq} Hz must be less than end frequency {end_freq} Hz"
                 ));
             }
             if *amp <= 0.0 || *amp > 1.0 {
-                return Err(format!("Amplitude {} must be in range (0, 1]", amp));
+                return Err(format!("Amplitude {amp} must be in range (0, 1]"));
             }
         }
-        (_, SignalParams::Noise { amp }) if (*amp <= 0.0 || *amp > 1.0) => {
-            return Err(format!("Amplitude {} must be in range (0, 1]", amp));
+        (_, SignalParams::Noise { amp }) | (SignalType::Dirac, SignalParams::Dirac { amp })
+            if *amp <= 0.0 || *amp > 1.0 =>
+        {
+            return Err(format!("Amplitude {amp} must be in range (0, 1]"));
         }
         (SignalType::Mls, SignalParams::Mls { order, amp }) => {
             if !(2..=24).contains(order) {
-                return Err(format!("MLS order {} must be in range [2, 24]", order));
+                return Err(format!("MLS order {order} must be in range [2, 24]"));
             }
             if *amp <= 0.0 || *amp > 1.0 {
-                return Err(format!("Amplitude {} must be in range (0, 1]", amp));
+                return Err(format!("Amplitude {amp} must be in range (0, 1]"));
             }
-        }
-        (SignalType::Dirac, SignalParams::Dirac { amp }) if (*amp <= 0.0 || *amp > 1.0) => {
-            return Err(format!("Amplitude {} must be in range (0, 1]", amp));
         }
         (SignalType::Stipa, SignalParams::Stipa) if sample_rate < STI_MIN_SAMPLE_RATE_HZ => {
             return Err(format!(

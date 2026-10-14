@@ -54,6 +54,7 @@ pub trait SweepPlayback {
 /// which can under-report hardware capability), falling back to the
 /// default config and finally to stereo. Shared by every backend so
 /// device-mode selection cannot drift between implementations.
+#[must_use]
 pub fn output_channel_count(device: &cpal::Device) -> usize {
     use cpal::traits::DeviceTrait;
 
@@ -65,8 +66,7 @@ pub fn output_channel_count(device: &cpal::Device) -> usize {
         .unwrap_or_else(|| {
             device
                 .default_output_config()
-                .map(|cfg| cfg.channels() as usize)
-                .unwrap_or(2)
+                .map_or(2, |cfg| cfg.channels() as usize)
         })
 }
 
@@ -112,12 +112,17 @@ impl std::fmt::Debug for CpalPlayback {
 
 impl CpalPlayback {
     /// Create an idle backend; playback starts with [`SweepPlayback::start`].
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
 /// Read a stimulus WAV as mono f32, taking the first channel.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Integer PCM is intentionally normalized to f32 audio samples."
+)]
 pub(crate) fn read_stimulus_mono(wav: &Path) -> Result<Vec<f32>, String> {
     let mut reader =
         hound::WavReader::open(wav).map_err(|e| format!("Failed to load file: {e}"))?;
@@ -157,6 +162,15 @@ pub(crate) fn read_stimulus_mono(wav: &Path) -> Result<Vec<f32>, String> {
 }
 
 impl SweepPlayback for CpalPlayback {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+    )]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "Clamped normalized samples are intentionally quantized to the selected 16-bit PCM output format."
+    )]
     fn start(
         &mut self,
         wav: &Path,
@@ -205,7 +219,8 @@ impl SweepPlayback for CpalPlayback {
         };
 
         let config = cpal::StreamConfig {
-            channels: hardware_channels as u16,
+            channels: u16::try_from(hardware_channels)
+                .map_err(|_| "hardware output channel count exceeds u16".to_string())?,
             sample_rate: device_rate,
             buffer_size: cpal::BufferSize::Default,
         };

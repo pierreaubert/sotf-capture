@@ -11,7 +11,7 @@ use super::consts::CANCELLED_ERR;
 use super::misc::actionable_capture_error;
 #[cfg(not(target_os = "ios"))]
 use super::misc::drain_capture;
-use math_audio_dsp::signals::*;
+use math_audio_dsp::signals::interleave_per_channel;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -176,6 +176,16 @@ pub(super) struct MeasurementInputConfig {
 /// captures remain distinguishable in noisy system logs.
 #[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "Nonnegative durations and rate ratios map to whole audio frames; sample counts supply floating-point timing diagnostics."
+)]
 pub(super) fn play_per_channel_and_record_mono(
     channel_indices: &[u16],
     sample_rate: u32,
@@ -246,14 +256,14 @@ pub(super) fn play_per_channel_and_record_mono(
     let max_target_channel = channel_indices.iter().map(|&c| c as usize).max().unwrap();
     if max_target_channel >= device_max_channels {
         return Err(format!(
-            "[{log_tag}] Channel {} exceeds hardware output count {}",
-            max_target_channel, device_max_channels
+            "[{log_tag}] Channel {max_target_channel} exceeds hardware output count {device_max_channels}"
         ));
     }
     let hardware_channels = max_target_channel + 1;
     let output_config = choose_measurement_output_config(
         &supported_output_configs,
-        hardware_channels as u16,
+        u16::try_from(hardware_channels)
+            .map_err(|_| "hardware output channel count exceeds u16".to_string())?,
         sample_rate,
     )?;
     let playback_channels = output_config.channels as usize;
@@ -271,12 +281,7 @@ pub(super) fn play_per_channel_and_record_mono(
         for (j, &s) in signal.iter().enumerate() {
             per_channel[ch_idx as usize][frame_offset + j] = s;
         }
-        log::debug!(
-            "[{log_tag}] Channel {} at frame {}, output ch {}",
-            i,
-            frame_offset,
-            ch_idx
-        );
+        log::debug!("[{log_tag}] Channel {i} at frame {frame_offset}, output ch {ch_idx}");
     }
 
     let playback = Arc::new(interleave_per_channel(&per_channel));
@@ -286,7 +291,7 @@ pub(super) fn play_per_channel_and_record_mono(
         playback_channels,
         hardware_channels,
         total_frames,
-        total_frames as f64 / sample_rate as f64
+        total_frames as f64 / f64::from(sample_rate)
     );
 
     // --- Input device + stream setup ---
@@ -312,27 +317,31 @@ pub(super) fn play_per_channel_and_record_mono(
     }
 
     let min_input_ch =
-        (input_channel as usize).max(loopback_input_channel.map(|c| c as usize).unwrap_or(0)) + 1;
+        (input_channel as usize).max(loopback_input_channel.map_or(0, |c| c as usize)) + 1;
     let default_input_config = input_device.default_input_config().map_err(|e| {
         actionable_capture_error(
             &format!("[{log_tag}] Failed to get default input config"),
             &e,
         )
     })?;
-    let supported_input_configs: Vec<_> = input_device
-        .supported_input_configs()
-        .map(|configs| configs.collect())
-        .unwrap_or_else(|e| {
+    let supported_input_configs: Vec<_> = input_device.supported_input_configs().map_or_else(
+        |e| {
             log::warn!("[{log_tag}] Failed to enumerate supported input configs: {e}");
             Vec::new()
-        });
-    let input_config =
-        choose_measurement_input_config(&supported_input_configs, min_input_ch as u16, sample_rate)
-            .unwrap_or_else(|| MeasurementInputConfig {
-                channels: default_input_config.channels(),
-                sample_rate: default_input_config.sample_rate(),
-                sample_format: default_input_config.sample_format(),
-            });
+        },
+        std::iter::Iterator::collect,
+    );
+    let input_config = choose_measurement_input_config(
+        &supported_input_configs,
+        u16::try_from(min_input_ch)
+            .map_err(|_| "requested input channel count exceeds u16".to_string())?,
+        sample_rate,
+    )
+    .unwrap_or_else(|| MeasurementInputConfig {
+        channels: default_input_config.channels(),
+        sample_rate: default_input_config.sample_rate(),
+        sample_format: default_input_config.sample_format(),
+    });
     if (input_config.channels as usize) < min_input_ch {
         return Err(format!(
             "[{log_tag}] Input channel {} exceeds capture input count {}",
@@ -348,21 +357,21 @@ pub(super) fn play_per_channel_and_record_mono(
     // asked for) does not leak into per-channel segment slicing.
     let analysis_silence_samples = (silence_duration_ms / 1000.0 * input_sr as f32) as usize;
     let analysis_signal_samples =
-        ((signal_samples as f64 * input_sr as f64) / sample_rate as f64).round() as usize;
+        ((signal_samples as f64 * f64::from(input_sr)) / f64::from(sample_rate)).round() as usize;
     let analysis_segment_len = analysis_silence_samples + analysis_signal_samples;
     let analysis_offsets: Vec<usize> = (0..num_channels)
         .map(|i| analysis_silence_samples + i * analysis_segment_len)
         .collect();
 
     let input_stream_config = cpal::StreamConfig {
-        channels: hw_input_ch as u16,
+        channels: input_config.channels,
         sample_rate: input_sr,
         buffer_size: cpal::BufferSize::Default,
     };
     // Mic + optional loopback are pushed into one SPSC ring as a pair, so
     // they stay exactly in lock-step without locking inside the input callback.
-    let expected_input_samples = ((total_frames as f64 * input_sr as f64 / sample_rate as f64)
-        as usize)
+    let expected_input_samples = ((total_frames as f64 * f64::from(input_sr)
+        / f64::from(sample_rate)) as usize)
         + (input_sr as usize / 2);
     let (capture_producer, mut capture_consumer) =
         rtrb::RingBuffer::<(f32, f32)>::new(expected_input_samples.max(1024));
@@ -399,7 +408,7 @@ pub(super) fn play_per_channel_and_record_mono(
     }
     let output_stream = build_measurement_output_stream(
         &output_device,
-        &output_config,
+        output_config,
         playback.clone(),
         playback_cursor.clone(),
         log_tag,
@@ -411,7 +420,7 @@ pub(super) fn play_per_channel_and_record_mono(
     // Wait for playback to finish — same stability-loop pattern both
     // original functions used. Honors `cancel` between polls so a UI
     // stop button propagates with at most ~50 ms of latency.
-    let expected_duration = total_frames as f64 / sample_rate as f64;
+    let expected_duration = total_frames as f64 / f64::from(sample_rate);
     let total_wait = Duration::from_secs_f64(expected_duration + 3.0);
     let check_interval = Duration::from_millis(50);
     let mut elapsed = Duration::ZERO;
@@ -473,22 +482,20 @@ pub(super) fn play_per_channel_and_record_mono(
     let dropped_samples = capture_overruns.load(AtomicOrdering::Relaxed);
     if dropped_samples > 0 {
         log::warn!(
-            "[{log_tag}] Dropped {} input frames because the capture ring buffer filled",
-            dropped_samples
+            "[{log_tag}] Dropped {dropped_samples} input frames because the capture ring buffer filled"
         );
     }
     log::info!(
         "[{log_tag}] Recorded {} samples ({:.2}s) at {} Hz",
         recorded.len(),
-        recorded.len() as f64 / input_sr as f64,
+        recorded.len() as f64 / f64::from(input_sr),
         input_sr
     );
 
     let rec_peak = recorded.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
     if rec_peak < 1e-4 {
         return Err(format!(
-            "[{log_tag}] Recording appears silent (peak {:.6}). Check mic, input channel, and output device availability.",
-            rec_peak
+            "[{log_tag}] Recording appears silent (peak {rec_peak:.6}). Check mic, input channel, and output device availability."
         ));
     }
 
@@ -528,6 +535,12 @@ pub(super) struct DirectArrivalPeak {
     pub(super) peak_value: f32,
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "Percentile and lookahead indices are clamped to the envelope; fractional peak positions use f64."
+)]
 pub(super) fn pick_direct_arrival_from_envelope(
     envelope: &[f32],
     sample_rate: u32,
@@ -574,9 +587,9 @@ pub(super) fn pick_direct_arrival_from_envelope(
         }
 
         if peak > 0 && peak + 1 < causal_len {
-            let y_prev = search[peak - 1] as f64;
-            let y_peak = search[peak] as f64;
-            let y_next = search[peak + 1] as f64;
+            let y_prev = f64::from(search[peak - 1]);
+            let y_peak = f64::from(search[peak]);
+            let y_next = f64::from(search[peak + 1]);
             let denom = 2.0 * (2.0 * y_peak - y_prev - y_next);
             let peak_sample_refined = if denom.abs() > 1e-12 {
                 peak as f64 + (y_prev - y_next) / denom
@@ -660,6 +673,9 @@ pub struct BassAnchorChannelResult {
 /// `tone_samples` slice the loopback for per-channel reference phase
 /// extraction; the reported `bass_anchor_phase_deg` becomes
 /// `phase_mic − phase_loopback`, wrapped to (−180°, 180°].
+///
+/// # Errors
+/// Returns an error for invalid channel mappings, incompatible loopback data, or failed phase analysis.
 #[allow(clippy::too_many_arguments)]
 pub fn analyze_bass_anchor_recording(
     recorded: &[f32],
@@ -786,7 +802,7 @@ pub struct SplCalibrationResult {
     /// (the stable window — excludes attack/release).
     pub peak_sample_level: f32,
     /// RMS sample value over the stable window. More noise-robust
-    /// than the peak and preferred when authoring SplCalibration.
+    /// than the peak and preferred when authoring `SplCalibration`.
     pub rms_sample_level: f32,
     /// Frequency of the tone that was played, echoed back for audit.
     pub reference_freq_hz: f32,
@@ -799,6 +815,10 @@ impl SplCalibrationResult {
     ///
     /// # Errors
     /// Rejects invalid rates/frequencies, silence, clipping and nonfinite or inconsistent levels.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Nyquist uses f32 to match the public calibration-frequency parameter."
+    )]
     pub fn validate(&self) -> Result<(), String> {
         if !(8_000..=384_000).contains(&self.sample_rate)
             || !self.reference_freq_hz.is_finite()

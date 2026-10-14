@@ -2,7 +2,7 @@ use super::spl_calibration_capture_status::SplCalibrationCaptureStatus;
 pub use crate::signal_recorder::SplCalibrationResult;
 pub use autoeq::roomeq::SplCalibration;
 
-/// Shared business state for the SplCalibration step.
+/// Shared business state for the `SplCalibration` step.
 ///
 /// Collected from the user across two stages:
 /// 1. Engine plays a reference tone and returns a `SplCalibrationResult`
@@ -72,6 +72,7 @@ impl SplCalibrationCaptureState {
     }
 
     /// Return whether a completion belongs to the current SPL task.
+    #[must_use]
     pub fn is_current_capture(&self, generation: u64) -> bool {
         self.capture_generation == generation
     }
@@ -92,12 +93,14 @@ impl SplCalibrationCaptureState {
     /// `true` once the engine has captured a tone AND the user has
     /// typed the dBSPL their meter read. Consumers gate the Save /
     /// Continue action on this.
+    #[must_use]
     pub fn is_ready(&self) -> bool {
         self.to_spl_calibration().is_some()
     }
 
     /// Derive the final `SplCalibration` once both the engine capture
     /// and the user-entered meter reading are present.
+    #[must_use]
     pub fn to_spl_calibration(&self) -> Option<SplCalibration> {
         if !matches!(self.status, SplCalibrationCaptureStatus::Complete) {
             return None;

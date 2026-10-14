@@ -9,6 +9,7 @@ pub struct CalibrationData {
 
 impl CalibrationData {
     /// Parse a calibration file from its contents
+    #[must_use]
     pub fn parse(content: &str) -> Option<Self> {
         let mut frequencies = Vec::new();
         let mut spl_db = Vec::new();
@@ -35,7 +36,7 @@ impl CalibrationData {
                 && let (Ok(freq), Ok(spl)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>())
             {
                 // Validate reasonable frequency range (1 Hz to 100 kHz)
-                if freq > 0.0 && freq <= 100000.0 && spl.is_finite() {
+                if freq > 0.0 && freq <= 100_000.0 && spl.is_finite() {
                     frequencies.push(freq);
                     spl_db.push(spl);
                 }
@@ -53,6 +54,7 @@ impl CalibrationData {
     }
 
     /// Check if calibration data is valid
+    #[must_use]
     pub fn is_valid(&self) -> bool {
         !self.frequencies.is_empty() && self.frequencies.len() == self.spl_db.len()
     }

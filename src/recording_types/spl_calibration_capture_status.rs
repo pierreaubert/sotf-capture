@@ -15,6 +15,11 @@ pub enum SplCalibrationCaptureStatus {
 }
 
 impl SplCalibrationCaptureStatus {
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Elapsed milliseconds are converted to f32 only for a clamped UI progress fraction."
+    )]
     pub fn progress(&self, estimated_total_ms: u64, now_ms: u64) -> Option<f32> {
         match self {
             Self::Running { started_at_ms } if estimated_total_ms > 0 => {

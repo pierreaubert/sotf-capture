@@ -59,6 +59,7 @@ impl ProbeCaptureState {
     }
 
     /// Return whether a completion belongs to the current probe task.
+    #[must_use]
     pub fn is_current_capture(&self, generation: u64) -> bool {
         self.capture_generation == generation
     }
@@ -76,6 +77,7 @@ impl ProbeCaptureState {
     /// `run_room_optimization_with_probe_arrivals` at Room EQ time.
     /// Returns `None` unless the status is `Complete` — a failed or
     /// in-flight probe must never contaminate the optimizer input.
+    #[must_use]
     pub fn probe_arrival_map(&self) -> Option<std::collections::HashMap<String, f64>> {
         if !matches!(self.status, ProbeCaptureStatus::Complete) {
             return None;

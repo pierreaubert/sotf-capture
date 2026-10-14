@@ -15,6 +15,7 @@ pub enum SignalType {
 }
 
 impl SignalType {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Tone => "tone",
@@ -47,7 +48,7 @@ impl FromStr for SignalType {
             | "maximumlengthsequence" => Ok(Self::Mls),
             "dirac" | "impulse" => Ok(Self::Dirac),
             "stipa" | "sti-pa" => Ok(Self::Stipa),
-            _ => Err(format!("Unknown signal type: {}", s)),
+            _ => Err(format!("Unknown signal type: {s}")),
         }
     }
 }

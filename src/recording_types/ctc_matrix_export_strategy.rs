@@ -13,6 +13,7 @@ pub enum CtcMatrixExportStrategy {
 }
 
 impl CtcMatrixExportStrategy {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             CtcMatrixExportStrategy::ImpulseResponse => "Impulse Response",
@@ -20,6 +21,7 @@ impl CtcMatrixExportStrategy {
         }
     }
 
+    #[must_use]
     pub fn all() -> &'static [CtcMatrixExportStrategy] {
         &[
             CtcMatrixExportStrategy::ImpulseResponse,

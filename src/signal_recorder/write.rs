@@ -1,4 +1,5 @@
 use hound::{SampleFormat, WavSpec, WavWriter};
+use std::fmt::Write as _;
 #[cfg(not(target_os = "ios"))]
 use std::io::Write as _;
 use std::path::Path;
@@ -65,9 +66,7 @@ where
     for (frame_idx, slot) in first.iter_mut().chain(second.iter_mut()).enumerate() {
         let base = frame_idx * channels;
         let mic_sample = f32::from_sample(data[base + input_idx]);
-        let loopback_sample = loopback_idx
-            .map(|idx| f32::from_sample(data[base + idx]))
-            .unwrap_or(0.0);
+        let loopback_sample = loopback_idx.map_or(0.0, |idx| f32::from_sample(data[base + idx]));
         slot.write((mic_sample, loopback_sample));
     }
     unsafe { chunk.commit(writable) };
@@ -75,13 +74,16 @@ where
 }
 
 /// Write signal to a temporary WAV file
+///
+/// # Errors
+/// Returns an error if the temporary file cannot be created or its WAV data cannot be written.
 pub fn write_temp_wav(
     signal: &[f32],
     sample_rate: u32,
     channels: u16,
 ) -> Result<NamedTempFile, String> {
     let temp_file = NamedTempFile::with_suffix(".wav")
-        .map_err(|e| format!("Failed to create temp file: {}", e))?;
+        .map_err(|e| format!("Failed to create temp file: {e}"))?;
 
     write_wav_file(temp_file.path(), signal, sample_rate, channels)?;
 
@@ -89,6 +91,9 @@ pub fn write_temp_wav(
 }
 
 /// Write signal to a WAV file
+///
+/// # Errors
+/// Returns an error if the WAV file cannot be created, written, or finalized.
 pub fn write_wav_file(
     path: &Path,
     signal: &[f32],
@@ -103,17 +108,17 @@ pub fn write_wav_file(
     };
 
     let mut writer =
-        WavWriter::create(path, spec).map_err(|e| format!("Failed to create WAV writer: {}", e))?;
+        WavWriter::create(path, spec).map_err(|e| format!("Failed to create WAV writer: {e}"))?;
 
     for &sample in signal {
         writer
             .write_sample(sample)
-            .map_err(|e| format!("Failed to write sample: {}", e))?;
+            .map_err(|e| format!("Failed to write sample: {e}"))?;
     }
 
     writer
         .finalize()
-        .map_err(|e| format!("Failed to finalize WAV file: {}", e))?;
+        .map_err(|e| format!("Failed to finalize WAV file: {e}"))?;
 
     Ok(())
 }
@@ -126,6 +131,7 @@ pub fn write_wav_file(
 /// bracket spanning a DC (0 Hz) source bin has no log coordinate and falls
 /// back to the upper sample. Empty sources yield zeros.
 #[cfg(not(target_os = "ios"))]
+#[must_use]
 pub fn interpolate_log_frequency_grid(
     source_freqs_hz: &[f32],
     source_values: &[f32],
@@ -177,6 +183,9 @@ pub fn interpolate_log_frequency_grid(
 /// data). A `None` column is omitted from header and rows entirely rather
 /// than fabricated — an all-ones coherence column would be a lie (B1-class)
 /// and autoeq's gate degrades honestly when the column is missing.
+///
+/// # Errors
+/// Returns an error if the destination cannot be created or the CSV cannot be written or flushed.
 #[cfg(not(target_os = "ios"))]
 pub fn write_analysis_csv_extended(
     result: &math_audio_dsp::analysis::AnalysisResult,
@@ -231,8 +240,7 @@ pub fn write_analysis_csv_extended(
         let thd = result
             .thd_percent
             .get(i)
-            .map(|value| format!("{value:.6}"))
-            .unwrap_or_else(|| "NaN".to_string());
+            .map_or_else(|| "NaN".to_string(), |value| format!("{value:.6}"));
         let rt60 = result.rt60_ms.get(i).copied().unwrap_or(0.0);
         let c50 = result.clarity_c50_db.get(i).copied().unwrap_or(0.0);
         let c80 = result.clarity_c80_db.get(i).copied().unwrap_or(0.0);
@@ -241,10 +249,10 @@ pub fn write_analysis_csv_extended(
         let mut row =
             format!("{freq:.6},{spl:.3},{phase:.6},{thd},{rt60:.3},{c50:.3},{c80:.3},{gd:.6}");
         if let Some(values) = coherence {
-            row.push_str(&format!(",{:.4}", values[i]));
+            let _ = write!(row, ",{:.4}", values[i]);
         }
         if let Some(values) = noise_floor_db {
-            row.push_str(&format!(",{:.3}", values[i]));
+            let _ = write!(row, ",{:.3}", values[i]);
         }
         writeln!(file, "{row}").map_err(|e| format!("Failed to write data: {e}"))?;
     }

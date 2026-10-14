@@ -7,7 +7,7 @@
 //! the multi-capture session pipeline ([`capture_session`]), the
 //! UI-agnostic wizard model ([`wizard`]), low-level signal generation and
 //! recording ([`signal_recorder`]), and audio device lookup ([`devices`]).
-//! RoomEQ optimization and reporting stay in `autoeq`; the DAW engine stays
+//! `RoomEQ` optimization and reporting stay in `autoeq`; the DAW engine stays
 //! in `sotf-daw`. Both depend on this crate instead of duplicating capture.
 
 // Rust guideline compliant 2026-02-21

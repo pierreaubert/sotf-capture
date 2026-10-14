@@ -1,3 +1,9 @@
+#![expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "Synthetic fixtures use bounded sample counts and intentionally quantized audio; exact comparisons verify unchanged settings and samples."
+)]
+
 use super::*;
 
 fn plan() -> CaptureSessionPlan {
@@ -23,6 +29,10 @@ fn two_and_four_microphone_plans_round_trip() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "This end-to-end fixture keeps setup, execution, and artifact assertions together."
+)]
 fn invalid_plans_fail_before_hardware_access() {
     let cases: &[fn(&mut CaptureSessionPlan)] = &[
         |p| p.version = 2,
@@ -54,35 +64,35 @@ fn invalid_plans_fail_before_hardware_access() {
                 length: 0.0,
                 width: 4.0,
                 height: 2.5,
-            })
+            });
         },
         |p| {
             p.room_dimensions = Some(RoomDimensions {
                 length: 5.0,
                 width: -4.0,
                 height: 2.5,
-            })
+            });
         },
         |p| {
             p.room_dimensions = Some(RoomDimensions {
                 length: 5.0,
                 width: 4.0,
                 height: f64::NAN,
-            })
+            });
         },
         |p| {
             p.room_dimensions = Some(RoomDimensions {
                 length: f64::INFINITY,
                 width: 4.0,
                 height: 2.5,
-            })
+            });
         },
         |p| {
             p.room_dimensions = Some(RoomDimensions {
                 length: 1e200,
                 width: 1e200,
                 height: 1e200,
-            })
+            });
         },
         |p| p.setup_description = Some(String::new()),
         |p| p.setup_description = Some("   ".into()),
@@ -91,21 +101,21 @@ fn invalid_plans_fail_before_hardware_access() {
                 probe_duration_ms: 0.0,
                 silence_duration_ms: 500.0,
                 signal_level_db: -6.0,
-            })
+            });
         },
         |p| {
             p.probe = Some(CaptureProbe {
                 probe_duration_ms: 1000.0,
                 silence_duration_ms: -1.0,
                 signal_level_db: -6.0,
-            })
+            });
         },
         |p| {
             p.probe = Some(CaptureProbe {
                 probe_duration_ms: 1000.0,
                 silence_duration_ms: 500.0,
                 signal_level_db: 1.0,
-            })
+            });
         },
         |p| {
             p.bass_anchor = Some(CaptureBassAnchor {
@@ -115,7 +125,7 @@ fn invalid_plans_fail_before_hardware_access() {
                 num_windows: 8,
                 silence_duration_ms: 500.0,
                 signal_level_db: -6.0,
-            })
+            });
         },
         |p| {
             p.bass_anchor = Some(CaptureBassAnchor {
@@ -125,7 +135,7 @@ fn invalid_plans_fail_before_hardware_access() {
                 num_windows: 8,
                 silence_duration_ms: 500.0,
                 signal_level_db: -6.0,
-            })
+            });
         },
         |p| {
             p.bass_anchor = Some(CaptureBassAnchor {
@@ -135,13 +145,13 @@ fn invalid_plans_fail_before_hardware_access() {
                 num_windows: 0,
                 silence_duration_ms: 500.0,
                 signal_level_db: -6.0,
-            })
+            });
         },
         |p| {
             p.loopback = Some(CaptureLoopback {
                 device: p.microphones[0].device.clone(),
                 input_channel: p.microphones[0].input_channel,
-            })
+            });
         },
         |p| {
             p.bass_anchor = Some(CaptureBassAnchor {
@@ -155,7 +165,7 @@ fn invalid_plans_fail_before_hardware_access() {
             p.loopback = Some(CaptureLoopback {
                 device: "other-device".into(),
                 input_channel: 3,
-            })
+            });
         },
         |p| p.sweep.bass_octave_duration_s = Some(0.5),
         |p| p.sweep.bass_octave_duration_s = Some(11.0),
@@ -175,7 +185,7 @@ fn invalid_plans_fail_before_hardware_access() {
                     z: 0.0,
                     yaw_deg: 0.0,
                 },
-            })
+            });
         },
         |p| {
             p.loopback = Some(CaptureLoopback {
@@ -192,7 +202,7 @@ fn invalid_plans_fail_before_hardware_access() {
                     z: 0.0,
                     yaw_deg: 0.0,
                 },
-            })
+            });
         },
         |p| {
             p.ctc = Some(CaptureCtc {
@@ -205,7 +215,7 @@ fn invalid_plans_fail_before_hardware_access() {
                     z: 0.0,
                     yaw_deg: 0.0,
                 },
-            })
+            });
         },
         |p| {
             p.loopback = Some(CaptureLoopback {
@@ -222,7 +232,7 @@ fn invalid_plans_fail_before_hardware_access() {
                     z: f64::NAN,
                     yaw_deg: 0.0,
                 },
-            })
+            });
         },
     ];
     for (index, change) in cases.iter().enumerate() {
@@ -318,7 +328,7 @@ fn auxiliary_sections_round_trip_when_valid() {
 #[test]
 fn storage_budget_prices_bass_weighted_sweeps() {
     let mut heavy = plan();
-    heavy.sample_rate_hz = 192000;
+    heavy.sample_rate_hz = 192_000;
     heavy.sweep.duration_secs = 30.0;
     heavy.sweep.start_hz = 1.0;
     heavy.sweep.bass_octave_duration_s = Some(10.0);
@@ -326,7 +336,7 @@ fn storage_budget_prices_bass_weighted_sweeps() {
     assert!(error.contains("bounded capture storage"), "{error}");
 
     let mut plain = plan();
-    plain.sample_rate_hz = 192000;
+    plain.sample_rate_hz = 192_000;
     plain.sweep.duration_secs = 30.0;
     plain.validate().unwrap();
 

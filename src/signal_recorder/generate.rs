@@ -3,7 +3,10 @@ use super::misc::prepare_signal;
 use super::signal_params::validate_signal_params;
 use super::signal_type::SignalType;
 use super::types::SignalParams;
-use math_audio_dsp::signals::*;
+use math_audio_dsp::signals::{
+    gen_dirac, gen_log_sweep, gen_m_noise, gen_mls, gen_pink_noise, gen_stipa_signal, gen_tone,
+    gen_two_tone, gen_white_noise,
+};
 use std::path::PathBuf;
 
 /// One-stop measurement stimulus preparation: validate the parameters,
@@ -20,6 +23,9 @@ use std::path::PathBuf;
 /// must still be positive for validation. The octave sweep already
 /// carries its own silence windows; the extra padding simply extends
 /// them and the fades land on silence.
+///
+/// # Errors
+/// Returns an error for invalid parameters, unsupported signal types, or signal generation failures.
 pub fn prepare_measurement_signal(
     signal_type: SignalType,
     params: &SignalParams,
@@ -32,6 +38,9 @@ pub fn prepare_measurement_signal(
 }
 
 /// Generate a signal based on parameters
+///
+/// # Errors
+/// Returns an error for invalid parameters, unsupported signal types, or signal generation failures.
 pub fn generate_signal(
     signal_type: SignalType,
     params: &SignalParams,
@@ -100,8 +109,7 @@ pub fn generate_signal(
         }
         _ => {
             return Err(format!(
-                "Signal type {:?} does not match parameters {:?}",
-                signal_type, params
+                "Signal type {signal_type:?} does not match parameters {params:?}"
             ));
         }
     };
@@ -110,6 +118,7 @@ pub fn generate_signal(
 }
 
 /// Generate output filenames for a recording with both send and record channels
+#[must_use]
 pub fn generate_output_filenames_stereo(
     name_prefix: Option<&str>,
     signal_type: SignalType,
@@ -136,13 +145,14 @@ pub fn generate_output_filenames_stereo(
         )
     };
 
-    let wav_path = PathBuf::from(format!("{}.wav", base_name));
-    let csv_path = PathBuf::from(format!("{}.csv", base_name));
+    let wav_path = PathBuf::from(format!("{base_name}.wav"));
+    let csv_path = PathBuf::from(format!("{base_name}.csv"));
 
     (wav_path, csv_path)
 }
 
 /// Generate output filenames for a recording
+#[must_use]
 pub fn generate_output_filenames(
     name_prefix: Option<&str>,
     signal_type: SignalType,
@@ -161,8 +171,8 @@ pub fn generate_output_filenames(
         format!("{}_ch{}_{}", signal_type.as_str(), channel, sample_rate)
     };
 
-    let wav_path = PathBuf::from(format!("{}.wav", base_name));
-    let csv_path = PathBuf::from(format!("{}.csv", base_name));
+    let wav_path = PathBuf::from(format!("{base_name}.wav"));
+    let csv_path = PathBuf::from(format!("{base_name}.csv"));
 
     (wav_path, csv_path)
 }

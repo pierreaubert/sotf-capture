@@ -251,7 +251,7 @@ enum Command {
         /// Path to the immutable capture-raw.json journal.
         #[arg(long)]
         raw: PathBuf,
-        /// New output directory for processed evidence and optional RoomEQ projection.
+        /// New output directory for processed evidence and optional `RoomEQ` projection.
         #[arg(long)]
         output: PathBuf,
         /// Explicit take ID to project; repeat once per source/microphone pair.
@@ -320,6 +320,14 @@ fn list_audio_devices(json: bool) -> Result<(), String> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "The CLI dispatch keeps each command and its explicit flag mapping together."
+)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "CLI dispatch transfers ownership of parsed flags to the command handler."
+)]
 fn record_signal(
     playback: &mut impl sotf_capture::signal_recorder::SweepPlayback,
     recorder: &mut impl sotf_capture::signal_recorder::SweepRecorder,
@@ -574,9 +582,9 @@ fn resolve_aux_channels(
 }
 
 fn check_device_selectors(
-    device: &Option<String>,
-    input_device: &Option<String>,
-    output_device: &Option<String>,
+    device: Option<&str>,
+    input_device: Option<&str>,
+    output_device: Option<&str>,
 ) -> Result<(), String> {
     for selector in [device, input_device, output_device].into_iter().flatten() {
         if selector.trim().is_empty() {
@@ -601,6 +609,10 @@ fn aux_output_dir(output_dir: Option<PathBuf>) -> Result<PathBuf, String> {
     clippy::too_many_arguments,
     reason = "Clap hands each flag through once; a parameter object would only rename the plumbing"
 )]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "CLI dispatch transfers ownership of parsed flags to the command handler."
+)]
 fn run_probe(
     hwaudio_send_to: String,
     channel_names: Option<String>,
@@ -619,7 +631,11 @@ fn run_probe(
     use sotf_capture::signal_recorder::probe_channel_delays_with_recording;
 
     let output_dir = aux_output_dir(output_dir)?;
-    check_device_selectors(&device, &input_device, &output_device)?;
+    check_device_selectors(
+        device.as_deref(),
+        input_device.as_deref(),
+        output_device.as_deref(),
+    )?;
     let (send, names, record) = resolve_aux_channels(
         &hwaudio_send_to,
         &hwaudio_record_from,
@@ -676,6 +692,10 @@ fn run_probe(
     clippy::too_many_arguments,
     reason = "Clap hands each flag through once; a parameter object would only rename the plumbing"
 )]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "CLI dispatch transfers ownership of parsed flags to the command handler."
+)]
 fn run_bass_anchor(
     hwaudio_send_to: String,
     channel_names: Option<String>,
@@ -698,7 +718,11 @@ fn run_bass_anchor(
     use sotf_capture::signal_recorder::run_bass_anchor_with_recording;
 
     let output_dir = aux_output_dir(output_dir)?;
-    check_device_selectors(&device, &input_device, &output_device)?;
+    check_device_selectors(
+        device.as_deref(),
+        input_device.as_deref(),
+        output_device.as_deref(),
+    )?;
     let (send, names, record) = resolve_aux_channels(
         &hwaudio_send_to,
         &hwaudio_record_from,
@@ -928,6 +952,10 @@ fn parse_mic_calibrations(values: &[String]) -> Result<HashMap<usize, String>, S
     Ok(map)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "The CLI dispatch keeps each command and its explicit flag mapping together."
+)]
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.command {
@@ -964,7 +992,7 @@ fn run() -> Result<(), String> {
                 )
                 .map_err(|error| error.to_string())?;
                 writeln!(output)
-                    .and_then(|_| output.flush())
+                    .and_then(|()| output.flush())
                     .map_err(|error| error.to_string())
             })?;
             serde_json::to_writer(
@@ -1123,11 +1151,19 @@ fn main() {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Synthetic fixtures use bounded sample counts and intentionally quantized audio; exact comparisons verify unchanged settings and samples."
+)]
 mod tests {
     use super::*;
 
     #[cfg(feature = "test-util")]
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "This end-to-end fixture keeps setup, execution, and artifact assertions together."
+    )]
     fn capture_cli_records_every_microphone_for_each_output() {
         use sotf_capture::signal_recorder::{
             FakeAudioConfig, FakeRecorder, NegotiatedInput, RecordedTake, SweepRecorder,

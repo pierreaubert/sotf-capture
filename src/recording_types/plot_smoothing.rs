@@ -15,6 +15,7 @@ pub enum PlotSmoothing {
 }
 
 impl PlotSmoothing {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             PlotSmoothing::None => "None",
@@ -26,6 +27,7 @@ impl PlotSmoothing {
     }
 
     /// Get the smoothing factor (fraction of octave)
+    #[must_use]
     pub fn octave_fraction(&self) -> Option<f32> {
         match self {
             PlotSmoothing::None => None,
@@ -36,6 +38,7 @@ impl PlotSmoothing {
         }
     }
 
+    #[must_use]
     pub fn all() -> &'static [PlotSmoothing] {
         &[
             PlotSmoothing::None,

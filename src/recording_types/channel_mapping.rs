@@ -27,16 +27,19 @@ impl ChannelMapping {
     }
 
     /// Check if this speaker is in multi-channel mode
+    #[must_use]
     pub fn is_multi(&self) -> bool {
         self.interface_channels.len() > 1
     }
 
     /// Get the primary interface channel (first channel in the list)
+    #[must_use]
     pub fn interface_channel(&self) -> usize {
         self.interface_channels.first().copied().unwrap_or(0)
     }
 
     /// Get the number of channels for this speaker
+    #[must_use]
     pub fn channel_count(&self) -> usize {
         self.interface_channels.len()
     }

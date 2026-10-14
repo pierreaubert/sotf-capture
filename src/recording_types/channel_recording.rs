@@ -7,13 +7,13 @@ use serde::{Deserialize, Serialize};
 /// Recording for a single channel with results
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelRecording {
-    /// Speaker/output channel index (into playback_config.channel_mappings)
+    /// Speaker/output channel index (into `playback_config.channel_mappings`)
     pub channel_index: usize,
     pub channel_name: String,
     /// Stable source address for imported takes without capture indices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported_source: Option<super::RecordingSourceIdentity>,
-    /// Microphone input index (into recording_config.channel_mappings)
+    /// Microphone input index (into `recording_config.channel_mappings`)
     #[serde(default)]
     pub mic_index: usize,
     /// Measurement-position index (which seat the mics were at). 0 for the
@@ -34,16 +34,19 @@ pub struct ChannelRecording {
 impl ChannelRecording {
     /// Create a new channel recording with default freq range based on channel name.
     /// LFE/Sub channels default to 10-500 Hz; all others to 20-20000 Hz.
+    #[must_use]
     pub fn new(channel_index: usize, channel_name: String) -> Self {
         Self::with_mic(channel_index, channel_name, 0)
     }
 
     /// Create a new channel recording for a specific mic index.
+    #[must_use]
     pub fn with_mic(channel_index: usize, channel_name: String, mic_index: usize) -> Self {
         Self::with_mic_position(channel_index, channel_name, mic_index, 0)
     }
 
     /// Create a new channel recording for a specific (mic, position) pair.
+    #[must_use]
     pub fn with_mic_position(
         channel_index: usize,
         channel_name: String,

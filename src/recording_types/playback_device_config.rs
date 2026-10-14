@@ -21,7 +21,7 @@ impl Default for PlaybackDeviceConfig {
             device_name: String::new(),
             num_channels: 2,
             sample_rate: 48000,
-            available_sample_rates: vec![44100, 48000, 88200, 96000, 176400, 192000],
+            available_sample_rates: vec![44100, 48000, 88200, 96000, 176_400, 192_000],
             speaker_configuration: SpeakerConfiguration::Stereo,
             channel_mappings: vec![
                 ChannelMapping::single(0, "L"),
@@ -33,14 +33,15 @@ impl Default for PlaybackDeviceConfig {
 
 impl PlaybackDeviceConfig {
     /// Calculate total number of interface channels from all speaker mappings
+    #[must_use]
     pub fn total_interface_channels(&self) -> usize {
         self.channel_mappings
             .iter()
-            .map(|m| m.channel_count())
+            .map(super::channel_mapping::ChannelMapping::channel_count)
             .sum()
     }
 
-    /// Update num_channels to match total interface channels
+    /// Update `num_channels` to match total interface channels
     pub fn sync_channel_count(&mut self) {
         self.num_channels = self.total_interface_channels();
     }

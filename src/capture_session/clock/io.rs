@@ -9,6 +9,7 @@ use crate::capture_session::{CaptureSessionPlan, protocol::CaptureStimulusLayout
 use crate::recording_helpers::save_recording_session_json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::io::Read;
 use std::path::{Component, Path};
 
@@ -74,7 +75,7 @@ pub struct ClockProcessedManifest {
     /// Assembled CTC files for handoff inventory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ctc_files: Vec<String>,
-    /// Canonical RoomEQ manifest, present only when every magnitude take is available.
+    /// Canonical `RoomEQ` manifest, present only when every magnitude take is available.
     #[serde(default)]
     pub recording_manifest: Option<String>,
     /// Per-source arrival candidates and conditional compact-array directions.
@@ -145,6 +146,7 @@ fn read_wave(path: &Path, rate: u32, frames: usize) -> Result<Vec<f32>, String> 
 /// Names the chirp output route and whether all takes share one reference
 /// identity. Mixed or missing identities forbid coherent use; the summary
 /// says so instead of naming a representative take.
+#[must_use]
 pub fn timing_reference_summary(report: &ClockProcessedManifest) -> String {
     let route = report
         .timing_reference_output_channel
@@ -193,6 +195,7 @@ const CLOCK_SKEW_SEVERE_PPM: f64 = 100.0;
 const CLOCK_SKEW_SPREAD_PPM: f64 = 100.0;
 
 /// One clock-fit line per processed take, in take order.
+#[must_use]
 pub fn clock_skew_lines(report: &ClockProcessedManifest) -> Vec<String> {
     report
         .takes
@@ -215,7 +218,7 @@ pub fn clock_skew_lines(report: &ClockProcessedManifest) -> Vec<String> {
                 take.raw.take_id, take.raw.microphone_id, take.clock.correction_applied,
             );
             if let Some(reason) = take.clock.magnitude_only_reason.as_deref() {
-                line.push_str(&format!("; magnitude-only: {reason}"));
+                let _ = write!(line, "; magnitude-only: {reason}");
             }
             line
         })
@@ -224,6 +227,7 @@ pub fn clock_skew_lines(report: &ClockProcessedManifest) -> Vec<String> {
 
 /// Run-level clock warnings: severe per-take skew, take-to-take wander,
 /// and magnitude-only takes. Empty when every take corrected quietly.
+#[must_use]
 pub fn clock_skew_warnings(report: &ClockProcessedManifest) -> Vec<String> {
     let mut warnings = Vec::new();
     let mut skews: Vec<f64> = Vec::new();
@@ -274,7 +278,7 @@ pub fn process_capture_session(
 /// Offline projection controls for processed capture bundles.
 ///
 /// Single-plan discipline: subs and mains for joint optimization must
-/// come from one plan/process run. RoomEQ GD-Opt requires exact
+/// come from one plan/process run. `RoomEQ` GD-Opt requires exact
 /// response-grid equality across channels and skips otherwise; process
 /// time records a `joint_optimization` warning when the analyzed takes
 /// in this run diverge.
@@ -294,6 +298,9 @@ pub struct ProcessOptions {
 /// parent. Repeated or partial parents still receive diagnostic processing,
 /// but cannot produce an import-ready configuration without an explicit matrix.
 /// No audio devices are opened and no repeated responses are averaged.
+///
+/// # Errors
+/// Returns an error if the raw session or selection is invalid, or processing or output I/O fails.
 pub fn process_capture_session_with_selection(
     raw_directory: &Path,
     output_directory: &Path,
@@ -314,6 +321,13 @@ pub fn process_capture_session_with_selection(
 /// Behaves like [`process_capture_session_with_selection`] and additionally
 /// resolves which microphone backs the measured-IR declarations. An unknown
 /// microphone ID is refused before any artifact is written.
+///
+/// # Errors
+/// Returns an error if session validation, take selection, artifact processing, or output I/O fails.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
 pub fn process_capture_session_with_options(
     raw_directory: &Path,
     output_directory: &Path,
@@ -678,6 +692,10 @@ pub(super) fn response_grid_csv(path: &Path) -> Option<Vec<f64>> {
 /// Compares every grid against the first exactly, bin for bin: joint
 /// GD-Opt optimization requires identical grids and skips otherwise.
 /// Returns `None` for fewer than two grids or a fully matching set.
+#[expect(
+    clippy::float_cmp,
+    reason = "Frequency-grid metadata must match exactly; an approximate match would hide a different analysis grid."
+)]
 pub(super) fn first_grid_mismatch(grids: &[(&str, Vec<f64>)]) -> Option<String> {
     let (first_id, first_grid) = grids.first()?;
     for (take_id, grid) in &grids[1..] {
@@ -707,7 +725,7 @@ pub(super) fn first_grid_mismatch(grids: &[(&str, Vec<f64>)]) -> Option<String> 
 /// Collects the phase-response grids of every analyzed take and
 /// requires exact equality: subs and mains for joint optimization
 /// must come from one plan/process run with identical grids, and
-/// RoomEQ GD-Opt skips joint optimization otherwise. Takes without a
+/// `RoomEQ` GD-Opt skips joint optimization otherwise. Takes without a
 /// readable phase response are skipped, since their own analysis
 /// issues already cover them; fewer than two comparable takes needs
 /// no warning.

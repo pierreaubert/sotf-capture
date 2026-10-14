@@ -18,8 +18,7 @@ pub(super) fn find_real_output_device(host: &cpal::Host) -> Option<Device> {
     }
 
     log::warn!(
-        "[AUDIO] Default output device is '{}' (null sink), searching for a real device",
-        name
+        "[AUDIO] Default output device is '{name}' (null sink), searching for a real device"
     );
 
     // Find the first real hardware device
@@ -30,7 +29,7 @@ pub(super) fn find_real_output_device(host: &cpal::Host) -> Option<Device> {
             .map(|d| d.name().to_string())
             .unwrap_or_default();
         if !is_null_device(&dev_name) && !dev_name.is_empty() {
-            log::info!("[AUDIO] Using fallback output device: '{}'", dev_name);
+            log::info!("[AUDIO] Using fallback output device: '{dev_name}'");
             return Some(dev);
         }
     }
@@ -40,6 +39,9 @@ pub(super) fn find_real_output_device(host: &cpal::Host) -> Option<Device> {
 }
 
 /// Find an audio device by name or ID with prioritization
+///
+/// # Errors
+/// Returns an error if device enumeration fails or no device matches the identifier.
 pub fn find_device(
     host: &cpal::Host,
     identifier: &str,
@@ -47,11 +49,11 @@ pub fn find_device(
 ) -> Result<cpal::Device, String> {
     let devices: Vec<cpal::Device> = if is_input {
         host.input_devices()
-            .map_err(|e| format!("Failed to enumerate input devices: {}", e))?
+            .map_err(|e| format!("Failed to enumerate input devices: {e}"))?
             .collect()
     } else {
         host.output_devices()
-            .map_err(|e| format!("Failed to enumerate output devices: {}", e))?
+            .map_err(|e| format!("Failed to enumerate output devices: {e}"))?
             .collect()
     };
 

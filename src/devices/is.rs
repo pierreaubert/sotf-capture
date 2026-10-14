@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 /// Check if a device identifier requests an ASIO device.
 /// Case-insensitive: "ASIO:", "asio:", "Asio:" all match.
+#[must_use]
 pub fn is_asio_device(identifier: &str) -> bool {
     identifier.len() >= ASIO_DEVICE_PREFIX.len()
         && identifier[..ASIO_DEVICE_PREFIX.len()].eq_ignore_ascii_case(ASIO_DEVICE_PREFIX)
@@ -22,6 +23,11 @@ pub fn is_asio_device(identifier: &str) -> bool {
 /// at each candidate rate and checks that the audio callback fires.
 ///
 /// Returns the first working sample rate, or None if none work.
+#[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Device enumeration and negotiation keep platform-specific fallbacks in one ordered routine."
+)]
 pub fn verify_working_sample_rate(
     device_identifier: Option<&str>,
     requested_rate: u32,
@@ -55,7 +61,7 @@ pub fn verify_working_sample_rate(
     let advertised_ranges = device
         .supported_output_configs()
         .ok()
-        .map(|configs| configs.collect::<Vec<_>>());
+        .map(std::iter::Iterator::collect::<Vec<_>>);
     let candidates = build_sample_rate_candidates(requested_rate, device_default);
     let filtered_candidates =
         filter_advertised_sample_rates(&candidates, advertised_ranges.as_deref());
@@ -66,10 +72,7 @@ pub fn verify_working_sample_rate(
     };
 
     // Get device's default channel count for test streams
-    let default_channels = device
-        .default_output_config()
-        .map(|c| c.channels())
-        .unwrap_or(2);
+    let default_channels = device.default_output_config().map_or(2, |c| c.channels());
 
     for &rate in &candidates {
         for test_channels in probe_channel_order(requested_channels, default_channels) {
@@ -186,9 +189,7 @@ pub fn verify_working_sample_rate(
                 #[cfg(not(target_os = "linux"))]
                 std::thread::sleep(std::time::Duration::from_millis(30));
                 log::debug!(
-                    "[AUDIO] Device rate verification: {}Hz/{}ch - no callbacks in 150ms",
-                    rate,
-                    test_channels
+                    "[AUDIO] Device rate verification: {rate}Hz/{test_channels}ch - no callbacks in 150ms"
                 );
                 continue;
             }
@@ -203,27 +204,18 @@ pub fn verify_working_sample_rate(
             #[cfg(not(target_os = "linux"))]
             std::thread::sleep(std::time::Duration::from_millis(30));
 
-            let expected_samples = rate as u64 * test_channels as u64 * 300 / 1000;
+            let expected_samples = u64::from(rate) * u64::from(test_channels) * 300 / 1000;
             let new_callbacks = count_phase2 - count_phase1;
             let enough_data = samples > expected_samples / 10;
 
             if enough_data && (new_callbacks > 0 || count_phase1 >= 2) {
-                if rate != requested_rate {
-                    log::warn!(
-                        "[AUDIO] Device rate verification: requested {}Hz doesn't work, using {}Hz with {}ch ({} callbacks, {} samples in 300ms)",
-                        requested_rate,
-                        rate,
-                        test_channels,
-                        count_phase2,
-                        samples
+                if rate == requested_rate {
+                    log::info!(
+                        "[AUDIO] Device rate verification: {rate}Hz works with {test_channels}ch ({count_phase2} callbacks, {samples} samples in 300ms)"
                     );
                 } else {
-                    log::info!(
-                        "[AUDIO] Device rate verification: {}Hz works with {}ch ({} callbacks, {} samples in 300ms)",
-                        rate,
-                        test_channels,
-                        count_phase2,
-                        samples
+                    log::warn!(
+                        "[AUDIO] Device rate verification: requested {requested_rate}Hz doesn't work, using {rate}Hz with {test_channels}ch ({count_phase2} callbacks, {samples} samples in 300ms)"
                     );
                 }
                 return Some(rate);
@@ -241,14 +233,12 @@ pub fn verify_working_sample_rate(
         }
     }
 
-    log::warn!(
-        "[AUDIO] Device rate verification: no working rate found (tried {:?})",
-        candidates
-    );
+    log::warn!("[AUDIO] Device rate verification: no working rate found (tried {candidates:?})");
     None
 }
 
 /// Check if a device name looks like a virtual null/discard sink that won't produce real audio.
+#[must_use]
 pub fn is_null_device(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower.contains("discard all samples")

@@ -1,4 +1,4 @@
-use math_audio_dsp::signals::*;
+use math_audio_dsp::signals::prepare_signal_for_playback;
 
 /// Absolute sample magnitude at/above which a captured sample counts as
 /// clipped. The output stage hard-clamps to ±1.0, so anything reaching
@@ -31,6 +31,11 @@ pub struct ClipStats {
 }
 
 /// Count clipped samples in a captured buffer, overall and per block.
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Clip counts are converted to f32 only to report percentages."
+)]
 pub fn analyze_clipping(samples: &[f32]) -> ClipStats {
     if samples.is_empty() {
         return ClipStats {
@@ -90,12 +95,17 @@ pub(super) fn check_capture_clipping(samples: &[f32], log_tag: &str) -> Result<(
 }
 
 #[cfg(not(target_os = "ios"))]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "The nonnegative capture duration rounds up to whole frames for ring-buffer capacity."
+)]
 pub(super) fn capture_capacity(
     sample_rate: u32,
     duration_secs: f64,
     extra_tail_secs: f64,
 ) -> usize {
-    ((duration_secs + extra_tail_secs).max(1.0) * sample_rate as f64).ceil() as usize
+    ((duration_secs + extra_tail_secs).max(1.0) * f64::from(sample_rate)).ceil() as usize
 }
 
 #[cfg(not(target_os = "ios"))]
@@ -161,6 +171,7 @@ pub fn actionable_capture_error(context: &str, err: &dyn std::fmt::Display) -> S
 }
 
 /// Prepare a signal for playback with fades and padding
+#[must_use]
 pub fn prepare_signal(signal: Vec<f32>, sample_rate: u32) -> Vec<f32> {
     const FADE_MS: f32 = 20.0;
     const PADDING_MS: f32 = 250.0;
@@ -189,6 +200,9 @@ pub(super) fn fill_measurement_output<T>(
 }
 
 /// Parse comma-separated channel list (0-based indices)
+///
+/// # Errors
+/// Returns an error if any comma-separated entry is not a valid channel index.
 pub fn parse_channel_list(s: &str) -> Result<Vec<u16>, String> {
     let mut channels = Vec::new();
 
@@ -200,10 +214,10 @@ pub fn parse_channel_list(s: &str) -> Result<Vec<u16>, String> {
 
         let ch: u16 = part
             .parse()
-            .map_err(|_| format!("Invalid channel number: {}", part))?;
+            .map_err(|_| format!("Invalid channel number: {part}"))?;
 
         if channels.contains(&ch) {
-            return Err(format!("Duplicate channel number: {}", ch));
+            return Err(format!("Duplicate channel number: {ch}"));
         }
 
         channels.push(ch);

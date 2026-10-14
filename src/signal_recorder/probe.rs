@@ -21,6 +21,12 @@ const MIN_PROBE_TONES: usize = 16;
 /// keep the probe crest factor bounded, preserving more RMS energy at a given
 /// peak level than a random-phase multisine. Periodic construction also avoids
 /// introducing a discontinuity at the analysis window boundary.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "Validated nonnegative band limits round to FFT bins; tone phases use the f32 FFT representation."
+)]
 pub(super) fn gen_schroeder_narrowband_probe(
     n_frames: usize,
     sample_rate: u32,
@@ -105,6 +111,9 @@ pub(super) fn gen_schroeder_narrowband_probe(
 /// * `output_device_name` - Playback device (None = default)
 /// * `input_device_name` - Recording device (None = default)
 /// * `input_channel` - Mic input channel index
+///
+/// # Errors
+/// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
 #[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 pub fn probe_channel_delays(
@@ -154,8 +163,19 @@ pub fn probe_channel_delays(
 /// Same as [`probe_channel_delays`], plus:
 /// * `recording_wav_path` - Filesystem path to write the recorded
 ///   mono mic audio to. The parent directory must exist.
+///
+/// # Errors
+/// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
 #[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Keep the public API accepting an owned cancellation handle for existing callers."
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Allocated recording lengths convert to f64 seconds for saved metadata."
+)]
 pub fn probe_channel_delays_with_recording(
     channel_indices: &[u16],
     channel_names: &[String],
@@ -191,19 +211,19 @@ pub fn probe_channel_delays_with_recording(
         sample_format: SampleFormat::Float,
     };
     let mut writer = WavWriter::create(recording_wav_path, spec)
-        .map_err(|e| format!("Failed to create probe recording WAV: {}", e))?;
+        .map_err(|e| format!("Failed to create probe recording WAV: {e}"))?;
     for &s in &recorded {
         writer
             .write_sample(s)
-            .map_err(|e| format!("Failed to write probe recording sample: {}", e))?;
+            .map_err(|e| format!("Failed to write probe recording sample: {e}"))?;
     }
     writer
         .finalize()
-        .map_err(|e| format!("Failed to finalize probe recording WAV: {}", e))?;
+        .map_err(|e| format!("Failed to finalize probe recording WAV: {e}"))?;
     log::info!(
         "[probe_channel_delays_with_recording] Saved {} samples ({:.2}s) to {}",
         recorded.len(),
-        recorded.len() as f64 / input_sr as f64,
+        recorded.len() as f64 / f64::from(input_sr),
         recording_wav_path.display()
     );
 
@@ -220,6 +240,16 @@ pub fn probe_channel_delays_with_recording(
 /// it).
 #[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "Probe duration maps to nonnegative whole frames at the f32 waveform-generator rate."
+)]
 fn probe_channel_delays_core(
     channel_indices: &[u16],
     channel_names: &[String],
@@ -303,11 +333,11 @@ fn probe_channel_delays_core(
         &analysis_probe,
         capture.input_sr,
     )?;
-    let auto_peak = auto_result.peak_value as f64;
+    let auto_peak = f64::from(auto_result.peak_value);
 
     let analysis_segment_len = capture.analysis_silence_samples + capture.analysis_signal_samples;
 
-    let mut arrivals_ms = Vec::with_capacity(num_channels);
+    let mut channel_arrivals_ms = Vec::with_capacity(num_channels);
     let mut channel_results = Vec::with_capacity(num_channels);
 
     for (i, &expected_offset) in capture.analysis_offsets.iter().enumerate() {
@@ -336,14 +366,13 @@ fn probe_channel_delays_core(
                 .len()
                 .min(capture.analysis_signal_samples + capture.analysis_silence_samples),
         );
-        let peak_sample_refined = direct
-            .map(|p| p.peak_sample_refined)
-            .unwrap_or(xcorr.peak_sample_refined);
-        let peak_value = direct.map(|p| p.peak_value).unwrap_or(xcorr.peak_value);
-        let arrival_ms = peak_sample_refined / capture.input_sr as f64 * 1000.0;
+        let peak_sample_refined =
+            direct.map_or(xcorr.peak_sample_refined, |p| p.peak_sample_refined);
+        let peak_value = direct.map_or(xcorr.peak_value, |p| p.peak_value);
+        let arrival_ms = peak_sample_refined / f64::from(capture.input_sr) * 1000.0;
 
         let gain_linear = if auto_peak > 1e-10 {
-            peak_value as f64 / auto_peak
+            f64::from(peak_value) / auto_peak
         } else {
             0.0
         };
@@ -354,10 +383,10 @@ fn probe_channel_delays_core(
         };
 
         // SNR: peak / median of envelope
-        let mut sorted_env = xcorr.envelope.to_vec();
+        let mut sorted_env = xcorr.envelope.clone();
         sorted_env.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = sorted_env[sorted_env.len() / 2].max(1e-10) as f64;
-        let snr_db = 20.0 * (peak_value as f64 / median).log10();
+        let median = f64::from(sorted_env[sorted_env.len() / 2].max(1e-10));
+        let snr_db = 20.0 * (f64::from(peak_value) / median).log10();
 
         log::info!(
             "[probe] Ch {} '{}': arrival={:.3}ms, gain={:.1}dB, SNR={:.1}dB{}",
@@ -373,7 +402,7 @@ fn probe_channel_delays_core(
             },
         );
 
-        arrivals_ms.push(arrival_ms);
+        channel_arrivals_ms.push(arrival_ms);
         channel_results.push(ProbeDelayChannelResult {
             channel_name: channel_names[i].clone(),
             channel_index: channel_indices[i] as usize,
@@ -383,26 +412,31 @@ fn probe_channel_delays_core(
         });
     }
 
-    let latency_floor_ms = arrivals_ms.iter().copied().fold(f64::INFINITY, f64::min);
+    let latency_floor_ms = channel_arrivals_ms
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
     if latency_floor_ms.is_finite() {
-        for arrival in &mut arrivals_ms {
+        for arrival in &mut channel_arrivals_ms {
             *arrival -= latency_floor_ms;
         }
         for result in &mut channel_results {
             result.arrival_ms -= latency_floor_ms;
         }
         log::info!(
-            "[probe_channel_delays] Normalized arrivals by subtracting common latency floor {:.3}ms",
-            latency_floor_ms
+            "[probe_channel_delays] Normalized arrivals by subtracting common latency floor {latency_floor_ms:.3}ms"
         );
     }
 
     // Compute alignment delays (align to the slowest relative arrival).
-    let max_arrival = arrivals_ms
+    let max_arrival = channel_arrivals_ms
         .iter()
         .copied()
         .fold(f64::NEG_INFINITY, f64::max);
-    let alignment_delays_ms: Vec<f64> = arrivals_ms.iter().map(|&a| max_arrival - a).collect();
+    let alignment_delays_ms: Vec<f64> = channel_arrivals_ms
+        .iter()
+        .map(|&a| max_arrival - a)
+        .collect();
 
     log::info!("[probe_channel_delays] Results:");
     for (i, cr) in channel_results.iter().enumerate() {

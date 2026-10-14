@@ -13,6 +13,7 @@ pub enum RoomDimensionUnit {
 }
 
 impl RoomDimensionUnit {
+    #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
             Self::Metric => "m",
@@ -21,6 +22,7 @@ impl RoomDimensionUnit {
     }
 
     /// Convert a user-entered value in this unit to canonical meters.
+    #[must_use]
     pub fn to_meters(&self, value: f64) -> f64 {
         match self {
             Self::Metric => value,
@@ -30,6 +32,7 @@ impl RoomDimensionUnit {
     }
 
     /// Convert canonical meters into the selected display unit.
+    #[must_use]
     pub fn from_meters(&self, value: f64) -> f64 {
         match self {
             Self::Metric => value,
@@ -37,6 +40,7 @@ impl RoomDimensionUnit {
         }
     }
 
+    #[must_use]
     pub fn toggled(&self) -> Self {
         match self {
             Self::Metric => Self::Imperial,
