@@ -365,19 +365,35 @@ fn broadband_snr_db(active: &[f32], silence: &[f32]) -> Option<f64> {
     snr_db.is_finite().then_some(snr_db)
 }
 
+/// Estimator inputs shared by the structured quality checks.
+#[cfg(not(target_os = "ios"))]
+#[derive(Debug)]
+pub(super) struct QualityAnalysis<'a> {
+    pub recorded: &'a [f32],
+    pub frequencies: &'a [f32],
+    pub thd_percent: &'a [f32],
+    pub harmonic_distortion_db: &'a [Vec<f32>],
+    pub fundamental_db: &'a [f32],
+    pub sweep_range: Option<(f32, f32)>,
+    pub active: Option<&'a [f32]>,
+    pub silence: Option<&'a [f32]>,
+    pub single_take: bool,
+}
+
 /// Build typed findings using the same estimator inputs and thresholds as the legacy verdict.
 #[cfg(not(target_os = "ios"))]
-pub(super) fn structured_quality_findings(
-    recorded: &[f32],
-    frequencies: &[f32],
-    thd_percent: &[f32],
-    harmonic_distortion_db: &[Vec<f32>],
-    fundamental_db: &[f32],
-    sweep_range: Option<(f32, f32)>,
-    active: Option<&[f32]>,
-    silence: Option<&[f32]>,
-    single_take: bool,
-) -> Vec<QualityFinding> {
+pub(super) fn structured_quality_findings(analysis: QualityAnalysis<'_>) -> Vec<QualityFinding> {
+    let QualityAnalysis {
+        recorded,
+        frequencies,
+        thd_percent,
+        harmonic_distortion_db,
+        fundamental_db,
+        sweep_range,
+        active,
+        silence,
+        single_take,
+    } = analysis;
     let mut findings = Vec::new();
     let clipped_samples = recorded.iter().filter(|sample| sample.abs() >= 1.0).count();
     if clipped_samples > 0 {

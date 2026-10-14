@@ -61,3 +61,8 @@ test-util = []
 
 [lints.clippy]
 perf = { level = "warn", priority = -1 }
+
+[patch.crates-io]
+# Retained SOTF fix for the uninhabited Objective-C runtime static. Pin the
+# compatibility revision that preserves the upstream `block` package name.
+block = { git = "https://github.com/pierreaubert/sotf-3rdparties", rev = "5a4634af0916b5f53effa5ef6340efd90af32285" }

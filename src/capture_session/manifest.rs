@@ -322,9 +322,9 @@ fn measured_impulse_responses(
     Ok(declarations)
 }
 
-pub(crate) fn selected_takes<'a>(
-    report: &'a ClockProcessedManifest,
-) -> Result<HashMap<(&'a str, &'a str), &'a super::clock::io::ClockProcessedTake>, String> {
+pub(crate) fn selected_takes(
+    report: &ClockProcessedManifest,
+) -> Result<HashMap<(&str, &str), &super::clock::io::ClockProcessedTake>, String> {
     let selected_ids = if let Some(selected_ids) = &report.selected_take_ids {
         selected_ids
     } else if report.plan.repeat_count == 1

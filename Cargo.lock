@@ -614,8 +614,7 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 [[package]]
 name = "block"
 version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties?rev=5a4634af0916b5f53effa5ef6340efd90af32285#5a4634af0916b5f53effa5ef6340efd90af32285"
 
 [[package]]
 name = "block-buffer"

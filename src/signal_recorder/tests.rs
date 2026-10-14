@@ -2845,17 +2845,17 @@ fn thd_control_uses_80_to_16000_hz_for_warnings_and_findings() {
     let fundamental = [40.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     let sweep = Some((20.0, 20_000.0));
     assert!(thd_warning_issue(&frequencies, &thd, &fundamental, sweep).is_none());
-    let findings = super::quality::structured_quality_findings(
-        &[0.1; 32],
-        &frequencies,
-        &thd,
-        &vec![vec![-40.0; frequencies.len()]; 4],
-        &fundamental,
-        sweep,
-        None,
-        None,
-        false,
-    );
+    let findings = super::quality::structured_quality_findings(super::quality::QualityAnalysis {
+        recorded: &[0.1; 32],
+        frequencies: &frequencies,
+        thd_percent: &thd,
+        harmonic_distortion_db: &vec![vec![-40.0; frequencies.len()]; 4],
+        fundamental_db: &fundamental,
+        sweep_range: sweep,
+        active: None,
+        silence: None,
+        single_take: false,
+    });
     let finding = findings
         .iter()
         .find(|finding| finding.metric == QualityMetric::TotalHarmonicDistortion)

@@ -1312,17 +1312,18 @@ pub(super) fn analyze_sweep_takes(
             pre_silence_window(&analysis_capture, analysis_reference, &lag_for_quality),
         )
     });
-    let mut quality_findings = super::quality::structured_quality_findings(
-        &analysis_capture,
-        &analysis.frequencies,
-        &analysis.thd_percent,
-        &analysis.harmonic_distortion_db,
-        &analysis.spl_db,
-        sweep_range,
-        single_snr_windows.as_ref().map(|(active, _)| *active),
-        single_snr_windows.as_ref().map(|(_, silence)| *silence),
-        single_take,
-    );
+    let mut quality_findings =
+        super::quality::structured_quality_findings(super::quality::QualityAnalysis {
+            recorded: &analysis_capture,
+            frequencies: &analysis.frequencies,
+            thd_percent: &analysis.thd_percent,
+            harmonic_distortion_db: &analysis.harmonic_distortion_db,
+            fundamental_db: &analysis.spl_db,
+            sweep_range,
+            active: single_snr_windows.as_ref().map(|(active, _)| *active),
+            silence: single_snr_windows.as_ref().map(|(_, silence)| *silence),
+            single_take,
+        });
     if !single_take && let Some(unknown_reason) = noise_floor_unknown_reason {
         let threshold_db = f64::from(MeasurementQualityConfig::default().minimum_median_snr_db);
         let message =

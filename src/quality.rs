@@ -130,6 +130,10 @@ impl QualityFinding {
     }
 
     /// Construct an unknown finding while retaining a known acceptance threshold.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preserve the public constructor API and its correspondence with unknown"
+    )]
     pub fn unknown_with_threshold(
         policy: QualityPolicy,
         metric: QualityMetric,
