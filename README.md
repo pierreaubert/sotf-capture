@@ -223,3 +223,42 @@ The offset is `meter dBSPL - 20 log10(captured RMS)`. Reuse requires the same
 microphone, input channel and gain. It does not supply frequency-response
 compensation or calibration for a different machine, and the raw live monitor
 continues to report unknown absolute SPL.
+
+## Speaker–microphone localization
+
+`plan-process` can recover the 3D position of each source from the
+capture chirps plus DSP, with no extra measurement pass: every sweep
+take is correlated against the known stimulus, clock-corrected, and
+converted to a source×microphone range matrix, then multilaterated
+against the surveyed microphone positions. Details live in
+`localization.md`; this section covers daily use.
+
+Requirements: all microphones one brand/type on one interface, the
+plan loopback wired (one interface in+out), and at least 4
+non-coplanar surveyed microphones. `plan-validate` prints readiness
+lines (missing loopback, coplanar rows, mic-count ceiling) before
+anything is recorded; `plan-process` prints one summary line per
+source plus warnings, and refuses cells it cannot stand behind
+(`clock_outlier`, `arrival_low_confidence`, `arrival_ambiguous`,
+`no_absolute_time_origin`, …) instead of guessing. Estimated
+positions never overwrite surveyed geometry silently.
+
+Bench calibration (optional): point the plan at a bench file with
+`"localization_calibration_file": "bench/ucx2-umik2.json"`. The file
+carries the interface electrical latency per rate (operator
+reference) and the measured matched-microphone bias
+(`mic_bias_correction_m`), schema
+`sotf-capture/localization-calibration`, version 1 —
+`plan-validate` checks it loads. Without one, sessions run
+uncalibrated (`b_common = 0`) and say so in the report. Measure both
+constants once per (interface, mic model, rate) triple following
+the bench procedure in `localization.md` §5.4.
+
+Subwoofers: a sub cannot reproduce the 2–8 kHz arrival band, so run
+subs as a dedicated session whose plan sweep is low-frequency
+(20–300 Hz). Timing chirps stay full-band markers either way, so the
+clock still fits; the estimator detects the LF take, reports band
+`sweep_20_300` per cell, and budgets the coarse LF resolution into a
+wide σ rather than refusing. Expect decimetre-level sigmas on sub
+ranges — that is the honest precision of a 300 Hz signal, not a
+failure.
