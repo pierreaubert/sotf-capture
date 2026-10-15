@@ -20,6 +20,9 @@ has one owner.
 - `devices`: audio device lookup (cpal CoreAudio/RemoteIO backend on iOS).
 - `ios`: iOS route-model helpers (native rates, built-in channel limits);
   the app still owns `AVAudioSession` setup — see the iOS section below.
+- `tvos`: tvOS output-route helpers; without `capture-io` (no cpal backend
+  on tvOS) `devices` is served by a stub and capture I/O is compiled out —
+  see the tvOS section below.
 
 ## Playback backends
 
@@ -309,3 +312,25 @@ GPUI iOS target) depend on this crate normally; for an Xcode/Swift
 app add `crate-type = ["staticlib"]` to a wrapper crate over the
 capture calls. Verify takes on a real device — the simulator produces
 fake audio, so its clock and level QA numbers are meaningless.
+
+## tvOS
+
+Apple TV builds DSP-only: cpal 0.17 has no tvOS backend (its `mach2`
+dependency refuses the target), and tvOS exposes no microphone to
+third-party apps, so capture I/O cannot exist there. The crate still
+compiles — signal generation, calibration math, quality analysis,
+session planning/validation, the emulated backends, and the full unit
+test suite — behind the `capture-io` feature flag:
+
+```bash
+just check-tvos   # --no-default-features --all-targets for aarch64-apple-tvos
+```
+
+With default features (desktop, iOS) nothing changes. With
+`--no-default-features`, device I/O, playback, recording, and the
+hardware capture wrappers are compiled out; the `devices` surface is
+served by a stub listing the HDMI output route, and `tvos::`
+(`negotiate_sample_rate`, `check_hdmi_output_channels`) encodes the
+output-side route model. The multi-capture request/result protocol
+types stay available so session manifests keep working. Never verify
+tvOS with `--all-features`: that re-enables cpal and fails by design.

@@ -32,7 +32,13 @@ thiserror = "2.0.17"
 math-rir = { version = "0.5", path = "../math-audio/crates/math-rir" }
 # Cross-platform audio I/O (CoreAudio/RemoteIO backend on iOS). The iOS app
 # must still configure AVAudioSession (category, mic permission) — see README.md §iOS.
-cpal = "0.17"
+# Optional so tvOS (no cpal backend: mach2 refuses tvOS) builds DSP-only
+# with `--no-default-features`; see README.md §tvOS.
+cpal = { version = "0.17", optional = true }
+
+# CLI-only: the binary is skipped without `capture-io`, and tvOS ships no
+# CLI (ctrlc's nix backend needs fork/exec, absent from tvOS libc).
+[target.'cfg(not(target_os = "tvos"))'.dependencies]
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = { version = "3.5", features = ["termination"] }
 env_logger = "0.11"
@@ -40,6 +46,7 @@ env_logger = "0.11"
 [[bin]]
 name = "sotf-capture"
 path = "src/bin/sotf_capture.rs"
+required-features = ["capture-io"]
 
 [[test]]
 name = "emulated_capture"
@@ -47,8 +54,12 @@ path = "tests/emulated_capture.rs"
 required-features = ["test-util"]
 
 [features]
+# Default keeps the full capture path (device I/O, playback, recording).
+default = ["capture-io"]
+# Hardware audio I/O via cpal. Off on tvOS, where cpal has no backend.
+capture-io = ["dep:cpal"]
 # Windows ASIO device support (additive; desktop-only, off by default).
-asio = ["cpal/asio"]
+asio = ["capture-io", "cpal/asio"]
 # Emulated audio backends for hardware-free tests (never enable in production).
 test-util = []
 

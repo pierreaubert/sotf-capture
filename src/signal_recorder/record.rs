@@ -1580,6 +1580,7 @@ pub fn record_and_analyze_with_recorder(
 /// # Errors
 /// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "capture-io")]
 pub fn record_and_analyze_with(
     playback: &mut impl super::playback::SweepPlayback,
     temp_wav_path: &Path,
@@ -1798,6 +1799,7 @@ pub fn record_and_analyze_with_multi_recorder(
 /// # Errors
 /// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "capture-io")]
 pub fn record_and_analyze_with_multi(
     playback: &mut impl super::playback::SweepPlayback,
     temp_wav_path: &Path,

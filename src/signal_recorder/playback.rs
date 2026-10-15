@@ -13,7 +13,9 @@
 // Rust guideline compliant 2026-02-21
 
 use std::path::Path;
+#[cfg(feature = "capture-io")]
 use std::sync::Arc;
+#[cfg(feature = "capture-io")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Mono stimulus playback on one hardware output channel.
@@ -54,6 +56,7 @@ pub trait SweepPlayback {
 /// which can under-report hardware capability), falling back to the
 /// default config and finally to stereo. Shared by every backend so
 /// device-mode selection cannot drift between implementations.
+#[cfg(feature = "capture-io")]
 #[must_use]
 pub fn output_channel_count(device: &cpal::Device) -> usize {
     use cpal::traits::DeviceTrait;
@@ -90,6 +93,7 @@ pub fn check_output_channel(channel: u16, hardware_channels: usize) -> Result<()
 /// supports it (avoiding stimulus resampling); otherwise resamples the
 /// stimulus offline to the device default rate with the same sinc
 /// parameters as the engine resampler preset used for references.
+#[cfg(feature = "capture-io")]
 #[derive(Default)]
 pub struct CpalPlayback {
     stream: Option<cpal::Stream>,
@@ -97,6 +101,7 @@ pub struct CpalPlayback {
     total_frames: usize,
 }
 
+#[cfg(feature = "capture-io")]
 impl std::fmt::Debug for CpalPlayback {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CpalPlayback")
@@ -110,6 +115,7 @@ impl std::fmt::Debug for CpalPlayback {
     }
 }
 
+#[cfg(feature = "capture-io")]
 impl CpalPlayback {
     /// Create an idle backend; playback starts with [`SweepPlayback::start`].
     #[must_use]
@@ -123,6 +129,7 @@ impl CpalPlayback {
     clippy::cast_precision_loss,
     reason = "Integer PCM is intentionally normalized to f32 audio samples."
 )]
+#[cfg(any(test, feature = "test-util", feature = "capture-io"))]
 pub(crate) fn read_stimulus_mono(wav: &Path) -> Result<Vec<f32>, String> {
     let mut reader =
         hound::WavReader::open(wav).map_err(|e| format!("Failed to load file: {e}"))?;
@@ -161,6 +168,7 @@ pub(crate) fn read_stimulus_mono(wav: &Path) -> Result<Vec<f32>, String> {
     Ok(mono)
 }
 
+#[cfg(feature = "capture-io")]
 impl SweepPlayback for CpalPlayback {
     #[expect(
         clippy::too_many_lines,

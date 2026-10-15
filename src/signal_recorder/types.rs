@@ -1,10 +1,18 @@
+#[cfg(feature = "capture-io")]
 use super::build::build_measurement_input_stream;
+#[cfg(feature = "capture-io")]
 use super::build::build_measurement_output_stream;
+#[cfg(feature = "capture-io")]
 use super::choose::choose_measurement_input_config;
+#[cfg(feature = "capture-io")]
 use super::choose::choose_measurement_output_config;
+#[cfg(feature = "capture-io")]
 use super::consts::CANCELLED_ERR;
+#[cfg(feature = "capture-io")]
 use super::misc::actionable_capture_error;
+#[cfg(feature = "capture-io")]
 use super::misc::drain_capture;
+#[cfg(feature = "capture-io")]
 use math_audio_dsp::signals::interleave_per_channel;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -107,6 +115,7 @@ pub struct ProbeDelayChannelResult {
 /// recording plus everything a caller needs to slice per-channel
 /// segments at the recording's sample rate.
 #[derive(Debug)]
+#[cfg(feature = "capture-io")]
 pub(super) struct PlayPerChannelOutput {
     /// Mono mic samples at `input_sr`. Length is determined by how
     /// long the playback + tail ran on the host audio system.
@@ -134,6 +143,64 @@ pub(super) struct PlayPerChannelOutput {
     pub(super) analysis_silence_samples: usize,
 }
 
+/// A microphone's exact device selector and zero-based input channel.
+///
+/// Pure protocol type shared by the hardware multi-capture path and the
+/// session manifest code, so it lives here rather than behind `capture-io`.
+#[derive(Debug, Clone)]
+pub struct CaptureInput {
+    /// Exact device ID or unique enumerated name; ambiguous names are rejected.
+    pub device: String,
+    /// Physical device input channel.
+    pub channel: u16,
+}
+
+/// A bounded region of the mono stimulus sent to a different output channel.
+#[derive(Debug, Clone)]
+pub struct CaptureOutputSegment {
+    /// Inclusive stimulus frame index.
+    pub start_frame: usize,
+    /// Exclusive stimulus frame index.
+    pub end_frame: usize,
+    /// Physical output channel for this region.
+    pub channel: u16,
+}
+
+/// One source stimulus recorded simultaneously on every requested input.
+#[derive(Debug)]
+pub struct MultiCaptureRequest {
+    /// Two to thirty-three input routes (up to thirty-two microphones plus an optional loopback), ordered as the returned recordings.
+    pub inputs: Vec<CaptureInput>,
+    /// Exact playback device ID or unique enumerated name.
+    pub output_device: String,
+    /// Physical output channel; all other channels are silent.
+    pub output_channel: u16,
+    /// Sorted, nonoverlapping output overrides (at most 16), e.g. timing chirps.
+    pub output_overrides: Vec<CaptureOutputSegment>,
+    /// Required nominal rate on every stream; there is no rate fallback.
+    pub sample_rate_hz: u32,
+    /// Mono stimulus, including caller-defined timing chirps and silence.
+    pub stimulus: Vec<f32>,
+}
+
+/// Raw device-clock samples, before acoustic timing correction.
+#[derive(Debug)]
+pub struct MultiCaptureResult {
+    /// Actual device IDs in request order, independent of user-facing names.
+    pub input_device_ids: Vec<String>,
+    /// Actual playback device ID.
+    pub output_device_id: String,
+    /// Nominal rate confirmed for all configured streams.
+    pub sample_rate_hz: u32,
+    /// Planar samples in request order; independent clocks can differ in length.
+    pub recordings: Vec<Vec<f32>>,
+    /// Negotiated sample formats in request order, for recording provenance.
+    pub input_sample_formats: Vec<String>,
+    /// Negotiated output sample format.
+    pub output_sample_format: String,
+}
+
+#[cfg(feature = "capture-io")]
 #[derive(Debug, Clone, Copy)]
 pub(super) struct MeasurementOutputConfig {
     pub(super) channels: u16,
@@ -141,6 +208,7 @@ pub(super) struct MeasurementOutputConfig {
     pub(super) sample_format: cpal::SampleFormat,
 }
 
+#[cfg(feature = "capture-io")]
 #[derive(Debug, Clone, Copy)]
 pub(super) struct MeasurementInputConfig {
     pub(super) channels: u16,
@@ -176,6 +244,7 @@ pub(super) struct MeasurementInputConfig {
     clippy::cast_sign_loss,
     reason = "Nonnegative durations and rate ratios map to whole audio frames; sample counts supply floating-point timing diagnostics."
 )]
+#[cfg(feature = "capture-io")]
 pub(super) fn play_per_channel_and_record_mono(
     channel_indices: &[u16],
     sample_rate: u32,
@@ -522,9 +591,19 @@ pub(super) fn play_per_channel_and_record_mono(
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DirectArrivalPeak {
     pub(crate) peak_sample_refined: f64,
+    // Read by the hardware probe path only; without `capture-io` the
+    // field is written but never read.
+    #[cfg_attr(
+        not(feature = "capture-io"),
+        expect(
+            dead_code,
+            reason = "peak_value is read by the capture-io probe path only"
+        )
+    )]
     pub(crate) peak_value: f32,
 }
 
+#[cfg(any(test, feature = "capture-io"))]
 pub(crate) fn pick_direct_arrival_from_envelope(
     envelope: &[f32],
     sample_rate: u32,
@@ -705,6 +784,7 @@ pub struct BassAnchorChannelResult {
 /// # Errors
 /// Returns an error for invalid channel mappings, incompatible loopback data, or failed phase analysis.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(test, feature = "capture-io"))]
 pub fn analyze_bass_anchor_recording(
     recorded: &[f32],
     loopback_recorded: Option<&[f32]>,

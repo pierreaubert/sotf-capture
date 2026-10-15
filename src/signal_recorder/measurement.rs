@@ -6,10 +6,12 @@
 /// corrupt the measurement. Clamping here degrades a bad value to full
 /// scale instead of a distorted signal. User-facing validation of hot
 /// levels belongs to the CLI/UI layers, not this function.
+#[cfg(any(test, feature = "capture-io"))]
 pub(super) fn measurement_amplitude_from_level_db(level_db: f32) -> f32 {
     10.0_f32.powf(level_db.clamp(-40.0, 0.0) / 20.0)
 }
 
+#[cfg(feature = "capture-io")]
 pub(super) fn measurement_sample_format_rank(sample_format: cpal::SampleFormat) -> u8 {
     match sample_format {
         cpal::SampleFormat::F32 => 0,

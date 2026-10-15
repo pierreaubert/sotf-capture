@@ -4,18 +4,33 @@
 //! The journal records pending clock/calibration processing rather than inventing
 //! timing certainty. Completed sources survive a later device failure or cancel.
 
-use super::protocol::{CaptureStimulusLayout, prepare_capture_stimulus};
-use super::{CaptureSessionPlan, ValidatedCaptureSession};
+// The acquisition runners below are hardware-path orchestration also
+// covered by unit tests, so their imports live under the same condition.
+// The plan/stimulus types stay unconditional: the durable manifest keeps
+// them in DSP-only builds.
+use super::CaptureSessionPlan;
+#[cfg(any(test, feature = "capture-io"))]
+use super::ValidatedCaptureSession;
+use super::protocol::CaptureStimulusLayout;
+#[cfg(any(test, feature = "capture-io"))]
+use super::protocol::prepare_capture_stimulus;
+#[cfg(any(test, feature = "capture-io"))]
 use crate::recording_helpers::save_recording_session_json;
-use crate::signal_recorder::multi_capture::{
-    CaptureInput, CaptureOutputSegment, MultiCaptureRequest, MultiCaptureResult,
-    capture_multidevice,
-};
+#[cfg(feature = "capture-io")]
+use crate::signal_recorder::multi_capture::capture_multidevice;
+#[cfg(any(test, feature = "capture-io"))]
 use crate::signal_recorder::{CancelFlag, write_wav_file};
+#[cfg(any(test, feature = "capture-io"))]
+use crate::signal_recorder::{
+    CaptureInput, CaptureOutputSegment, MultiCaptureRequest, MultiCaptureResult,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(any(test, feature = "capture-io"))]
 use std::io::Read as _;
+#[cfg(any(test, feature = "capture-io"))]
 use std::path::Path;
+#[cfg(any(test, feature = "capture-io"))]
 use std::sync::atomic::Ordering;
 
 /// Raw acquisition state; completion does not imply coherent measurement validity.
@@ -181,6 +196,7 @@ pub(crate) fn stable_take_id(source_id: &str, microphone_id: &str, repeat_index:
     )
 }
 
+#[cfg(any(test, feature = "capture-io"))]
 fn save_manifest(directory: &Path, manifest: &RawCaptureManifest) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(manifest)
         .map_err(|e| format!("cannot serialize capture journal: {e}"))?;
@@ -207,6 +223,7 @@ fn save_manifest(directory: &Path, manifest: &RawCaptureManifest) -> Result<(), 
     clippy::cast_sign_loss,
     reason = "The positive fixed wake tail is rounded up to a whole number of audio frames."
 )]
+#[cfg(any(test, feature = "capture-io"))]
 fn wake_session_chain(
     capture: &mut impl FnMut(MultiCaptureRequest, &CancelFlag) -> Result<MultiCaptureResult, String>,
     session: &ValidatedCaptureSession,
@@ -294,6 +311,7 @@ fn wake_session_chain(
 /// # Errors
 /// Returns configuration, calibration, device, cancellation, or filesystem errors.
 /// An error after acquisition starts preserves its journal and completed sources.
+#[cfg(feature = "capture-io")]
 pub fn record_capture_session(
     session: &ValidatedCaptureSession,
     plan_directory: &Path,
@@ -320,8 +338,10 @@ pub fn record_capture_session(
 }
 
 /// Probe WAV name inside raw and processed session directories.
+#[cfg(any(test, feature = "capture-io"))]
 const PROBE_WAV_FILE: &str = "probe.wav";
 /// Bass-anchor WAV name inside raw and processed session directories.
+#[cfg(any(test, feature = "capture-io"))]
 const BASS_ANCHOR_WAV_FILE: &str = "bass-anchor.wav";
 
 /// Run declared probe/anchor passes after the sweeps and journal them.
@@ -330,6 +350,7 @@ const BASS_ANCHOR_WAV_FILE: &str = "bass-anchor.wav";
 /// A declared pass that fails marks the session Failed with its reason while
 /// preserving completed sweeps for explicit-selection processing. Runners are
 /// injected so hardware-free tests can supply canned results.
+#[cfg(any(test, feature = "capture-io"))]
 pub(crate) fn run_auxiliary_passes(
     session: &ValidatedCaptureSession,
     output_directory: &Path,
@@ -466,6 +487,7 @@ pub(crate) fn run_auxiliary_passes(
     clippy::too_many_lines,
     reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
 )]
+#[cfg(any(test, feature = "capture-io"))]
 fn record_with(
     session: &ValidatedCaptureSession,
     plan_directory: &Path,

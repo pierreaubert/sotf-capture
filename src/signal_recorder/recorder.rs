@@ -12,7 +12,9 @@
 
 // Rust guideline compliant 2026-02-21
 
+#[cfg(feature = "capture-io")]
 use std::sync::Arc;
+#[cfg(feature = "capture-io")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Input configuration negotiated with the device at capture start.
@@ -90,6 +92,7 @@ pub fn check_input_channels(channels: &[u16], hardware_channels: usize) -> Resul
 /// Opens a cpal input stream at the requested rate when the device
 /// supports it; otherwise falls back to the device default rate and
 /// reports it so the caller resamples the reference.
+#[cfg(feature = "capture-io")]
 pub struct CpalRecorder {
     log_tag: String,
     stream: Option<cpal::Stream>,
@@ -99,6 +102,7 @@ pub struct CpalRecorder {
     sample_rate: u32,
 }
 
+#[cfg(feature = "capture-io")]
 impl std::fmt::Debug for CpalRecorder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CpalRecorder")
@@ -109,6 +113,7 @@ impl std::fmt::Debug for CpalRecorder {
     }
 }
 
+#[cfg(feature = "capture-io")]
 impl CpalRecorder {
     /// Create an idle recorder; capture starts with [`SweepRecorder::start`].
     pub fn new(log_tag: impl Into<String>) -> Self {
@@ -123,6 +128,7 @@ impl CpalRecorder {
     }
 }
 
+#[cfg(feature = "capture-io")]
 impl SweepRecorder for CpalRecorder {
     #[expect(
         clippy::too_many_lines,

@@ -1,16 +1,30 @@
+#[cfg(feature = "capture-io")]
 use super::consts::DEFAULT_AUXILIARY_SIGNAL_LEVEL_DB;
+#[cfg(feature = "capture-io")]
 use super::measurement::measurement_amplitude_from_level_db;
+#[cfg(feature = "capture-io")]
 use super::record::resample_reference_signal;
+#[cfg(feature = "capture-io")]
 use super::types::CancelFlag;
+#[cfg(feature = "capture-io")]
 use super::types::ProbeDelayChannelResult;
+#[cfg(feature = "capture-io")]
 use super::types::ProbeDelayResults;
+#[cfg(feature = "capture-io")]
 use super::types::pick_direct_arrival_from_envelope;
+#[cfg(feature = "capture-io")]
 use super::types::play_per_channel_and_record_mono;
+#[cfg(feature = "capture-io")]
+#[cfg(feature = "capture-io")]
 use hound::{SampleFormat, WavSpec, WavWriter};
+#[cfg(any(test, feature = "capture-io"))]
 use math_audio_dsp::stft::RealFftProcessor;
+#[cfg(any(test, feature = "capture-io"))]
 use rustfft::num_complex::Complex;
+#[cfg(any(test, feature = "capture-io"))]
 use std::f32::consts::PI;
 
+#[cfg(any(test, feature = "capture-io"))]
 const MIN_PROBE_TONES: usize = 16;
 
 /// Generate a periodic, band-limited multisine with Schroeder phases.
@@ -25,6 +39,7 @@ const MIN_PROBE_TONES: usize = 16;
     clippy::cast_sign_loss,
     reason = "Validated nonnegative band limits round to FFT bins; tone phases use the f32 FFT representation."
 )]
+#[cfg(any(test, feature = "capture-io"))]
 pub(super) fn gen_schroeder_narrowband_probe(
     n_frames: usize,
     sample_rate: u32,
@@ -113,6 +128,7 @@ pub(super) fn gen_schroeder_narrowband_probe(
 /// # Errors
 /// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "capture-io")]
 pub fn probe_channel_delays(
     channel_indices: &[u16],
     channel_names: &[String],
@@ -172,6 +188,7 @@ pub fn probe_channel_delays(
     clippy::cast_precision_loss,
     reason = "Allocated recording lengths convert to f64 seconds for saved metadata."
 )]
+#[cfg(feature = "capture-io")]
 pub fn probe_channel_delays_with_recording(
     channel_indices: &[u16],
     channel_names: &[String],
@@ -245,6 +262,7 @@ pub fn probe_channel_delays_with_recording(
     clippy::cast_sign_loss,
     reason = "Probe duration maps to nonnegative whole frames at the f32 waveform-generator rate."
 )]
+#[cfg(feature = "capture-io")]
 fn probe_channel_delays_core(
     channel_indices: &[u16],
     channel_names: &[String],

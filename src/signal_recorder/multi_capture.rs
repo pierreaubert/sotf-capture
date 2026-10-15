@@ -12,6 +12,11 @@ use std::time::{Duration, Instant};
 
 use super::CancelFlag;
 use super::measurement::measurement_sample_format_rank;
+// Protocol types live in `super::types` so DSP-only builds (no `capture-io`)
+// keep them; re-exported here so the pre-existing paths keep working.
+pub use super::types::{
+    CaptureInput, CaptureOutputSegment, MultiCaptureRequest, MultiCaptureResult,
+};
 
 // Thirty-two microphones plus one electrical loopback is the capture limit.
 // Grouped input frames fit in a fixed array so callbacks never allocate.
@@ -22,60 +27,6 @@ const START_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 // Keep recording after the final output buffer is submitted to the device.
 const DRAIN_TIME: Duration = Duration::from_millis(500);
-
-/// A microphone's exact device selector and zero-based input channel.
-#[derive(Debug, Clone)]
-pub struct CaptureInput {
-    /// Exact device ID or unique enumerated name; ambiguous names are rejected.
-    pub device: String,
-    /// Physical device input channel.
-    pub channel: u16,
-}
-
-/// A bounded region of the mono stimulus sent to a different output channel.
-#[derive(Debug, Clone)]
-pub struct CaptureOutputSegment {
-    /// Inclusive stimulus frame index.
-    pub start_frame: usize,
-    /// Exclusive stimulus frame index.
-    pub end_frame: usize,
-    /// Physical output channel for this region.
-    pub channel: u16,
-}
-
-/// One source stimulus recorded simultaneously on every requested input.
-#[derive(Debug)]
-pub struct MultiCaptureRequest {
-    /// Two to thirty-three input routes (up to thirty-two microphones plus an optional loopback), ordered as the returned recordings.
-    pub inputs: Vec<CaptureInput>,
-    /// Exact playback device ID or unique enumerated name.
-    pub output_device: String,
-    /// Physical output channel; all other channels are silent.
-    pub output_channel: u16,
-    /// Sorted, nonoverlapping output overrides (at most 16), e.g. timing chirps.
-    pub output_overrides: Vec<CaptureOutputSegment>,
-    /// Required nominal rate on every stream; there is no rate fallback.
-    pub sample_rate_hz: u32,
-    /// Mono stimulus, including caller-defined timing chirps and silence.
-    pub stimulus: Vec<f32>,
-}
-
-/// Raw device-clock samples, before acoustic timing correction.
-#[derive(Debug)]
-pub struct MultiCaptureResult {
-    /// Actual device IDs in request order, independent of user-facing names.
-    pub input_device_ids: Vec<String>,
-    /// Actual playback device ID.
-    pub output_device_id: String,
-    /// Nominal rate confirmed for all configured streams.
-    pub sample_rate_hz: u32,
-    /// Planar samples in request order; independent clocks can differ in length.
-    pub recordings: Vec<Vec<f32>>,
-    /// Negotiated sample formats in request order, for recording provenance.
-    pub input_sample_formats: Vec<String>,
-    /// Negotiated output sample format.
-    pub output_sample_format: String,
-}
 
 #[derive(Debug)]
 struct InputGroup {

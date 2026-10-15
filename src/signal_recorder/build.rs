@@ -1,9 +1,15 @@
+#[cfg(feature = "capture-io")]
 use super::misc::actionable_capture_error;
+#[cfg(feature = "capture-io")]
 use super::misc::fill_measurement_output;
+#[cfg(feature = "capture-io")]
 use super::types::MeasurementOutputConfig;
+#[cfg(feature = "capture-io")]
 use super::write::write_capture_pairs_to_ring;
 use math_audio_dsp::signals::gen_log_sweep_octave_scaled;
+#[cfg(feature = "capture-io")]
 use std::sync::Arc;
+#[cfg(feature = "capture-io")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Build an octave-scaled sweep surrounded by silence windows.
@@ -50,6 +56,7 @@ pub(super) fn build_octave_sweep_with_silence(
     out
 }
 
+#[cfg(feature = "capture-io")]
 pub(super) fn build_measurement_output_stream(
     device: &cpal::Device,
     output_config: MeasurementOutputConfig,
@@ -88,6 +95,7 @@ pub(super) fn build_measurement_output_stream(
     }
 }
 
+#[cfg(feature = "capture-io")]
 pub(super) fn build_measurement_output_stream_typed<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -117,6 +125,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "capture-io")]
 pub(super) fn build_measurement_input_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -164,6 +173,7 @@ pub(super) fn build_measurement_input_stream(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "capture-io")]
 pub(super) fn build_measurement_input_stream_typed<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,

@@ -4,6 +4,7 @@
 //! record the output, and analyze the results.
 
 mod build;
+#[cfg(feature = "capture-io")]
 mod choose;
 mod consts;
 #[cfg(any(test, feature = "test-util"))]
@@ -13,6 +14,7 @@ mod fake_tests;
 mod generate;
 mod measurement;
 mod misc;
+#[cfg(feature = "capture-io")]
 pub mod multi_capture;
 mod playback;
 mod probe;
@@ -20,6 +22,7 @@ mod quality;
 mod record;
 mod recorder;
 mod recording_session;
+#[cfg(feature = "capture-io")]
 mod run;
 mod signal_params;
 mod signal_type;
@@ -35,13 +38,15 @@ pub use fake::{FakeAudioConfig, FakeAudioProfile, FakePlayback, FakeRecorder, Vi
 pub use generate::*;
 pub use misc::*;
 pub use playback::*;
+#[cfg(feature = "capture-io")]
 pub use probe::*;
 pub use quality::CaptureAnalysis;
 pub use record::*;
-pub use recorder::{
-    CpalRecorder, NegotiatedInput, RecordedTake, SweepRecorder, check_input_channels,
-};
+#[cfg(feature = "capture-io")]
+pub use recorder::CpalRecorder;
+pub use recorder::{NegotiatedInput, RecordedTake, SweepRecorder, check_input_channels};
 pub use recording_session::*;
+#[cfg(feature = "capture-io")]
 pub use run::*;
 pub use signal_params::*;
 pub use signal_type::*;

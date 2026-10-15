@@ -98,6 +98,7 @@ pub(super) fn check_capture_clipping(samples: &[f32], log_tag: &str) -> Result<(
     clippy::cast_sign_loss,
     reason = "The nonnegative capture duration rounds up to whole frames for ring-buffer capacity."
 )]
+#[cfg(feature = "capture-io")]
 pub(super) fn capture_capacity(
     sample_rate: u32,
     duration_secs: f64,
@@ -106,6 +107,7 @@ pub(super) fn capture_capacity(
     ((duration_secs + extra_tail_secs).max(1.0) * f64::from(sample_rate)).ceil() as usize
 }
 
+#[cfg(feature = "capture-io")]
 pub(super) fn drain_capture<T>(consumer: &mut rtrb::Consumer<T>, expected_len: usize) -> Vec<T> {
     let mut out = Vec::with_capacity(expected_len);
     while let Ok(sample) = consumer.pop() {
@@ -176,6 +178,7 @@ pub fn prepare_signal(signal: Vec<f32>, sample_rate: u32) -> Vec<f32> {
     prepare_signal_for_playback(signal, sample_rate, FADE_MS, PADDING_MS)
 }
 
+#[cfg(feature = "capture-io")]
 pub(super) fn fill_measurement_output<T>(
     data: &mut [T],
     playback: &[f32],

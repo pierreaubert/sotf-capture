@@ -7,9 +7,14 @@ _default:
 check:
     {{cargo}} check --workspace --all-targets
 
-# Full capture path (cpal CoreAudio/RemoteIO) for iPhones/iPads; see docs/ios.md.
+# Full capture path (cpal CoreAudio/RemoteIO) for iPhones/iPads; see README.md §iOS.
 check-ios:
     {{cargo}} check -p sotf-capture --target aarch64-apple-ios --all-targets
+
+# DSP-only build for Apple TV (no capture-io: cpal has no tvOS backend);
+# see README.md §tvOS. Never add --all-features here: that enables cpal.
+check-tvos:
+    {{cargo}} check -p sotf-capture --target aarch64-apple-tvos --no-default-features --all-targets
 
 alias lint := clippy
 

@@ -13,12 +13,20 @@
 // Rust guideline compliant 2026-02-21
 
 pub mod capture_session;
+#[cfg(feature = "capture-io")]
+pub mod devices;
+// Without `capture-io` (tvOS: cpal has no backend there) the `devices`
+// surface is served by the stub facade instead.
+#[cfg(not(feature = "capture-io"))]
+#[path = "devices_stub.rs"]
 pub mod devices;
 pub mod ios;
+#[cfg(feature = "capture-io")]
 pub mod live_level;
 pub mod quality;
 pub mod rate_limit;
 pub mod recording_helpers;
 pub mod recording_types;
 pub mod signal_recorder;
+pub mod tvos;
 pub mod wizard;

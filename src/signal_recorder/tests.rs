@@ -8,6 +8,7 @@
 )]
 
 use super::build::build_octave_sweep_with_silence;
+#[cfg(feature = "capture-io")]
 use super::consts::CANCELLED_ERR;
 use super::consts::DEFAULT_MLS_ORDER;
 use super::consts::PROBE_SEED;
@@ -23,6 +24,7 @@ use super::misc::analyze_clipping;
 use super::misc::check_capture_clipping;
 use super::misc::parse_channel_list;
 use super::misc::prepare_signal;
+#[cfg(feature = "capture-io")]
 use super::playback::CpalPlayback;
 use super::probe::gen_schroeder_narrowband_probe;
 use super::quality::{
@@ -30,13 +32,16 @@ use super::quality::{
     snr_warning_issue, thd_warning_issue, usable_drift_estimate,
 };
 use super::record::active_take_span;
+#[cfg(feature = "capture-io")]
 use super::record::record_and_analyze_with;
+#[cfg(feature = "capture-io")]
 use super::record::record_and_analyze_with_multi;
 use super::record::resample_reference_signal;
 use super::recording_session::RecordingSession;
 use super::signal_params::sweep_params_from_config;
 use super::signal_params::validate_signal_params;
 use super::signal_type::SignalType;
+#[cfg(feature = "capture-io")]
 use super::types::CancelFlag;
 use super::types::ChannelRecordingInfo;
 use super::types::SignalParams;
@@ -47,11 +52,15 @@ use super::write::write_wav_file;
 use hound::SampleFormat;
 use hound::WavReader;
 use math_audio_dsp::analysis::{ClockDriftEstimate, LagEstimate, MeasurementQualityConfig};
-use std::path::{Path, PathBuf};
+#[cfg(feature = "capture-io")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::str::FromStr;
+#[cfg(feature = "capture-io")]
 use std::sync::atomic::Ordering;
 use tempfile::tempdir;
 
+#[cfg(feature = "capture-io")]
 mod misc;
 
 #[test]
@@ -704,6 +713,7 @@ fn test_validate_signal_params_sweep_order() {
 /// Note: This is a compile-time/documentation test. The actual E2E test
 /// should verify that recorded audio differs from input when there's
 /// actual signal processing or latency.
+#[cfg(feature = "capture-io")]
 #[test]
 fn test_record_and_analyze_signature() {
     // This test documents the expected signature of record_and_analyze.
@@ -2906,6 +2916,7 @@ fn prepare_measurement_signal_validates_generates_and_pads() {
     );
 }
 
+#[cfg(feature = "capture-io")]
 #[test]
 fn record_and_analyze_honors_pre_set_cancel_flag() {
     // A flag that is already set must abort before any audio device is
@@ -2938,6 +2949,7 @@ fn record_and_analyze_honors_pre_set_cancel_flag() {
     assert!(!recorded_wav.exists());
 }
 
+#[cfg(feature = "capture-io")]
 #[test]
 fn record_and_analyze_multi_honors_pre_set_cancel_flag() {
     let dir = tempdir().unwrap();

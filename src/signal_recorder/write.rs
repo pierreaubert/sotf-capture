@@ -4,6 +4,7 @@ use std::io::Write as _;
 use std::path::Path;
 use tempfile::NamedTempFile;
 
+#[cfg(feature = "capture-io")]
 pub(super) fn write_selected_channel_to_ring(
     producer: &mut rtrb::Producer<f32>,
     data: &[f32],
@@ -32,6 +33,8 @@ pub(super) fn write_selected_channel_to_ring(
     writable
 }
 
+#[cfg(feature = "capture-io")]
+#[cfg(feature = "capture-io")]
 pub(super) fn write_capture_pairs_to_ring<T>(
     producer: &mut rtrb::Producer<(f32, f32)>,
     data: &[T],
