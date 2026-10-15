@@ -10,7 +10,6 @@ pub(super) fn measurement_amplitude_from_level_db(level_db: f32) -> f32 {
     10.0_f32.powf(level_db.clamp(-40.0, 0.0) / 20.0)
 }
 
-#[cfg(not(target_os = "ios"))]
 pub(super) fn measurement_sample_format_rank(sample_format: cpal::SampleFormat) -> u8 {
     match sample_format {
         cpal::SampleFormat::F32 => 0,

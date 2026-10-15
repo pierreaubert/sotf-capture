@@ -1,11 +1,7 @@
-#[cfg(not(target_os = "ios"))]
 use super::measurement::measurement_sample_format_rank;
-#[cfg(not(target_os = "ios"))]
 use super::types::MeasurementInputConfig;
-#[cfg(not(target_os = "ios"))]
 use super::types::MeasurementOutputConfig;
 
-#[cfg(not(target_os = "ios"))]
 pub(super) fn choose_measurement_output_config(
     supported: &[cpal::SupportedStreamConfigRange],
     min_channels: u16,
@@ -51,7 +47,6 @@ pub(super) fn choose_measurement_output_config(
     })
 }
 
-#[cfg(not(target_os = "ios"))]
 pub(super) fn choose_measurement_input_config(
     supported: &[cpal::SupportedStreamConfigRange],
     min_channels: u16,

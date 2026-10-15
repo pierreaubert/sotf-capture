@@ -5,34 +5,22 @@
 //! of a synchronized recording or permission to render coherent measurements.
 
 use serde::{Deserialize, Serialize};
-#[cfg(not(target_os = "ios"))]
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-#[cfg(not(target_os = "ios"))]
 pub mod analysis;
-#[cfg(not(target_os = "ios"))]
 pub mod clock;
-#[cfg(not(target_os = "ios"))]
 mod coherence;
-#[cfg(not(target_os = "ios"))]
 pub mod ctc;
-#[cfg(not(target_os = "ios"))]
 pub mod handoff;
-#[cfg(not(target_os = "ios"))]
 pub mod localization;
-#[cfg(not(target_os = "ios"))]
 pub mod manifest;
-#[cfg(not(target_os = "ios"))]
 mod phase;
 pub mod protocol;
-#[cfg(not(target_os = "ios"))]
 pub mod record;
-#[cfg(not(target_os = "ios"))]
 pub mod reflections;
 
-#[cfg(not(target_os = "ios"))]
 pub(super) fn digest_lower_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
 
@@ -43,12 +31,11 @@ pub(super) fn digest_lower_hex(bytes: &[u8]) -> String {
     hex
 }
 
-#[cfg(not(target_os = "ios"))]
 pub(super) fn calibration_sha256(bytes: &[u8]) -> String {
     digest_lower_hex(Sha256::digest(bytes).as_ref())
 }
 
-#[cfg(all(test, not(target_os = "ios")))]
+#[cfg(test)]
 mod hash_tests {
     use super::calibration_sha256;
 

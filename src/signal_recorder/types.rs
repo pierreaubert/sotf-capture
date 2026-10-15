@@ -1,15 +1,9 @@
-#[cfg(not(target_os = "ios"))]
 use super::build::build_measurement_input_stream;
-#[cfg(not(target_os = "ios"))]
 use super::build::build_measurement_output_stream;
-#[cfg(not(target_os = "ios"))]
 use super::choose::choose_measurement_input_config;
-#[cfg(not(target_os = "ios"))]
 use super::choose::choose_measurement_output_config;
 use super::consts::CANCELLED_ERR;
-#[cfg(not(target_os = "ios"))]
 use super::misc::actionable_capture_error;
-#[cfg(not(target_os = "ios"))]
 use super::misc::drain_capture;
 use math_audio_dsp::signals::interleave_per_channel;
 use serde::{Deserialize, Serialize};
@@ -112,7 +106,6 @@ pub struct ProbeDelayChannelResult {
 /// Output of [`play_per_channel_and_record_mono`]: the raw mono mic
 /// recording plus everything a caller needs to slice per-channel
 /// segments at the recording's sample rate.
-#[cfg(not(target_os = "ios"))]
 #[derive(Debug)]
 pub(super) struct PlayPerChannelOutput {
     /// Mono mic samples at `input_sr`. Length is determined by how
@@ -141,7 +134,6 @@ pub(super) struct PlayPerChannelOutput {
     pub(super) analysis_silence_samples: usize,
 }
 
-#[cfg(not(target_os = "ios"))]
 #[derive(Debug, Clone, Copy)]
 pub(super) struct MeasurementOutputConfig {
     pub(super) channels: u16,
@@ -149,7 +141,6 @@ pub(super) struct MeasurementOutputConfig {
     pub(super) sample_format: cpal::SampleFormat,
 }
 
-#[cfg(not(target_os = "ios"))]
 #[derive(Debug, Clone, Copy)]
 pub(super) struct MeasurementInputConfig {
     pub(super) channels: u16,
@@ -174,7 +165,6 @@ pub(super) struct MeasurementInputConfig {
 ///
 /// `log_tag` is prefixed into log lines so probe and bass-anchor
 /// captures remain distinguishable in noisy system logs.
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 #[expect(
     clippy::too_many_lines,

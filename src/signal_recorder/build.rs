@@ -1,10 +1,6 @@
-#[cfg(not(target_os = "ios"))]
 use super::misc::actionable_capture_error;
-#[cfg(not(target_os = "ios"))]
 use super::misc::fill_measurement_output;
-#[cfg(not(target_os = "ios"))]
 use super::types::MeasurementOutputConfig;
-#[cfg(not(target_os = "ios"))]
 use super::write::write_capture_pairs_to_ring;
 use math_audio_dsp::signals::gen_log_sweep_octave_scaled;
 use std::sync::Arc;
@@ -54,7 +50,6 @@ pub(super) fn build_octave_sweep_with_silence(
     out
 }
 
-#[cfg(not(target_os = "ios"))]
 pub(super) fn build_measurement_output_stream(
     device: &cpal::Device,
     output_config: MeasurementOutputConfig,
@@ -93,7 +88,6 @@ pub(super) fn build_measurement_output_stream(
     }
 }
 
-#[cfg(not(target_os = "ios"))]
 pub(super) fn build_measurement_output_stream_typed<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -122,7 +116,6 @@ where
         })
 }
 
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_measurement_input_stream(
     device: &cpal::Device,
@@ -170,7 +163,6 @@ pub(super) fn build_measurement_input_stream(
     }
 }
 
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_measurement_input_stream_typed<T>(
     device: &cpal::Device,

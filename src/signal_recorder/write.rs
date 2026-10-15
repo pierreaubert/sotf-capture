@@ -1,11 +1,9 @@
 use hound::{SampleFormat, WavSpec, WavWriter};
 use std::fmt::Write as _;
-#[cfg(not(target_os = "ios"))]
 use std::io::Write as _;
 use std::path::Path;
 use tempfile::NamedTempFile;
 
-#[cfg(not(target_os = "ios"))]
 pub(super) fn write_selected_channel_to_ring(
     producer: &mut rtrb::Producer<f32>,
     data: &[f32],
@@ -34,7 +32,6 @@ pub(super) fn write_selected_channel_to_ring(
     writable
 }
 
-#[cfg(not(target_os = "ios"))]
 pub(super) fn write_capture_pairs_to_ring<T>(
     producer: &mut rtrb::Producer<(f32, f32)>,
     data: &[T],
@@ -130,7 +127,6 @@ pub fn write_wav_file(
 /// Targets outside the source range clamp to the nearest endpoint value. A
 /// bracket spanning a DC (0 Hz) source bin has no log coordinate and falls
 /// back to the upper sample. Empty sources yield zeros.
-#[cfg(not(target_os = "ios"))]
 #[must_use]
 pub fn interpolate_log_frequency_grid(
     source_freqs_hz: &[f32],
@@ -186,7 +182,6 @@ pub fn interpolate_log_frequency_grid(
 ///
 /// # Errors
 /// Returns an error if the destination cannot be created or the CSV cannot be written or flushed.
-#[cfg(not(target_os = "ios"))]
 pub fn write_analysis_csv_extended(
     result: &math_audio_dsp::analysis::AnalysisResult,
     output_path: &Path,
@@ -260,7 +255,7 @@ pub fn write_analysis_csv_extended(
     Ok(())
 }
 
-#[cfg(all(test, not(target_os = "ios")))]
+#[cfg(test)]
 mod tests {
     use super::write_analysis_csv_extended;
     use math_audio_dsp::analysis::AnalysisResult;

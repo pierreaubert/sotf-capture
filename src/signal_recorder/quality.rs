@@ -24,7 +24,6 @@ use crate::quality::{
 use math_audio_dsp::analysis::AnalysisResult;
 use math_audio_dsp::analysis::ClockDriftEstimate;
 use math_audio_dsp::analysis::MeasurementQualityReport;
-#[cfg(not(target_os = "ios"))]
 use math_audio_dsp::analysis::{LagEstimate, MeasurementQualityConfig};
 
 /// Outcome of one capture + analysis pass (`record_and_analyze`,
@@ -78,15 +77,12 @@ pub struct CaptureAnalysis {
 }
 
 /// Minimum drift-estimate confidence before drift is acted upon.
-#[cfg(not(target_os = "ios"))]
 pub(super) const DRIFT_MIN_CONFIDENCE: f32 = 0.2;
 /// |ppm| above which the capture is time-rescaled before analysis (drift
 /// this large means split DAC/ADC clocks, e.g. a USB mic).
-#[cfg(not(target_os = "ios"))]
 pub(super) const DRIFT_CORRECT_PPM: f64 = 20.0;
 /// |ppm| above which the take additionally gets a quality issue: long
 /// sweeps on split-clock setups smear HF phase even after correction.
-#[cfg(not(target_os = "ios"))]
 pub(super) const DRIFT_SEVERE_PPM: f64 = 100.0;
 /// |ppm| above which a drift estimate is physically implausible for an audio
 /// clock (even a drifting USB clock stays within a few hundred ppm) and is
@@ -94,11 +90,9 @@ pub(super) const DRIFT_SEVERE_PPM: f64 = 100.0;
 /// take is flagged for review. Defense-in-depth only — the main protection
 /// against garbage estimates is the correct-then-verify lock check in
 /// `correct_take_clock_drift`.
-#[cfg(not(target_os = "ios"))]
 pub(super) const DRIFT_IMPLAUSIBLE_PPM: f64 = 2000.0;
 
 /// What to do about a measured clock drift.
-#[cfg(not(target_os = "ios"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DriftAction {
     /// No reliable drift estimate, or drift within tolerance.
@@ -120,7 +114,6 @@ pub(super) enum DriftAction {
 /// dilution. Mirrors math-dsp's internal `active_signal_span` threshold
 /// (peak × 1e-6); falls back to the full slice when nothing exceeds the
 /// threshold.
-#[cfg(not(target_os = "ios"))]
 pub(super) fn active_reference_span(reference: &[f32]) -> &[f32] {
     let (start, end) = active_span_bounds(reference);
     &reference[start..end]
@@ -129,12 +122,10 @@ pub(super) fn active_reference_span(reference: &[f32]) -> &[f32] {
 /// Start index of the active (non-padding) content in a prepared reference —
 /// i.e. the length of its leading pre-silence/padding. Used to extend the
 /// noise-floor window through the reference's own pre-silence (Task 8).
-#[cfg(not(target_os = "ios"))]
 pub(super) fn active_reference_start(reference: &[f32]) -> usize {
     active_span_bounds(reference).0
 }
 
-#[cfg(not(target_os = "ios"))]
 fn active_span_bounds(reference: &[f32]) -> (usize, usize) {
     let peak = reference
         .iter()
@@ -159,7 +150,6 @@ fn active_span_bounds(reference: &[f32]) -> (usize, usize) {
 /// Decide whether a clock-drift estimate warrants correction / flagging.
 /// Pure threshold logic, unit-tested without hardware. Drift alone never
 /// fails a take.
-#[cfg(not(target_os = "ios"))]
 pub(super) fn drift_action(drift: Option<&ClockDriftEstimate>) -> DriftAction {
     match drift {
         Some(estimate) if estimate.confidence >= DRIFT_MIN_CONFIDENCE => {
@@ -184,7 +174,6 @@ pub(super) fn drift_action(drift: Option<&ClockDriftEstimate>) -> DriftAction {
 /// (the sweep end locks at the sweep start) — so it degrades to `None`
 /// and the verdict renders `drift n/a` instead of a scary impossible
 /// value. Mirrors the gate inside [`drift_action`].
-#[cfg(not(target_os = "ios"))]
 pub(super) fn usable_drift_estimate(
     drift: Option<ClockDriftEstimate>,
 ) -> Option<ClockDriftEstimate> {
@@ -195,7 +184,6 @@ pub(super) fn usable_drift_estimate(
 
 /// Run `estimate_lag_with_confidence`, mapping estimation failure to the
 /// same actionable advice as the confidence gate.
-#[cfg(not(target_os = "ios"))]
 pub(super) fn estimate_lag_or_advise(
     reference: &[f32],
     recorded: &[f32],
@@ -211,7 +199,6 @@ pub(super) fn estimate_lag_or_advise(
 }
 
 /// Estimate sweep arrival with speaker/room coloration tolerance.
-#[cfg(not(target_os = "ios"))]
 pub(super) fn estimate_sweep_lag_or_advise(
     reference: &[f32],
     recorded: &[f32],
@@ -227,7 +214,6 @@ pub(super) fn estimate_sweep_lag_or_advise(
 /// The accepted estimate is passed into analysis rather than calculated again.
 /// Wake probes retain generic correlation; acoustic sweeps use the weighted
 /// envelope estimator and its validated minimum confidence.
-#[cfg(not(target_os = "ios"))]
 pub(super) fn check_lag_lock(lag: &LagEstimate, log_tag: &str) -> Result<(), String> {
     let minimum = MeasurementQualityConfig::default().minimum_lag_confidence;
     if !lag.confidence.is_finite() || lag.confidence < minimum {
@@ -244,7 +230,6 @@ pub(super) fn check_lag_lock(lag: &LagEstimate, log_tag: &str) -> Result<(), Str
 /// Peak Farina harmonic-only THD (%) above which a sweep gets a warning.
 /// Broadband residual noise is not included, so this is not THD+N.
 /// The threshold warns when the deconvolved response may be nonlinear.
-#[cfg(not(target_os = "ios"))]
 #[expect(
     clippy::cast_possible_truncation,
     reason = "The shared integer-valued threshold is exactly representable as f32."
@@ -255,7 +240,6 @@ pub(super) const THD_WARN_PERCENT: f32 = THD_WARNING_THRESHOLD_PERCENT as f32;
 /// issue. Repeat captures get the finer spectral assessment from math-dsp
 /// instead (`minimum_median_snr_db`, same 10 dB default); single takes
 /// supply no measured/noise pair, so broadband RMS stands in.
-#[cfg(not(target_os = "ios"))]
 #[expect(
     clippy::cast_possible_truncation,
     reason = "The shared integer-valued threshold is exactly representable as f32."
@@ -266,7 +250,6 @@ pub(super) const SNR_WARN_DB: f32 = SINGLE_TAKE_SNR_THRESHOLD_DB as f32;
 /// are excluded from the THD verdict: where the room (or the excitation)
 /// has a deep null, the Farina harmonic windows measure noise against a
 /// near-zero fundamental and the ratio is meaningless.
-#[cfg(not(target_os = "ios"))]
 const THD_FUNDAMENTAL_GATE_DB: f32 = 20.0;
 
 /// Advisory issue when peak THD exceeds [`THD_WARN_PERCENT`], naming the
@@ -278,7 +261,6 @@ const THD_FUNDAMENTAL_GATE_DB: f32 = 20.0;
 /// from separated second through fifth harmonic impulse responses; it does
 /// not include broadband noise. The three slices pair by index;
 /// length mismatches shorten the comparison to the shared prefix.
-#[cfg(not(target_os = "ios"))]
 pub(super) fn thd_warning_issue(
     frequencies: &[f32],
     thd_percent: &[f32],
@@ -340,7 +322,6 @@ fn thd_peak(
 /// is empty, when either RMS is zero (digital silence means infinite SNR,
 /// and a fully dead take never survives the lag gate), or when the SNR is
 /// finite and at/above the threshold.
-#[cfg(not(target_os = "ios"))]
 pub(super) fn snr_warning_issue(active: &[f32], silence: &[f32]) -> Option<String> {
     let snr_db = broadband_snr_db(active, silence)?;
     if snr_db < f64::from(SNR_WARN_DB) {
@@ -377,7 +358,6 @@ fn broadband_snr_db(active: &[f32], silence: &[f32]) -> Option<f64> {
 }
 
 /// Estimator inputs shared by the structured quality checks.
-#[cfg(not(target_os = "ios"))]
 #[derive(Debug, Clone, Copy)]
 pub(super) struct QualityAnalysis<'a> {
     pub recorded: &'a [f32],
@@ -392,7 +372,6 @@ pub(super) struct QualityAnalysis<'a> {
 }
 
 /// Build typed findings using the same estimator inputs and thresholds as the legacy verdict.
-#[cfg(not(target_os = "ios"))]
 #[expect(
     clippy::too_many_lines,
     reason = "The report lists each quality metric and its threshold in one place for auditing."
@@ -574,7 +553,6 @@ pub(super) fn structured_quality_findings(analysis: QualityAnalysis<'_>) -> Vec<
 /// `extra_issues` (e.g. the severe-drift advisory) are appended and force
 /// `trustworthy = false`, keeping the flag consistent with a non-empty
 /// issue list.
-#[cfg(not(target_os = "ios"))]
 pub(super) fn build_capture_quality(
     recorded: &[f32],
     lag: &LagEstimate,
@@ -614,7 +592,6 @@ pub(super) fn build_capture_quality(
 /// Log the quality verdict for a take. Untrustworthy takes do not fail the
 /// capture (the silence/clip/lag gates already hard-fail); they surface as a
 /// warning until the UI confirmation flow lands (Task 9).
-#[cfg(not(target_os = "ios"))]
 pub(super) fn log_capture_quality(report: &MeasurementQualityReport, log_tag: &str) {
     if report.trustworthy {
         log::info!(

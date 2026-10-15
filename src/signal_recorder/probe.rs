@@ -1,12 +1,10 @@
 use super::consts::DEFAULT_AUXILIARY_SIGNAL_LEVEL_DB;
 use super::measurement::measurement_amplitude_from_level_db;
-#[cfg(not(target_os = "ios"))]
 use super::record::resample_reference_signal;
 use super::types::CancelFlag;
 use super::types::ProbeDelayChannelResult;
 use super::types::ProbeDelayResults;
 use super::types::pick_direct_arrival_from_envelope;
-#[cfg(not(target_os = "ios"))]
 use super::types::play_per_channel_and_record_mono;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use math_audio_dsp::stft::RealFftProcessor;
@@ -114,7 +112,6 @@ pub(super) fn gen_schroeder_narrowband_probe(
 ///
 /// # Errors
 /// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 pub fn probe_channel_delays(
     channel_indices: &[u16],
@@ -166,7 +163,6 @@ pub fn probe_channel_delays(
 ///
 /// # Errors
 /// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 #[expect(
     clippy::needless_pass_by_value,
@@ -238,7 +234,6 @@ pub fn probe_channel_delays_with_recording(
 /// **negotiated** input sample rate (which may differ from the
 /// requested `sample_rate` argument if the hardware doesn't support
 /// it).
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 #[expect(
     clippy::too_many_lines,

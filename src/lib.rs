@@ -13,14 +13,9 @@
 // Rust guideline compliant 2026-02-21
 
 pub mod capture_session;
-#[cfg(not(target_os = "ios"))]
 pub mod devices;
-#[cfg(target_os = "ios")]
-mod devices_stub;
-#[cfg(not(target_os = "ios"))]
+pub mod ios;
 pub mod live_level;
-#[cfg(target_os = "ios")]
-pub use devices_stub as devices;
 pub mod quality;
 pub mod rate_limit;
 pub mod recording_helpers;

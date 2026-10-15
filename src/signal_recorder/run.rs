@@ -5,7 +5,6 @@ use super::types::BassAnchorResults;
 use super::types::CancelFlag;
 use super::types::SplCalibrationResult;
 use super::types::analyze_bass_anchor_recording;
-#[cfg(not(target_os = "ios"))]
 use super::types::play_per_channel_and_record_mono;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use math_audio_dsp::signals::gen_tone;
@@ -34,7 +33,6 @@ use math_audio_dsp::signals::gen_tone;
 ///
 /// # Errors
 /// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 #[expect(
     clippy::needless_pass_by_value,
@@ -84,7 +82,6 @@ pub fn run_bass_anchor(
 ///
 /// # Errors
 /// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 #[expect(
     clippy::needless_pass_by_value,
@@ -181,7 +178,6 @@ pub fn run_bass_anchor_with_recording(
     Ok(results)
 }
 
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn run_bass_anchor_core(
     channel_indices: &[u16],
@@ -306,7 +302,6 @@ fn run_bass_anchor_core(
 ///
 /// # Errors
 /// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 #[expect(
     clippy::needless_pass_by_value,
@@ -432,7 +427,7 @@ pub fn run_spl_calibration(
     Ok(result)
 }
 
-#[cfg(all(test, not(target_os = "ios")))]
+#[cfg(test)]
 mod spl_tests {
     use super::run_spl_calibration;
 

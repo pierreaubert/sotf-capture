@@ -7,6 +7,10 @@ _default:
 check:
     {{cargo}} check --workspace --all-targets
 
+# Full capture path (cpal CoreAudio/RemoteIO) for iPhones/iPads; see docs/ios.md.
+check-ios:
+    {{cargo}} check -p sotf-capture --target aarch64-apple-ios --all-targets
+
 alias lint := clippy
 
 clippy:

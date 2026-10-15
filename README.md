@@ -17,7 +17,9 @@ has one owner.
 - `wizard`: UI-agnostic `RecordingScreenModel` shared by GPUI/TUI/CLI.
 - `signal_recorder`: stimulus generation, play/record takes, analysis.
 - `signal_recorder::playback`: output backends behind `SweepPlayback`.
-- `devices`: audio device lookup (stubbed on iOS).
+- `devices`: audio device lookup (cpal CoreAudio/RemoteIO backend on iOS).
+- `ios`: iOS route-model helpers (native rates, built-in channel limits);
+  the app still owns `AVAudioSession` setup — see the iOS section below.
 
 ## Playback backends
 
@@ -262,3 +264,48 @@ clock still fits; the estimator detects the LF take, reports band
 wide σ rather than refusing. Expect decimetre-level sigmas on sub
 ranges — that is the honest precision of a 300 Hz signal, not a
 failure.
+
+## iOS
+
+The full capture path (device lookup, sweep playback, recording,
+clock correction, session handoff) builds for `aarch64-apple-ios`
+through cpal's CoreAudio/RemoteIO backend:
+
+```bash
+just check-ios
+```
+
+What Rust cannot do is configure the OS audio session — the hosting
+app must do that before the first stream opens, otherwise input
+streams fail with permission errors:
+
+```swift
+import AVFoundation
+
+let session = AVAudioSession.sharedInstance()
+try session.setCategory(.playAndRecord, mode: .measurement,
+                        options: [.defaultToSpeaker])
+try session.setPreferredSampleRate(48_000)
+try session.setPreferredIOBufferDuration(0.005)
+try session.setActive(true)
+// iOS 17+: AVAudioApplication.requestRecordPermission;
+// earlier: AVAudioSession.requestRecordPermission.
+```
+
+`Info.plist` must contain `NSMicrophoneUsageDescription`. Observe
+`AVAudioSession.routeChangeNotification` and re-run device selection
+when headphones or a USB interface connect: iOS owns route
+selection, so pass `None` (default device) instead of a saved desktop
+device ID, which never resolves on iOS.
+
+iOS model vs. desktop: one route at a time (built-in, headset, or one
+USB interface via Camera Adapter); the rate is 44.1 or 48 kHz per
+route — `ios::negotiate_sample_rate` keeps the sweep grid on a native
+rate instead of drifting through hidden OS resampling. Built-in input
+is mono (`ios::check_builtin_input_channels`); stereo and wider needs
+a USB interface. Bluetooth HFP routes run at voice rates: monitoring
+only, never measure through them. For a cargo-built app (e.g. the
+GPUI iOS target) depend on this crate normally; for an Xcode/Swift
+app add `crate-type = ["staticlib"]` to a wrapper crate over the
+capture calls. Verify takes on a real device — the simulator produces
+fake audio, so its clock and level QA numbers are meaningless.

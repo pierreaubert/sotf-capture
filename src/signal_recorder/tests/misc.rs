@@ -1,9 +1,6 @@
-#[cfg(not(target_os = "ios"))]
 use super::super::choose::choose_measurement_input_config;
-#[cfg(not(target_os = "ios"))]
 use super::super::choose::choose_measurement_output_config;
 
-#[cfg(not(target_os = "ios"))]
 fn supported_stream_config(
     sample_format: cpal::SampleFormat,
     channels: u16,
@@ -19,7 +16,6 @@ fn supported_stream_config(
     )
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 fn measurement_output_config_accepts_pipewire_s24() {
     let configs = vec![supported_stream_config(
@@ -37,7 +33,6 @@ fn measurement_output_config_accepts_pipewire_s24() {
     assert_eq!(selected.sample_format, cpal::SampleFormat::I24);
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 fn measurement_input_config_accepts_pipewire_s24() {
     let configs = vec![supported_stream_config(
@@ -55,7 +50,6 @@ fn measurement_input_config_accepts_pipewire_s24() {
     assert_eq!(selected.sample_format, cpal::SampleFormat::I24);
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 fn measurement_config_prefers_float_then_24_bit_integer() {
     let configs = vec![
@@ -71,7 +65,6 @@ fn measurement_config_prefers_float_then_24_bit_integer() {
     assert_eq!(selected.sample_format, cpal::SampleFormat::F32);
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 fn measurement_config_prefers_24_bit_integer_over_16_bit() {
     let configs = vec![

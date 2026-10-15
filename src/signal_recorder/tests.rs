@@ -20,31 +20,23 @@ use super::misc::CLIP_BLOCK_SAMPLES;
 use super::misc::CLIP_THRESHOLD;
 use super::misc::actionable_capture_error;
 use super::misc::analyze_clipping;
-#[cfg(not(target_os = "ios"))]
 use super::misc::check_capture_clipping;
 use super::misc::parse_channel_list;
 use super::misc::prepare_signal;
-#[cfg(not(target_os = "ios"))]
 use super::playback::CpalPlayback;
 use super::probe::gen_schroeder_narrowband_probe;
-#[cfg(not(target_os = "ios"))]
 use super::quality::{
     DriftAction, build_capture_quality, check_lag_lock, drift_action, estimate_lag_or_advise,
     snr_warning_issue, thd_warning_issue, usable_drift_estimate,
 };
-#[cfg(not(target_os = "ios"))]
 use super::record::active_take_span;
-#[cfg(not(target_os = "ios"))]
 use super::record::record_and_analyze_with;
-#[cfg(not(target_os = "ios"))]
 use super::record::record_and_analyze_with_multi;
-#[cfg(not(target_os = "ios"))]
 use super::record::resample_reference_signal;
 use super::recording_session::RecordingSession;
 use super::signal_params::sweep_params_from_config;
 use super::signal_params::validate_signal_params;
 use super::signal_type::SignalType;
-#[cfg(not(target_os = "ios"))]
 use super::types::CancelFlag;
 use super::types::ChannelRecordingInfo;
 use super::types::SignalParams;
@@ -54,11 +46,9 @@ use super::write::write_temp_wav;
 use super::write::write_wav_file;
 use hound::SampleFormat;
 use hound::WavReader;
-#[cfg(not(target_os = "ios"))]
 use math_audio_dsp::analysis::{ClockDriftEstimate, LagEstimate, MeasurementQualityConfig};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-#[cfg(not(target_os = "ios"))]
 use std::sync::atomic::Ordering;
 use tempfile::tempdir;
 
@@ -103,7 +93,6 @@ fn schroeder_probe_rejects_too_few_tones_and_invalid_amplitude() {
     assert!((peak - 1.0).abs() < 1e-4);
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 fn schroeder_probe_cross_rate_reference_resamples_exact_playback_signal() {
     for duration_ms in [125.0_f32, 137.3] {
@@ -119,7 +108,6 @@ fn schroeder_probe_cross_rate_reference_resamples_exact_playback_signal() {
     }
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 fn reference_resampling_tracks_the_capture_sample_rate() {
     let input: Vec<f32> = (0..4_410)
@@ -133,7 +121,6 @@ fn reference_resampling_tracks_the_capture_sample_rate() {
     );
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 fn reference_resampling_removes_filter_delay() {
     let mut input = vec![0.0f32; 4_410];
@@ -154,7 +141,6 @@ fn reference_resampling_removes_filter_delay() {
     );
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 fn reference_resampling_preserves_late_signal_content() {
     let mut input = vec![0.0f32; 4_410];
@@ -772,7 +758,6 @@ fn test_record_and_analyze_signature() {
 
 // --- Task 7: lag-lock gate, drift thresholds, quality wrapper ---
 
-#[cfg(not(target_os = "ios"))]
 fn lag_estimate_with_confidence(confidence: f32) -> LagEstimate {
     LagEstimate {
         lag_samples: 100,
@@ -782,7 +767,6 @@ fn lag_estimate_with_confidence(confidence: f32) -> LagEstimate {
     }
 }
 
-#[cfg(not(target_os = "ios"))]
 fn drift_estimate(ppm: f64, confidence: f32) -> ClockDriftEstimate {
     ClockDriftEstimate {
         ppm,
@@ -793,7 +777,6 @@ fn drift_estimate(ppm: f64, confidence: f32) -> ClockDriftEstimate {
 }
 
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn usable_drift_estimate_suppresses_low_confidence_garbage() {
     // No estimate stays None.
     assert!(usable_drift_estimate(None).is_none());
@@ -817,7 +800,6 @@ fn usable_drift_estimate_suppresses_low_confidence_garbage() {
 }
 
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn test_drift_action_thresholds() {
     // No estimate, or a low-confidence estimate, never corrects.
     assert_eq!(drift_action(None), DriftAction::None);
@@ -859,7 +841,6 @@ fn test_drift_action_thresholds() {
 }
 
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn test_lag_lock_gate_threshold() {
     let minimum = MeasurementQualityConfig::default().minimum_lag_confidence;
     assert!(check_lag_lock(&lag_estimate_with_confidence(minimum), "test").is_ok());
@@ -875,7 +856,6 @@ fn test_lag_lock_gate_threshold() {
 }
 
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn test_build_capture_quality_clean_take_is_trustworthy() {
     let lag = lag_estimate_with_confidence(0.9);
     let clean = vec![0.0_f32; 4096];
@@ -891,7 +871,6 @@ fn test_build_capture_quality_clean_take_is_trustworthy() {
 }
 
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn test_build_capture_quality_extra_issue_marks_untrustworthy() {
     let lag = lag_estimate_with_confidence(0.9);
     let clean = vec![0.0_f32; 4096];
@@ -915,7 +894,6 @@ fn test_build_capture_quality_extra_issue_marks_untrustworthy() {
 }
 
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn test_build_capture_quality_flags_clipping() {
     let lag = lag_estimate_with_confidence(0.9);
     // 1% of samples at full scale — above the 0.1% default clip threshold
@@ -935,7 +913,6 @@ fn test_build_capture_quality_flags_clipping() {
 }
 
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn test_active_reference_span_trims_padding() {
     let mut padded = vec![0.0_f32; 4800];
     padded.extend_from_slice(&[0.5, -0.5, 0.25]);
@@ -952,7 +929,6 @@ fn test_active_reference_span_trims_padding() {
 /// high confidence at exactly the injected lag, with negligible measured
 /// clock drift.
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn test_lag_and_drift_on_delayed_sweep() {
     let sample_rate = 48_000_u32;
     let sweep = math_audio_dsp::signals::gen_log_sweep(20.0, 20_000.0, 0.5, sample_rate, 1.0);
@@ -998,7 +974,6 @@ fn test_lag_and_drift_on_delayed_sweep() {
 
 /// Timing-chirp fixture mirroring the `capture_session` protocol: 100 ms
 /// 2–8 kHz log sweep with 5 ms tapers.
-#[cfg(not(target_os = "ios"))]
 fn timing_chirp(sample_rate: u32) -> Vec<f32> {
     use math_audio_dsp::signals::{apply_fade_in, apply_fade_out, try_gen_log_sweep};
     let mut chirp = try_gen_log_sweep(2000.0, 8000.0, 0.5, sample_rate, 0.1).unwrap();
@@ -1020,7 +995,6 @@ fn timing_chirp(sample_rate: u32) -> Vec<f32> {
 /// removed once the pin moved to the fixed release). Tolerance is generous
 /// against the sub-sample interpolation error (measured ≈0.5 ppm).
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn test_clock_drift_estimate_and_correct_roundtrip() {
     let sample_rate = 48_000_u32;
     let chirp = timing_chirp(sample_rate);
@@ -1104,7 +1078,6 @@ fn test_clock_drift_estimate_and_correct_roundtrip() {
 /// advised. Chirpless takes skip with `None` (see the analyze path);
 /// this proves the chirped branch stays live.
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn chirped_take_drift_corrects_and_advises() {
     let sample_rate = 48_000_u32;
     let injected_ppm = 150.0_f64;
@@ -1168,7 +1141,6 @@ fn chirped_take_drift_corrects_and_advises() {
 /// Item 5: on in-loop cancel, a `manager.stop()` failure must not mask the
 /// cancellation — `CANCELLED_ERR` always wins.
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn cancel_aware_stop_lets_cancel_win_over_stop_failure() {
     use super::record::cancel_aware_stop;
 
@@ -1183,7 +1155,6 @@ fn cancel_aware_stop_lets_cancel_win_over_stop_failure() {
 
 /// A1: estimates above `DRIFT_IMPLAUSIBLE_PPM` are never applied.
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn drift_action_rejects_physically_implausible_estimates() {
     let mk = |ppm: f64| ClockDriftEstimate {
         ppm,
@@ -1211,7 +1182,6 @@ fn drift_action_rejects_physically_implausible_estimates() {
 /// A1: the correct-then-verify step discards a "correction" that collapses
 /// the lag lock and keeps one that preserves it.
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn correction_keeps_lock_detects_collapsed_lock() {
     let sample_rate = 48_000_u32;
     let reference = padded_sweep_reference(sample_rate);
@@ -1242,7 +1212,6 @@ fn correction_keeps_lock_detects_collapsed_lock() {
     ));
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 fn discarded_drift_correction_has_user_visible_quality_advisory() {
     let message = super::record::drift_correction_discard_message(50.0);
@@ -1254,7 +1223,6 @@ fn discarded_drift_correction_has_user_visible_quality_advisory() {
 // --- Task 8: repeat-sweep averaging, coherence, extended CSV ---
 
 /// Deterministic xorshift PRNG returning samples in [-1, 1).
-#[cfg(not(target_os = "ios"))]
 fn xorshift_noise(state: &mut u64) -> f32 {
     *state ^= *state << 13;
     *state ^= *state >> 7;
@@ -1262,7 +1230,6 @@ fn xorshift_noise(state: &mut u64) -> f32 {
     ((*state >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
 }
 
-#[cfg(not(target_os = "ios"))]
 fn convolve(signal: &[f32], ir: &[f32]) -> Vec<f32> {
     let mut out = vec![0.0_f32; signal.len() + ir.len() - 1];
     for (i, &x) in signal.iter().enumerate() {
@@ -1280,7 +1247,6 @@ fn convolve(signal: &[f32], ir: &[f32]) -> Vec<f32> {
 /// 100 ms of pre-roll room noise, the convolved sweep with additive noise,
 /// then a digital-silence tail (keeps the lag estimator's max-candidate-lag
 /// edge case dormant — see the Task-7 ledger note on 1-sample overlaps).
-#[cfg(not(target_os = "ios"))]
 fn simulate_sweep_take(reference: &[f32], ir: &[f32], noise_amp: f32, seed: u64) -> Vec<f32> {
     let mut state = seed | 1;
     let mut take: Vec<f32> = (0..4800)
@@ -1301,7 +1267,6 @@ fn simulate_sweep_take(reference: &[f32], ir: &[f32], noise_amp: f32, seed: u64)
 /// estimator's extreme-candidate-lag (few-sample) overlaps then have zero
 /// variance on the reference side and cannot outscore the true peak (see the
 /// Task-7 ledger note on the lag-estimator edge fragility).
-#[cfg(not(target_os = "ios"))]
 fn padded_sweep_reference(sample_rate: u32) -> Vec<f32> {
     let mut reference =
         math_audio_dsp::signals::gen_log_sweep(20.0, 20_000.0, 0.5, sample_rate, 1.0);
@@ -1311,7 +1276,6 @@ fn padded_sweep_reference(sample_rate: u32) -> Vec<f32> {
 
 /// A plausible room IR: direct + two discrete reflections + a short
 /// exponentially decaying diffuse tail.
-#[cfg(not(target_os = "ios"))]
 fn test_room_ir() -> Vec<f32> {
     let mut ir = vec![0.0_f32; 512];
     ir[0] = 0.5;
@@ -1327,7 +1291,6 @@ fn test_room_ir() -> Vec<f32> {
 /// A grossly different "room" — the deconvolved response of a take captured
 /// through this IR is a global outlier against `test_room_ir` takes and must
 /// be median/MAD-rejected.
-#[cfg(not(target_os = "ios"))]
 fn grossly_different_ir() -> Vec<f32> {
     let mut ir = vec![0.0_f32; 512];
     ir[0] = 0.3;
@@ -1342,7 +1305,6 @@ fn grossly_different_ir() -> Vec<f32> {
 /// new CSV columns (still parseable by math-dsp's positional reader),
 /// preserve the raw takes, and report truthful take counts.
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn test_repeat_sweep_averaging_rejects_outlier_and_extends_csv() {
     let sample_rate = 48_000_u32;
     let reference = padded_sweep_reference(sample_rate);
@@ -1463,7 +1425,6 @@ fn test_repeat_sweep_averaging_rejects_outlier_and_extends_csv() {
 /// without tripping the hard-clip abort (tanh saturation peaks below the
 /// 0.999 clip threshold).
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn distorted_sweep_take_warns_high_thd() {
     let sample_rate = 48_000_u32;
     let reference = padded_sweep_reference(sample_rate);
@@ -1505,7 +1466,6 @@ fn distorted_sweep_take_warns_high_thd() {
 /// still locking (long-sweep processing gain beats the noise), proving the
 /// single-take SNR path that math-dsp's spectral assessment cannot supply.
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn noisy_sweep_take_warns_low_snr() {
     let sample_rate = 48_000_u32;
     let reference = padded_sweep_reference(sample_rate);
@@ -1537,7 +1497,6 @@ fn noisy_sweep_take_warns_low_snr() {
 }
 
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn unlocked_single_take_preserves_raw_wav() {
     let sample_rate = 48_000_u32;
     let reference = padded_sweep_reference(sample_rate);
@@ -1570,7 +1529,6 @@ fn unlocked_single_take_preserves_raw_wav() {
 }
 
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn unlocked_take_preservation_failure_keeps_original_error() {
     let sample_rate = 48_000_u32;
     let reference = padded_sweep_reference(sample_rate);
@@ -1604,7 +1562,6 @@ fn unlocked_take_preservation_failure_keeps_original_error() {
 /// than fabricate an all-ones one, while the real noise floor is still
 /// written.
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn test_repeat_sweep_three_takes_omits_coherence_column() {
     let sample_rate = 48_000_u32;
     let reference = padded_sweep_reference(sample_rate);
@@ -1664,7 +1621,6 @@ fn test_repeat_sweep_three_takes_omits_coherence_column() {
 /// A take that never locks (pure noise) aborts the whole set — REW abort
 /// semantics, no silent partial average — before any WAV is written.
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn test_repeat_sweep_aborts_when_a_take_loses_lock() {
     let sample_rate = 48_000_u32;
     let reference = padded_sweep_reference(sample_rate);
@@ -1707,7 +1663,6 @@ fn test_repeat_sweep_aborts_when_a_take_loses_lock() {
 /// keeps the None-metrics — but the CSV still gains the real noise-floor
 /// column from the pre-silence window.
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn test_single_take_behavior_with_noise_floor_column() {
     let sample_rate = 48_000_u32;
     let reference = padded_sweep_reference(sample_rate);
@@ -1762,7 +1717,6 @@ fn test_single_take_behavior_with_noise_floor_column() {
 /// Log-frequency interpolation onto the CSV grid: log-linear between
 /// bracketing points, endpoint clamping, DC-bracket fallback.
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn test_interpolate_log_frequency_grid() {
     let source_freqs = [0.0_f32, 100.0, 1_000.0, 10_000.0];
     let source_values = [9.0_f32, 0.0, 10.0, 20.0];
@@ -2722,7 +2676,6 @@ fn analyze_clipping_reports_worst_block() {
     assert!((stats.max_block_clip_percent - 100.0).abs() < 1e-6);
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 fn check_capture_clipping_aborts_only_on_heavily_clipped_block() {
     // >30% of one block clipped → Err (REW abort rule).
@@ -2742,7 +2695,6 @@ fn check_capture_clipping_aborts_only_on_heavily_clipped_block() {
     assert!(check_capture_clipping(&[0.25f32; 4096], "test").is_ok());
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 fn check_capture_clipping_ignores_undersized_tail_block() {
     // Task 10: a capture whose length is ≡ small mod CLIP_BLOCK_SAMPLES with
@@ -2767,7 +2719,6 @@ fn check_capture_clipping_ignores_undersized_tail_block() {
 }
 
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn thd_warning_issue_flags_peak_above_threshold() {
     let issue = thd_warning_issue(
         &[20.0, 100.0, 1000.0],
@@ -2793,7 +2744,6 @@ fn thd_warning_issue_flags_peak_above_threshold() {
 }
 
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn thd_warning_issue_ignores_nulls_nonfinite_and_shortens_mismatch() {
     assert!(thd_warning_issue(&[], &[], &[], Some((20.0, 20_000.0))).is_none());
     assert!(thd_warning_issue(&[100.0], &[f32::NAN], &[0.0], Some((20.0, 20_000.0))).is_none());
@@ -2823,7 +2773,6 @@ fn thd_warning_issue_ignores_nulls_nonfinite_and_shortens_mismatch() {
 }
 
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn thd_warning_issue_ignores_peaks_outside_the_sweep_band() {
     // The out-of-band peak is ignored even though it sits at a strong
     // fundamental bin; only the declared 1–2 kHz measurement band is judged.
@@ -2839,7 +2788,6 @@ fn thd_warning_issue_ignores_peaks_outside_the_sweep_band() {
 }
 
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn thd_control_uses_80_to_16000_hz_for_warnings_and_findings() {
     use crate::quality::{QualityMetric, QualityStatus};
 
@@ -2877,7 +2825,6 @@ fn thd_control_uses_80_to_16000_hz_for_warnings_and_findings() {
 }
 
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn snr_warning_issue_flags_low_broadband_snr() {
     let loud = vec![1.0_f32; 1024];
     // 20 dB SNR stays quiet.
@@ -2891,7 +2838,6 @@ fn snr_warning_issue_flags_low_broadband_snr() {
 }
 
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn snr_warning_issue_ignores_degenerate_windows() {
     let loud = vec![1.0_f32; 1024];
     let silent = vec![0.0_f32; 1024];
@@ -2904,7 +2850,6 @@ fn snr_warning_issue_ignores_degenerate_windows() {
 }
 
 #[test]
-#[cfg(not(target_os = "ios"))]
 fn active_take_span_lands_reference_active_content() {
     // Reference without padding: the full reference length from lag on.
     let reference = vec![1.0_f32; 100];
@@ -2961,7 +2906,6 @@ fn prepare_measurement_signal_validates_generates_and_pads() {
     );
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 fn record_and_analyze_honors_pre_set_cancel_flag() {
     // A flag that is already set must abort before any audio device is
@@ -2994,7 +2938,6 @@ fn record_and_analyze_honors_pre_set_cancel_flag() {
     assert!(!recorded_wav.exists());
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 fn record_and_analyze_multi_honors_pre_set_cancel_flag() {
     let dir = tempdir().unwrap();
@@ -3147,7 +3090,6 @@ fn stipa_generate_analyze_no_reference_recovers_sent_depth() {
     assert!(absolute.sti > 0.70, "sti={}", absolute.sti);
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 fn lag_gate_excludes_partial_overlap_self_match() {
     // The full sweep planted with deterministic noise (reads ~0.85) plus an
@@ -3189,7 +3131,6 @@ fn lag_gate_excludes_partial_overlap_self_match() {
     assert!(check_lag_lock(&lag, "test").is_ok());
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 fn lag_gate_dead_take_fails_honestly() {
     let reference = prepare_measurement_signal(
@@ -3208,7 +3149,6 @@ fn lag_gate_dead_take_fails_honestly() {
     assert!(err.contains("No reliable signal lock"), "{err}");
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 fn lag_gate_short_take_bypasses_exclusion() {
     // A take shorter than the reference can only lock partially; the
@@ -3230,7 +3170,6 @@ fn lag_gate_short_take_bypasses_exclusion() {
     assert_eq!(lag.lag_samples, 0);
 }
 
-#[cfg(not(target_os = "ios"))]
 #[test]
 #[ignore = "requires SOTF_SWEEP_LOCK_WAV pointing to a local 5-second 20–20000 Hz take"]
 fn fireface_sweep_lock_local_regression() {

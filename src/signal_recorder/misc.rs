@@ -71,7 +71,6 @@ pub fn analyze_clipping(samples: &[f32]) -> ClipStats {
 /// Inspect a captured buffer for clipping: logs a warning once clipping
 /// exceeds [`CLIP_WARN_PERCENT`] overall and returns `Err` when any block
 /// exceeds [`CLIP_ABORT_BLOCK_PERCENT`] (REW's abort rule).
-#[cfg(not(target_os = "ios"))]
 pub(super) fn check_capture_clipping(samples: &[f32], log_tag: &str) -> Result<(), String> {
     let stats = analyze_clipping(samples);
     if stats.max_block_clip_percent > CLIP_ABORT_BLOCK_PERCENT {
@@ -94,7 +93,6 @@ pub(super) fn check_capture_clipping(samples: &[f32], log_tag: &str) -> Result<(
     Ok(())
 }
 
-#[cfg(not(target_os = "ios"))]
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -108,7 +106,6 @@ pub(super) fn capture_capacity(
     ((duration_secs + extra_tail_secs).max(1.0) * f64::from(sample_rate)).ceil() as usize
 }
 
-#[cfg(not(target_os = "ios"))]
 pub(super) fn drain_capture<T>(consumer: &mut rtrb::Consumer<T>, expected_len: usize) -> Vec<T> {
     let mut out = Vec::with_capacity(expected_len);
     while let Ok(sample) = consumer.pop() {
@@ -179,7 +176,6 @@ pub fn prepare_signal(signal: Vec<f32>, sample_rate: u32) -> Vec<f32> {
     prepare_signal_for_playback(signal, sample_rate, FADE_MS, PADDING_MS)
 }
 
-#[cfg(not(target_os = "ios"))]
 pub(super) fn fill_measurement_output<T>(
     data: &mut [T],
     playback: &[f32],

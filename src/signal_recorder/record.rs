@@ -1,30 +1,20 @@
 // Rust guideline compliant 2026-02-21
 
-#[cfg(not(target_os = "ios"))]
 use super::consts::CANCELLED_ERR;
-#[cfg(not(target_os = "ios"))]
 use super::consts::MIN_REPEAT_SWEEPS;
-#[cfg(not(target_os = "ios"))]
 use super::misc::actionable_capture_error;
-#[cfg(not(target_os = "ios"))]
 use super::misc::check_capture_clipping;
-#[cfg(not(target_os = "ios"))]
 use super::quality::CaptureAnalysis;
-#[cfg(not(target_os = "ios"))]
 use super::quality::{
     DriftAction, build_capture_quality, check_lag_lock, drift_action, log_capture_quality,
 };
-#[cfg(not(target_os = "ios"))]
 use super::types::{CancelFlag, cancel_requested};
 use super::write::write_wav_file;
-#[cfg(not(target_os = "ios"))]
 use super::write::{interpolate_log_frequency_grid, write_analysis_csv_extended};
-#[cfg(not(target_os = "ios"))]
 use crate::quality::{
     QualityFinding, QualityMethod, QualityMetric, QualityPolicy, QualityThreshold, QualityUnit,
     ThresholdComparison,
 };
-#[cfg(not(target_os = "ios"))]
 use math_audio_dsp::analysis::{
     ClockDriftEstimate, LagEstimate, MeasurementQualityConfig, MicrophoneCompensation,
     analyze_recording_with_lag,
@@ -33,16 +23,13 @@ use std::path::{Path, PathBuf};
 
 /// Pause between repeat-sweep takes, letting the room decay and the device
 /// streams settle between play/record cycles.
-#[cfg(not(target_os = "ios"))]
 const INTER_TAKE_SETTLE_MS: u64 = 300;
 
 /// Minimum pre-sweep room-noise window (samples) for a usable noise-floor
 /// estimate (~43 ms at 48 kHz). Below this the column/report input is
 /// omitted rather than fabricated from a handful of samples.
-#[cfg(not(target_os = "ios"))]
 const MIN_NOISE_FLOOR_WINDOW_SAMPLES: usize = 2048;
 
-#[cfg(not(target_os = "ios"))]
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
@@ -142,7 +129,6 @@ pub(super) fn resample_reference_signal(
 
 /// One raw play/record cycle of the sweep-capture machinery: the captured
 /// mono buffer plus the capture-side diagnostics needed downstream.
-#[cfg(not(target_os = "ios"))]
 struct RawSweepTake {
     /// Raw mono capture (NOT drift-corrected) at `analysis_sample_rate`.
     recorded: Vec<f32>,
@@ -155,7 +141,6 @@ struct RawSweepTake {
 
 /// One play/record cycle capturing all mics at once (multi-mic variant of
 /// [`RawSweepTake`]).
-#[cfg(not(target_os = "ios"))]
 struct RawSweepTakeMulti {
     /// Raw mono capture per mic (same order as the requested input channels).
     recorded_per_mic: Vec<Vec<f32>>,
@@ -169,7 +154,6 @@ struct RawSweepTakeMulti {
 /// capture was NOT cancelled. On cancel, the error is logged and ignored so
 /// the caller's `CANCELLED_ERR` always wins over a secondary "Failed to stop
 /// playback" (Task 10).
-#[cfg(not(target_os = "ios"))]
 pub(super) fn cancel_aware_stop(
     stop_result: Result<(), impl std::fmt::Display>,
     cancelled: bool,
@@ -195,7 +179,6 @@ pub(super) fn cancel_aware_stop(
 /// `cancel` is a cooperative cancellation flag (see [`CancelFlag`]): when
 /// set, the capture stops the streams and returns
 /// `Err(CANCELLED_ERR)` ("cancelled").
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 #[expect(
     clippy::too_many_lines,
@@ -401,7 +384,6 @@ fn capture_sweep_take(
 /// (multi-mic variant of [`capture_sweep_take`]). Applies the capture gates
 /// (cancel, silence, clipping) per mic; analysis lives in
 /// [`analyze_sweep_takes`].
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 #[expect(
     clippy::too_many_lines,
@@ -571,14 +553,12 @@ fn capture_sweep_take_multi(
 
 /// Per-take clock-drift bookkeeping: the ppm-normalized estimate, whether
 /// correction was applied, and the severe-drift advisory with its |ppm|.
-#[cfg(not(target_os = "ios"))]
 type TakeDrift = (Option<ClockDriftEstimate>, bool, Option<(f64, String)>);
 
 /// Timing-chirp information for per-take drift estimation, when the take
 /// carries identical chirps at both ends (`capture_session` plans). The
 /// template is correlated inside windows around the coarse expected
 /// positions; `spacing_samples` is the exact stimulus-clock chirp distance.
-#[cfg(not(target_os = "ios"))]
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ChirpTiming<'a> {
     /// Identical start/end timing-chirp template.
@@ -609,7 +589,6 @@ pub(super) struct ChirpTiming<'a> {
 ///   lock onto the reference ([`correction_keeps_lock`]); if the lock
 ///   collapses the estimate was wrong, not the clock, and the correction is
 ///   discarded (the raw take is kept, the advisory still stands).
-#[cfg(not(target_os = "ios"))]
 pub(super) fn correct_take_clock_drift(
     recorded: &[f32],
     analysis_reference: &[f32],
@@ -721,7 +700,6 @@ pub(super) fn correct_take_clock_drift(
 /// `<analysis-stem>.nolock-take<N>.wav` and the path is appended to the
 /// error; a failed write keeps the original error so evidence handling can
 /// never mask the gate.
-#[cfg(not(target_os = "ios"))]
 fn lock_failure_with_evidence(
     log_tag: &str,
     recorded_wav_path: &Path,
@@ -757,7 +735,6 @@ fn lock_failure_with_evidence(
 /// deliberately separate from the log message: callers surface the returned
 /// `CaptureAnalysis::quality.issues` to the user, and a plain `Correct` drift
 /// action previously had no issue when lock verification discarded the fix.
-#[cfg(not(target_os = "ios"))]
 pub(super) fn drift_correction_discard_message(ppm: f64) -> String {
     format!(
         "clock drift correction at {ppm:.1} ppm was discarded after lag-lock verification failed; the raw capture was kept and needs review"
@@ -778,7 +755,6 @@ pub(super) fn drift_correction_discard_message(ppm: f64) -> String {
 /// catches that without relying on downstream MAD rejection. Confidence alone
 /// is not sufficient — the estimator reports spuriously high confidence on
 /// pure noise, but at a meaningless lag.
-#[cfg(not(target_os = "ios"))]
 pub(super) fn correction_keeps_lock(
     reference: &[f32],
     raw: &[f32],
@@ -813,7 +789,6 @@ pub(super) fn correction_keeps_lock(
 /// zero-pad to the common length, and average in the time domain. The result
 /// is what gets written to disk and analyzed, so the final curve is
 /// consistent with the averaged-complex response used for coherence.
-#[cfg(not(target_os = "ios"))]
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
@@ -847,7 +822,6 @@ fn average_aligned_takes(
 
 /// Sibling path preserving a repeat capture's raw (pre-correction) take,
 /// e.g. `L.wav` → `L.take2.wav` for the second take.
-#[cfg(not(target_os = "ios"))]
 fn raw_take_wav_path(recorded_wav_path: &Path, take_index: usize) -> PathBuf {
     let stem = recorded_wav_path.file_stem().map_or_else(
         || "recording".to_string(),
@@ -860,7 +834,6 @@ fn raw_take_wav_path(recorded_wav_path: &Path, take_index: usize) -> PathBuf {
 /// review A4): rerunning a session with fewer sweeps would otherwise leave
 /// higher-N raw takes from the previous run next to the new averaged WAV.
 /// Removal failures are logged and ignored.
-#[cfg(not(target_os = "ios"))]
 fn remove_stale_take_wavs(recorded_wav_path: &Path, log_tag: &str) {
     let stem = recorded_wav_path.file_stem().map_or_else(
         || "recording".to_string(),
@@ -900,7 +873,6 @@ fn remove_stale_take_wavs(recorded_wav_path: &Path, log_tag: &str) {
 }
 
 /// Write a mono capture WAV and verify the round-trip channel count.
-#[cfg(not(target_os = "ios"))]
 fn write_and_verify_mono_wav(path: &Path, samples: &[f32], sample_rate: u32) -> Result<(), String> {
     write_wav_file(path, samples, sample_rate, 1)?;
     let reader =
@@ -916,7 +888,6 @@ fn write_and_verify_mono_wav(path: &Path, samples: &[f32], sample_rate: u32) -> 
 
 /// Frequency of each bin of a one-sided FFT spectrum (`fft_size/2 + 1` bins,
 /// matching math-dsp's `deconvolve_sweep` / noise-floor grids).
-#[cfg(not(target_os = "ios"))]
 #[expect(
     clippy::cast_precision_loss,
     reason = "FFT bin indices and the audio rate are intentionally represented on an f32 frequency grid."
@@ -940,7 +911,6 @@ fn fft_bin_frequencies(bin_count: usize, sample_rate: u32) -> Vec<f32> {
 /// `lag + active_reference_start`. Both regions are contiguous, so the
 /// window is simply `take[..lag + active_start]` (clamped, and shrunk for
 /// negative lags).
-#[cfg(not(target_os = "ios"))]
 fn pre_silence_window<'a>(take: &'a [f32], reference: &[f32], lag: &LagEstimate) -> &'a [f32] {
     let active_start = super::quality::active_reference_start(reference);
     let noise_len = active_start.saturating_add_signed(lag.lag_samples);
@@ -952,7 +922,6 @@ fn pre_silence_window<'a>(take: &'a [f32], reference: &[f32], lag: &LagEstimate)
 /// [`pre_silence_window`] from the other end — padding must not dilute the
 /// broadband signal RMS used by the single-take SNR check. Clamped to the
 /// take; empty when nothing overlaps.
-#[cfg(not(target_os = "ios"))]
 pub(super) fn active_take_span<'a>(
     take: &'a [f32],
     reference: &[f32],
@@ -971,7 +940,6 @@ pub(super) fn active_take_span<'a>(
 /// Longest pre-sweep room-noise window across the accepted takes. The
 /// longest single window is the cleanest estimator input — concatenating
 /// windows would invent discontinuities at the joins.
-#[cfg(not(target_os = "ios"))]
 fn longest_pre_silence<'a>(
     takes: &'a [Vec<f32>],
     reference: &[f32],
@@ -1007,7 +975,6 @@ fn longest_pre_silence<'a>(
 /// drift-corrected, lag-aligned, synchronously averaged accepted takes for
 /// repeats. Repeat captures additionally preserve each raw (pre-correction)
 /// take in a `*.take{N}.wav` sibling so per-take raw data survives.
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 #[expect(
     clippy::too_many_lines,
@@ -1482,7 +1449,6 @@ pub(super) fn analyze_sweep_takes(
 ///
 /// # Errors
 /// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 #[expect(
     clippy::needless_pass_by_value,
@@ -1613,7 +1579,6 @@ pub fn record_and_analyze_with_recorder(
 ///
 /// # Errors
 /// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 pub fn record_and_analyze_with(
     playback: &mut impl super::playback::SweepPlayback,
@@ -1685,7 +1650,6 @@ pub fn record_and_analyze_with(
 ///
 /// # Panics
 /// Panics if the path or calibration counts differ from the input channel count.
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 #[expect(
     clippy::needless_pass_by_value,
@@ -1833,7 +1797,6 @@ pub fn record_and_analyze_with_multi_recorder(
 ///
 /// # Errors
 /// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
-#[cfg(not(target_os = "ios"))]
 #[allow(clippy::too_many_arguments)]
 pub fn record_and_analyze_with_multi(
     playback: &mut impl super::playback::SweepPlayback,
