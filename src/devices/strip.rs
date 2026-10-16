@@ -1,5 +1,9 @@
+#[cfg(target_os = "windows")]
+use super::AudioDevice;
 use super::is::is_asio_device;
 use super::misc::ASIO_DEVICE_PREFIX;
+#[cfg(target_os = "windows")]
+use std::collections::HashMap;
 
 /// Strip the "ASIO:" prefix from a device identifier, returning the actual device name.
 /// Case-insensitive: "ASIO:", "asio:", "Asio:" prefixes are all stripped.
