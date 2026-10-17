@@ -1175,10 +1175,6 @@ fn main() {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "Synthetic fixtures use bounded sample counts and intentionally quantized audio; exact comparisons verify unchanged settings and samples."
-)]
 mod tests {
     use super::*;
 
@@ -1229,7 +1225,11 @@ mod tests {
                 cubic_distortion: 4.0,
                 ..FakeAudioConfig::default()
             });
-            let microphones: Vec<u16> = (0..microphone_count as u16).collect();
+            // Fixture counts are small literals, so the fallible conversion
+            // documents the bound instead of silently truncating.
+            let microphone_count =
+                u16::try_from(microphone_count).expect("fixture microphone counts fit in u16");
+            let microphones: Vec<u16> = (0..microphone_count).collect();
             let microphone_list = microphones
                 .iter()
                 .map(u16::to_string)
