@@ -500,6 +500,205 @@ fn public_profile_applies_distinct_room_impulse_response_per_input_channel() {
     );
 }
 
+fn spl_at_nearest(frequencies: &[f32], spl_db: &[f32], target_hz: f32) -> f32 {
+    frequencies
+        .iter()
+        .zip(spl_db.iter())
+        .min_by(|(a, _), (b, _)| (*a - target_hz).abs().total_cmp(&(*b - target_hz).abs()))
+        .map(|(_, spl)| *spl)
+        .expect("analysis grid must not be empty")
+}
+
+#[test]
+fn synthetic_room_comb_and_mode_match_ground_truth() {
+    // Ground truth is defined analytically, independently of the analysis
+    // under test: a reflection 5 ms after the direct path produces a comb
+    // with peaks at multiples of 200 Hz and notches halfway between them;
+    // a decaying 120 Hz resonance produces a narrow local peak. The
+    // deconvolved magnitude must reproduce both features.
+    fn analyze_room(
+        impulse_response: Vec<f32>,
+        latency_frames: usize,
+    ) -> sotf_capture::signal_recorder::CaptureAnalysis {
+        let dir = tempfile::tempdir().unwrap();
+        let sweep = sotf_capture::signal_recorder::generate_signal(
+            sotf_capture::signal_recorder::SignalType::Sweep,
+            &sotf_capture::signal_recorder::SignalParams::Sweep {
+                start_freq: 50.0,
+                end_freq: 20_000.0,
+                amp: 0.5,
+            },
+            2.0,
+            SAMPLE_RATE,
+        )
+        .unwrap();
+        let temp_wav =
+            sotf_capture::signal_recorder::write_temp_wav(&sweep, SAMPLE_RATE, 1).unwrap();
+        let recorded_wav = dir.path().join("room.wav");
+        let csv = dir.path().join("room.csv");
+        let wire = VirtualWire::new(FakeAudioConfig {
+            latency_frames,
+            channel_impulse_responses: vec![impulse_response],
+            ..FakeAudioConfig::for_profile(FakeAudioProfile::Clean)
+        });
+        let mut playback = wire.playback("synthetic_room");
+        let mut recorder = wire.recorder("synthetic_room");
+        record_and_analyze_with_recorder(
+            &mut playback,
+            &mut recorder,
+            temp_wav.path(),
+            &recorded_wav,
+            &sweep,
+            SAMPLE_RATE,
+            &csv,
+            0,
+            0,
+            None,
+            None,
+            None,
+            Some((50.0, 20_000.0)),
+            1,
+            None,
+        )
+        .expect("synthetic room capture must analyze")
+    }
+
+    // Room A: direct path plus one 0.7 reflection at 5 ms.
+    // Theory: peak |1 + 0.7| = +4.6 dB, notch |1 - 0.7| = -10.5 dB.
+    let mut comb_ir = vec![0.0f32; 1_024];
+    comb_ir[0] = 1.0;
+    comb_ir[240] = 0.7; // 240 samples = 5 ms at 48 kHz
+    let comb = analyze_room(comb_ir, 480);
+    assert!(comb.quality.trustworthy, "{:?}", comb.quality.issues);
+    assert!(
+        (comb.result.estimated_lag_samples - 480).abs() <= 2,
+        "direct-path lag {} must ignore the later reflection",
+        comb.result.estimated_lag_samples
+    );
+    let notch_db = spl_at_nearest(&comb.result.frequencies, &comb.result.spl_db, 300.0);
+    let peak_db = spl_at_nearest(&comb.result.frequencies, &comb.result.spl_db, 400.0);
+    assert!(
+        peak_db - notch_db > 8.0,
+        "comb contrast {:.1} dB (peak {peak_db:.1}, notch {notch_db:.1}); theory predicts ~15 dB",
+        peak_db - notch_db
+    );
+
+    // Room B: flat direct path plus a decaying 120 Hz mode scaled for a
+    // ~+6 dB resonant contribution (peak of A * tau * fs / 2 ~ 1.0). The
+    // cosine starts in phase with the direct path so the contributions add
+    // constructively at resonance, and tau keeps the resonance wider than
+    // the analysis smoothing so the peak survives fractional-octave
+    // averaging (bandwidth ~1/(pi * tau) ~ 6 Hz).
+    let fs = SAMPLE_RATE as f32;
+    let tau_s = 0.05f32;
+    let amplitude = 2.0 / (tau_s * fs);
+    let mut modal_ir = vec![0.0f32; SAMPLE_RATE as usize / 2];
+    modal_ir[0] = 1.0;
+    for (n, tap) in modal_ir.iter_mut().enumerate() {
+        let t = n as f32 / fs;
+        *tap += amplitude * (-t / tau_s).exp() * (2.0 * std::f32::consts::PI * 120.0 * t).cos();
+    }
+    let modal = analyze_room(modal_ir, 0);
+    assert!(modal.quality.trustworthy, "{:?}", modal.quality.issues);
+    let mode_db = spl_at_nearest(&modal.result.frequencies, &modal.result.spl_db, 120.0);
+    let flank_db = 0.5
+        * (spl_at_nearest(&modal.result.frequencies, &modal.result.spl_db, 80.0)
+            + spl_at_nearest(&modal.result.frequencies, &modal.result.spl_db, 180.0));
+    assert!(
+        mode_db - flank_db > 3.0,
+        "modal peak {mode_db:.1} dB vs flanks {flank_db:.1} dB; theory predicts a clear local peak"
+    );
+}
+
+#[test]
+fn microphone_compensation_subtracts_the_calibration_deviation() {
+    // Ground truth: the calibration file declares the microphone reads
+    // +6 dB hot between 1 kHz and 4 kHz. The persisted CSV is the
+    // compensated artifact (the in-memory result stays raw by design), so
+    // on a flat wire the CSV magnitude in the middle of that plateau must
+    // sit 6 dB below the uncompensated CSV, while a band outside the
+    // plateau is unchanged. The expectation comes from the file contents,
+    // not from the analysis under test.
+    fn analyze_with_calibration(calibration_path: Option<&str>) -> Vec<(f32, f32)> {
+        let dir = tempfile::tempdir().unwrap();
+        let sweep = sweep_2s();
+        let temp_wav =
+            sotf_capture::signal_recorder::write_temp_wav(&sweep, SAMPLE_RATE, 1).unwrap();
+        let recorded_wav = dir.path().join("recorded.wav");
+        let csv = dir.path().join("analysis.csv");
+        let wire = VirtualWire::for_profile(FakeAudioProfile::Clean);
+        let mut playback = wire.playback("calibration_golden");
+        let mut recorder = wire.recorder("calibration_golden");
+        record_and_analyze_with_recorder(
+            &mut playback,
+            &mut recorder,
+            temp_wav.path(),
+            &recorded_wav,
+            &sweep,
+            SAMPLE_RATE,
+            &csv,
+            0,
+            0,
+            None,
+            None,
+            calibration_path,
+            Some((100.0, 20_000.0)),
+            1,
+            None,
+        )
+        .expect("flat-wire capture must analyze");
+        let text = std::fs::read_to_string(&csv).unwrap();
+        text.lines()
+            .skip(1)
+            .filter_map(|line| {
+                let mut columns = line.split(',');
+                let freq: f32 = columns.next()?.parse().ok()?;
+                let spl: f32 = columns.next()?.parse().ok()?;
+                Some((freq, spl))
+            })
+            .collect()
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let calibration = dir.path().join("mic-cal.txt");
+    std::fs::write(
+        &calibration,
+        "# synthetic microphone deviation: +6 dB plateau 1-4 kHz, flat elsewhere\n\
+         100 0.0\n900 0.0\n1000 6.0\n4000 6.0\n4500 0.0\n20000 0.0\n",
+    )
+    .unwrap();
+
+    let plain = analyze_with_calibration(None);
+    let compensated = analyze_with_calibration(Some(calibration.to_str().unwrap()));
+
+    let band_mean = |rows: &[(f32, f32)], low: f32, high: f32| {
+        let band: Vec<f32> = rows
+            .iter()
+            .filter(|(freq, _)| (low..=high).contains(freq))
+            .map(|(_, spl)| *spl)
+            .collect();
+        assert!(!band.is_empty(), "empty band {low}-{high} Hz");
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "Band lengths normalize floating-point statistics over small test buffers."
+        )]
+        let mean = band.iter().sum::<f32>() / band.len() as f32;
+        mean
+    };
+
+    let plateau_delta =
+        band_mean(&compensated, 1_500.0, 3_000.0) - band_mean(&plain, 1_500.0, 3_000.0);
+    assert!(
+        (plateau_delta + 6.0).abs() < 1.0,
+        "compensated plateau delta {plateau_delta:.2} dB, expected -6 +/- 1 dB"
+    );
+    let outside_delta = band_mean(&compensated, 150.0, 400.0) - band_mean(&plain, 150.0, 400.0);
+    assert!(
+        outside_delta.abs() < 1.0,
+        "outside-plateau delta {outside_delta:.2} dB, expected ~0 dB"
+    );
+}
+
 #[test]
 fn public_profile_clipping_is_refused_by_the_capture_gate() {
     let clipped = analyze_profile(FakeAudioProfile::Clipping).unwrap();
