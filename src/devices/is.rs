@@ -43,8 +43,7 @@ pub fn verify_working_sample_rate(
     #[cfg(target_os = "linux")]
     if is_pipewire() {
         log::info!(
-            "[AUDIO] PipeWire detected, skipping sample rate verification (using {}Hz)",
-            requested_rate
+            "[AUDIO] PipeWire detected, skipping sample rate verification (using {requested_rate}Hz)"
         );
         return Some(requested_rate);
     }
@@ -246,7 +245,7 @@ pub fn is_null_device(name: &str) -> bool {
         || (lower.contains("generate zero") && lower.contains("capture"))
 }
 
-/// Detect if PipeWire is the active audio server on Linux.
+/// Detect if `PipeWire` is the active audio server on Linux.
 #[cfg(target_os = "linux")]
 fn is_pipewire() -> bool {
     // PIPEWIRE_RUNTIME_DIR is set by PipeWire when it's the active audio server

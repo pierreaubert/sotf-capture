@@ -179,12 +179,6 @@ pub fn set_audio_device(
 pub(super) fn deduplicate_linux_devices(
     devices: Vec<AudioDevice>,
 ) -> Result<Vec<AudioDevice>, String> {
-    use std::collections::BTreeMap;
-
-    if devices.is_empty() {
-        return Ok(devices);
-    }
-
     // Extract the CARD name from ALSA device IDs/names like "front:CARD=PCH,DEV=0"
     fn extract_card_key(device: &AudioDevice) -> String {
         // Try the device_id first, then the name
@@ -206,12 +200,18 @@ pub(super) fn deduplicate_linux_devices(
         if let Some(rest) = source.strip_prefix("hw:") {
             let card_num = rest.split([',', ' ']).next().unwrap_or(rest);
             if !card_num.is_empty() {
-                return format!("hw:{}", card_num);
+                return format!("hw:{card_num}");
             }
         }
 
         // For "default", "pipewire", or other non-ALSA names, keep as-is
         device.name.clone()
+    }
+
+    use std::collections::BTreeMap;
+
+    if devices.is_empty() {
+        return Ok(devices);
     }
 
     // Group devices by card key, preserving insertion order
@@ -258,13 +258,11 @@ pub(crate) fn merge_linux_device_groups(
                 let ch = d
                     .default_config
                     .as_ref()
-                    .map(|c| c.channels as u32)
-                    .unwrap_or(0);
+                    .map_or(0, |c| u32::from(c.channels));
                 let is_default = if d.is_default { 1000u32 } else { 0 };
                 is_default + ch
             })
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+            .map_or(0, |(i, _)| i);
 
         let mut merged = group[best_idx].clone();
 
@@ -303,7 +301,7 @@ pub(crate) fn merge_linux_device_groups(
                         merged.default_config = Some(variant_cfg.clone());
                     }
                 } else {
-                    merged.default_config = variant.default_config.clone();
+                    merged.default_config.clone_from(&variant.default_config);
                 }
             }
 
