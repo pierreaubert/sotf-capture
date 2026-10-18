@@ -580,7 +580,7 @@ fn emulated_multi_two_mics_agree() {
 }
 
 #[test]
-fn emulated_overruns_thread_into_the_report() {
+fn emulated_overruns_refuse_success_and_analysis_publication() {
     let dir = tempfile::tempdir().unwrap();
     let sweep = sweep_2s();
     let temp_wav = super::write::write_temp_wav(&sweep, SAMPLE_RATE, 1).unwrap();
@@ -593,7 +593,7 @@ fn emulated_overruns_thread_into_the_report() {
     });
     let mut playback = wire.playback("record_and_analyze");
     let mut recorder = wire.recorder("record_and_analyze");
-    let analysis = record_and_analyze_with_recorder(
+    let error = record_and_analyze_with_recorder(
         &mut playback,
         &mut recorder,
         temp_wav.path(),
@@ -610,8 +610,9 @@ fn emulated_overruns_thread_into_the_report() {
         1,
         None,
     )
-    .unwrap();
-    assert_eq!(analysis.dropped_samples, 1_234);
+    .unwrap_err();
+    assert!(error.contains("1234"), "{error}");
+    assert!(!csv.exists());
 }
 
 #[test]
@@ -655,8 +656,8 @@ fn emulated_rate_mismatch_resamples_the_reference() {
 fn wake_burst_is_deterministic_faded_and_bounded() {
     use super::wake::{WAKE_BURST_SECS, wake_burst_samples};
 
-    let first = wake_burst_samples(SAMPLE_RATE);
-    let second = wake_burst_samples(SAMPLE_RATE);
+    let first = wake_burst_samples(SAMPLE_RATE, 0.5);
+    let second = wake_burst_samples(SAMPLE_RATE, 0.5);
     assert_eq!(first, second);
     assert_eq!(first.len(), (WAKE_BURST_SECS * SAMPLE_RATE as f32) as usize);
     assert!(first.iter().all(|sample| sample.is_finite()));
@@ -669,6 +670,15 @@ fn wake_burst_is_deterministic_faded_and_bounded() {
         .map(|s| s.abs())
         .fold(0.0_f32, f32::max);
     assert!(mid_peak > 0.4, "{mid_peak}");
+    for amplitude in [0.001, 0.01, 0.1, 0.5, 1.0] {
+        let burst = wake_burst_samples(SAMPLE_RATE, amplitude);
+        let peak = burst
+            .iter()
+            .map(|sample| sample.abs())
+            .fold(0.0_f32, f32::max);
+        assert!(peak <= amplitude && peak <= 0.5, "{amplitude}: {peak}");
+        assert!(peak > amplitude.min(0.5) * 0.99);
+    }
 }
 
 #[test]
@@ -729,6 +739,7 @@ fn wake_up_budget_exhaustion_proceeds_without_error() {
         &mut playback,
         &mut recorder,
         SAMPLE_RATE,
+        0.1,
         0,
         0,
         None,
@@ -757,6 +768,7 @@ fn wake_up_honors_cancel_immediately() {
         &mut playback,
         &mut recorder,
         SAMPLE_RATE,
+        0.1,
         0,
         0,
         None,

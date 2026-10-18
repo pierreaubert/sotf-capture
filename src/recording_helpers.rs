@@ -638,10 +638,85 @@ pub fn recording_stimulus_entries_from_sources(
     })
 }
 
+/// Restore missing metrics from analysis CSVs on the matching frequency grid.
+///
+/// The session JSON keeps only the frequency response, so a loaded
+/// take arrives with `thd_percent`/`rt60_ms`/clarity/group-delay
+/// unset and the Evaluating panels showed "not available" for a
+/// measurement that was fully analyzed at capture time. The CSV
+/// written next to the WAV at capture carries those exact series on
+/// the same frequency grid; fill only the missing fields and only
+/// when the grids line up.
+pub fn enrich_results_from_take_csvs(recordings: &mut [ChannelRecording]) {
+    for recording in recordings.iter_mut() {
+        let Some(result) = recording.result.as_mut() else {
+            continue;
+        };
+        if result.thd_percent.is_some()
+            && result.rt60_ms.is_some()
+            && result.clarity_c50_db.is_some()
+            && result.clarity_c80_db.is_some()
+            && result.excess_group_delay_ms.is_some()
+        {
+            continue;
+        }
+        let Some(csv_path) = result.csv_path.clone() else {
+            continue;
+        };
+        // Parse a bounded private copy, including if the source grows or is
+        // replaced while a frontend is loading the session.
+        let Ok(bytes) = crate::artifacts::read_file(
+            std::path::Path::new(&csv_path),
+            crate::artifacts::MAX_METADATA_BYTES,
+        ) else {
+            continue;
+        };
+        let Ok(mut snapshot) = tempfile::NamedTempFile::with_suffix(".csv") else {
+            continue;
+        };
+        if std::io::Write::write_all(&mut snapshot, &bytes).is_err() {
+            continue;
+        }
+        let Ok(parsed) = math_audio_dsp::analysis::read_analysis_csv(snapshot.path()) else {
+            continue;
+        };
+        if parsed.frequencies.len() != result.frequencies.len()
+            || parsed
+                .frequencies
+                .iter()
+                .zip(result.frequencies.iter())
+                .any(|(a, b)| !a.is_finite() || !b.is_finite() || (a - b).abs() > 0.01)
+        {
+            continue;
+        }
+        for (destination, values) in [
+            (&mut result.thd_percent, &parsed.thd_percent),
+            (&mut result.rt60_ms, &parsed.rt60_ms),
+            (&mut result.clarity_c50_db, &parsed.clarity_c50_db),
+            (&mut result.clarity_c80_db, &parsed.clarity_c80_db),
+            (
+                &mut result.excess_group_delay_ms,
+                &parsed.excess_group_delay_ms,
+            ),
+        ] {
+            if destination.is_none()
+                && values.len() == result.frequencies.len()
+                && values.iter().any(|value| value.is_finite())
+            {
+                *destination = Some(
+                    values
+                        .iter()
+                        .map(|value| if value.is_finite() { *value } else { f32::NAN })
+                        .collect(),
+                );
+            }
+        }
+    }
+}
+
 /// Restore each source's stimulus snapshot from an exact-session sidecar.
 ///
-/// Sources missing from the sidecar keep `None`; no current global settings
-/// are copied onto old measurements.
+/// Sources missing from the sidecar retain unknown acquisition settings.
 pub fn restore_recording_stimuli_from_sidecar(
     recordings: &mut [ChannelRecording],
     speaker_names_by_channel: &[String],
@@ -773,8 +848,7 @@ pub fn signal_type_for(recording_signal_type: RecordingSignalType) -> SignalType
     }
 }
 
-/// Convert a signal level in dBFS to a linear amplitude, clamped to
-/// `[-40, 0] dB` so the result never exceeds full scale (≤ 0 dBFS).
+/// Convert dBFS to amplitude without raising quiet requested levels.
 ///
 /// Mirrors the engine's `measurement_amplitude_from_level_db` clamp added
 /// with `prepare_measurement_signal`; frontends previously used an
@@ -785,7 +859,10 @@ pub fn signal_type_for(recording_signal_type: RecordingSignalType) -> SignalType
     reason = "The clamped decibel level produces a bounded amplitude intentionally stored in f32."
 )]
 pub fn measurement_amplitude(level_db: f64) -> f32 {
-    10.0_f64.powf(level_db.clamp(-40.0, 0.0) / 20.0) as f32
+    if !level_db.is_finite() {
+        return 0.0;
+    }
+    10.0_f64.powf(level_db.min(0.0) / 20.0) as f32
 }
 
 /// Filesystem-safe file-name stem for a recording session or channel name.
@@ -1292,6 +1369,84 @@ mod tests {
     use super::*;
 
     #[test]
+    fn enrich_results_from_take_csvs_restores_advanced_metrics() {
+        let directory = tempfile::tempdir().unwrap();
+        let csv_path = directory.path().join("L.csv");
+        std::fs::write(
+            &csv_path,
+            "frequency_hz,spl_db,phase_deg,thd_percent,rt60_ms,c50_db,c80_db,group_delay_ms\n\
+             100.000000,-10.000,0.000000,1.500000,320.000,12.000,15.000,0.500000\n\
+             1000.000000,-9.000,0.000000,NaN,310.000,13.000,16.000,0.400000\n",
+        )
+        .unwrap();
+
+        let fr_only = |frequencies: Vec<f32>| RecordingResult {
+            channel: 0,
+            sample_rate_hz: Some(48_000),
+            wav_path: None,
+            csv_path: Some(csv_path.to_string_lossy().into_owned()),
+            frequencies,
+            magnitude_db: vec![-10.0, -9.0],
+            phase_deg: vec![0.0, 0.0],
+            impulse_response: None,
+            impulse_time_ms: None,
+            thd_percent: None,
+            harmonic_distortion_db: None,
+            excess_group_delay_ms: None,
+            rt60_ms: None,
+            clarity_c50_db: None,
+            clarity_c80_db: None,
+            spectrogram_db: None,
+            quality: None,
+            stimulus_config: None,
+        };
+        let mut take = ChannelRecording::new(0, "L".to_string());
+        take.result = Some(fr_only(vec![100.0, 1000.0]));
+        let mut recordings = vec![take];
+        enrich_results_from_take_csvs(&mut recordings);
+        let result = recordings[0].result.as_ref().unwrap();
+        assert_eq!(result.thd_percent.as_ref().unwrap()[0], 1.5);
+        assert!(result.thd_percent.as_ref().unwrap()[1].is_nan());
+        let json = serde_json::to_value(result).unwrap();
+        assert!(json["thd_percent"][1].is_null());
+        let restored: RecordingResult = serde_json::from_value(json).unwrap();
+        assert!(restored.thd_percent.unwrap()[1].is_nan());
+        assert_eq!(result.rt60_ms.as_deref(), Some(&[320.0, 310.0][..]));
+        assert_eq!(result.clarity_c50_db.as_deref(), Some(&[12.0, 13.0][..]));
+        assert_eq!(
+            result.excess_group_delay_ms.as_deref(),
+            Some(&[0.5, 0.4][..])
+        );
+
+        // Existing THD and RT60 do not suppress missing clarity or group delay.
+        let mut partial = ChannelRecording::new(0, "L".into());
+        let mut existing = fr_only(vec![100.0, 1000.0]);
+        existing.thd_percent = Some(vec![0.0, 2.0]);
+        existing.rt60_ms = Some(vec![111.0, 222.0]);
+        partial.result = Some(existing);
+        let mut partial = vec![partial];
+        enrich_results_from_take_csvs(&mut partial);
+        let result = partial[0].result.as_ref().unwrap();
+        assert_eq!(result.thd_percent.as_deref(), Some(&[0.0, 2.0][..]));
+        assert_eq!(result.rt60_ms.as_deref(), Some(&[111.0, 222.0][..]));
+        assert_eq!(result.clarity_c50_db.as_deref(), Some(&[12.0, 13.0][..]));
+        assert!(result.excess_group_delay_ms.is_some());
+
+        let mut invalid = ChannelRecording::new(0, "L".into());
+        invalid.result = Some(fr_only(vec![100.0, f32::NAN]));
+        let mut invalid = vec![invalid];
+        enrich_results_from_take_csvs(&mut invalid);
+        assert!(invalid[0].result.as_ref().unwrap().thd_percent.is_none());
+
+        // A mismatched frequency grid must not be enriched.
+        let mut take = ChannelRecording::new(0, "L".to_string());
+        take.result = Some(fr_only(vec![100.0, 2000.0]));
+        let mut recordings = vec![take];
+        enrich_results_from_take_csvs(&mut recordings);
+        assert!(recordings[0].result.as_ref().unwrap().thd_percent.is_none());
+    }
+
+    #[test]
     fn session_save_replaces_complete_metadata_and_cleans_temporary_file() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(RECORDINGS_FILENAME);
@@ -1361,8 +1516,9 @@ mod tests {
         // Positive dB must never exceed 0 dBFS.
         assert_eq!(measurement_amplitude(6.0), 1.0);
         assert_eq!(measurement_amplitude(20.0), 1.0);
-        // Below the floor stays at the floor.
-        assert_eq!(measurement_amplitude(-80.0), measurement_amplitude(-40.0));
+        assert!((measurement_amplitude(-80.0) - 0.0001).abs() < 1e-8);
+        assert!((measurement_amplitude(-60.0) - 0.001).abs() < 1e-8);
+        assert_eq!(measurement_amplitude(f64::NAN), 0.0);
     }
 
     #[test]

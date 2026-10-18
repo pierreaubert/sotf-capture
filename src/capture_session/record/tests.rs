@@ -111,6 +111,82 @@ fn all_mics_record_each_source_and_calibration_snapshots_are_frozen() {
 }
 
 #[test]
+fn bench_and_loopback_evidence_survive_source_mutation_and_bundle_moves() {
+    let (root, original) = setup();
+    let mut plan = original.plan().clone();
+    plan.sources.truncate(1);
+    plan.localization_calibration_file = Some("bench.json".into());
+    plan.loopback = Some(crate::capture_session::CaptureLoopback {
+        device: plan.microphones[0].device.clone(),
+        input_channel: 7,
+    });
+    let bytes = br#"{"schema":"sotf-capture/localization-calibration","schema_version":1,"latency_samples_by_rate_hz":{"48000":0},"mic_bias_measured":true,"mic_bias_correction_m":0.004}"#;
+    std::fs::write(root.path().join("bench.json"), bytes).unwrap();
+    let session = plan.validate().unwrap();
+    let raw = root.path().join("raw");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let manifest = record_with(
+        &session,
+        root.path(),
+        &raw,
+        &cancel,
+        |_| {},
+        |request, flag| {
+            std::fs::write(root.path().join("bench.json"), b"changed after preflight").unwrap();
+            fake_capture(request, flag)
+        },
+    )
+    .unwrap();
+    let snapshot = manifest.localization_calibration.as_ref().unwrap();
+    assert_eq!(std::fs::read(raw.join(&snapshot.file)).unwrap(), bytes);
+    assert_eq!(snapshot.sha256, super::super::calibration_sha256(bytes));
+    assert_eq!(
+        manifest.plan.localization_calibration_file.as_deref(),
+        Some(Path::new(&snapshot.file))
+    );
+    std::fs::remove_file(root.path().join("bench.json")).unwrap();
+    let moved = root.path().join("moved-raw");
+    std::fs::rename(&raw, &moved).unwrap();
+    let output = root.path().join("processed");
+    let report = super::super::clock::io::process_capture_session(&moved, &output).unwrap();
+    let handoff: autoeq::capture_handoff::CaptureHandoff = serde_json::from_slice(
+        &std::fs::read(output.join(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME)).unwrap(),
+    )
+    .unwrap();
+    for file in std::iter::once(snapshot.file.as_str()).chain(
+        manifest
+            .loopback_files
+            .iter()
+            .map(|take| take.wav_file.as_str()),
+    ) {
+        assert_eq!(
+            std::fs::read(output.join(file)).unwrap(),
+            std::fs::read(moved.join(file)).unwrap()
+        );
+        assert!(
+            handoff
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.file == file),
+            "{file}"
+        );
+    }
+    let again = super::super::clock::io::process_capture_session(
+        &moved,
+        &root.path().join("processed-again"),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(report.localization_report).unwrap(),
+        serde_json::to_value(again.localization_report).unwrap()
+    );
+    std::fs::write(moved.join(&snapshot.file), b"tampered").unwrap();
+    let rejected = root.path().join("rejected");
+    assert!(super::super::clock::io::process_capture_session(&moved, &rejected).is_err());
+    assert!(!rejected.exists());
+}
+
+#[test]
 fn cancellation_retains_previous_source_and_explicit_status() {
     let (root, session) = setup();
     let output = root.path().join("recording");
@@ -344,6 +420,7 @@ fn aux_session() -> (
 fn aux_manifest(session: &crate::capture_session::ValidatedCaptureSession) -> RawCaptureManifest {
     let stimulus = crate::capture_session::protocol::prepare_capture_stimulus(session).unwrap();
     RawCaptureManifest {
+        localization_calibration: None,
         version: 1,
         plan: session.plan().clone(),
         probe_pass: None,
@@ -402,6 +479,9 @@ fn auxiliary_passes_journal_results_with_plan_routing() {
         &cancel,
         aux_manifest(&session),
         |channels, names, rate, duration, silence, _out, _input, _ch, wav, _level, _cancel| {
+            let current = journal(&output);
+            assert_eq!(current.status, RawCaptureStatus::Capturing);
+            assert!(current.probe_pass.is_none() && current.bass_anchor_pass.is_none());
             assert_eq!(channels, &[0, 1]);
             assert_eq!(names, &["left".to_string(), "right".to_string()]);
             assert_eq!(rate, 48000);
@@ -428,6 +508,9 @@ fn auxiliary_passes_journal_results_with_plan_routing() {
          wav,
          _level,
          _cancel| {
+            let current = journal(&output);
+            assert_eq!(current.status, RawCaptureStatus::Capturing);
+            assert!(current.probe_pass.is_some() && current.bass_anchor_pass.is_none());
             assert_eq!(channels, &[0, 1]);
             assert_eq!(names, &["left".to_string(), "right".to_string()]);
             assert_eq!(rate, 48000);
@@ -502,6 +585,8 @@ fn auxiliary_passes_honor_cancellation() {
 fn ctc_sessions_record_one_loopback_take_per_source() {
     let (root, original) = setup();
     let mut plan = original.plan().clone();
+    plan.microphones[1].device = plan.microphones[0].device.clone();
+    plan.microphones[1].input_channel = 1;
     for input_channel in [2, 3] {
         let mut mic = plan.microphones[0].clone();
         mic.id = format!("extra-{input_channel}");

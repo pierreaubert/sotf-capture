@@ -1351,6 +1351,7 @@ fn test_repeat_sweep_averaging_rejects_outlier_and_extends_csv() {
         None,
         0,
         "test",
+        None,
     )
     .expect("repeat-sweep averaging on synthetic takes");
 
@@ -1458,6 +1459,7 @@ fn distorted_sweep_take_warns_high_thd() {
         None,
         0,
         "test",
+        None,
     )
     .expect("distorted take still analyzes");
     assert!(
@@ -1493,6 +1495,7 @@ fn noisy_sweep_take_warns_low_snr() {
         None,
         0,
         "test",
+        None,
     )
     .expect("noisy take still locks and analyzes");
     assert!(
@@ -1523,6 +1526,7 @@ fn unlocked_single_take_preserves_raw_wav() {
         None,
         0,
         "test",
+        None,
     )
     .unwrap_err();
     assert!(
@@ -1558,6 +1562,7 @@ fn unlocked_take_preservation_failure_keeps_original_error() {
         None,
         0,
         "test",
+        None,
     )
     .unwrap_err();
     assert!(
@@ -1594,6 +1599,7 @@ fn test_repeat_sweep_three_takes_omits_coherence_column() {
         None,
         0,
         "test",
+        None,
     )
     .expect("3-take repeat capture");
 
@@ -1655,6 +1661,7 @@ fn test_repeat_sweep_aborts_when_a_take_loses_lock() {
         None,
         0,
         "test",
+        None,
     )
     .expect_err("a take with no signal lock must abort the set");
     assert!(
@@ -1693,6 +1700,7 @@ fn test_single_take_behavior_with_noise_floor_column() {
         None,
         0,
         "test",
+        None,
     )
     .expect("single-take analysis");
 
@@ -2644,11 +2652,18 @@ fn measurement_level_db_clamps_to_full_scale() {
     assert_eq!(measurement_amplitude_from_level_db(20.0), 1.0);
     assert!((measurement_amplitude_from_level_db(-6.0206) - 0.5).abs() < 1e-4);
     assert!((measurement_amplitude_from_level_db(-40.0) - 0.01).abs() < 1e-6);
-    // Below the floor stays at the floor.
-    assert_eq!(
-        measurement_amplitude_from_level_db(-80.0),
-        measurement_amplitude_from_level_db(-40.0)
-    );
+    assert!((measurement_amplitude_from_level_db(-80.0) - 0.0001).abs() < 1e-8);
+    assert!((measurement_amplitude_from_level_db(-60.0) - 0.001).abs() < 1e-8);
+    assert_eq!(measurement_amplitude_from_level_db(f32::NAN), 0.0);
+}
+
+#[test]
+fn unchanged_sweep_clock_borrows_samples_instead_of_copying_a_take() {
+    let raw = vec![0.1_f32; 4096];
+    let (samples, (_, corrected, _)) =
+        super::record::correct_take_clock_drift(&raw, &raw, 48_000, "borrow-test", None);
+    assert!(!corrected);
+    assert_eq!(samples.as_ptr(), raw.as_ptr());
 }
 
 #[test]
@@ -3227,6 +3242,7 @@ fn fireface_sweep_lock_local_regression() {
         None,
         0,
         "local regression",
+        None,
     )
     .unwrap();
     assert_eq!(analysis.result.estimated_lag_samples, lag.lag_samples);
@@ -3242,6 +3258,7 @@ fn fireface_sweep_lock_local_regression() {
         None,
         0,
         "local repeats",
+        None,
     )
     .unwrap();
     assert_eq!(repeat.result.estimated_lag_samples, 0);

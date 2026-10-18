@@ -178,11 +178,41 @@ impl CaptureLevelMeter {
             return;
         }
         let frames = data.len() / channels;
+        self.record_values(
+            frames,
+            data.chunks_exact(channels).map(|frame| frame[channel]),
+        );
+    }
+
+    #[cfg(feature = "capture-io")]
+    pub(crate) fn record_converted<T: cpal::Sample>(
+        &self,
+        data: &[T],
+        channels: usize,
+        channel: usize,
+    ) where
+        f32: cpal::FromSample<T>,
+    {
+        if channels == 0 || channel >= channels || data.len() < channels {
+            return;
+        }
+        self.record_values(
+            data.len() / channels,
+            data.chunks_exact(channels)
+                .map(|frame| <f32 as cpal::FromSample<T>>::from_sample_(frame[channel])),
+        );
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "Callback frame counts form an f64 RMS denominator; the meter deliberately publishes f32 levels."
+    )]
+    fn record_values(&self, frames: usize, samples: impl Iterator<Item = f32>) {
         let mut sum_sq = 0.0f64;
         let mut peak = 0.0f32;
         let mut clipped = 0u64;
-        for frame in 0..frames {
-            let sample = data[frame * channels + channel];
+        for sample in samples {
             if !sample.is_finite() {
                 clipped += 1;
                 continue;
@@ -260,8 +290,8 @@ mod tests {
     fn healthy_block_is_good_zone_without_advice() {
         let meter = CaptureLevelMeter::new();
         // −12 dBFS sine: RMS ≈ 0.25, peak ≈ 0.354.
-        let samples: Vec<f32> = (0..4800)
-            .map(|i| 0.354 * (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / 48_000.0).sin())
+        let samples: Vec<f32> = (0_u16..4800)
+            .map(|i| 0.354 * (2.0 * std::f32::consts::PI * 1000.0 * f32::from(i) / 48_000.0).sin())
             .collect();
         meter.record_mono(&samples);
         let snap = meter.snapshot();

@@ -166,10 +166,18 @@ Rules the validator enforces:
   alignment or group-delay optimization.
 - `bass_anchor` requires a `loopback` route on the first microphone's
   device; `ctc` requires a `loopback` route plus two distinct ear
-  microphones. `room_dimensions` (meters) and `setup_description` project
+  microphones on that same input device and hardware clock. The loopback
+  must contain both timing markers and the active source's complete sweep;
+  use the interface routing mixer to monitor each active output and the
+  reference chirps. Independent USB microphones do not meet this requirement.
+  `room_dimensions` (meters) and `setup_description` project
   straight into the RoomEQ input format.
 - `compact` geometry (ear pairs, arrays) requires positions surveyed to
   1 mm and distinct per microphone.
+- Main and auxiliary acquisition must fit their frame limits and a 512 MiB
+  aggregate capture budget. Input readiness and capture tails require real
+  frames from every input clock; stream errors, lost frames, cancellation, and
+  playback deadlines prevent a successful measurement.
 
 Before the full session, run `live` to check levels and one planned take
 at a conservative level: confirm routing, peaks, reference lock, and a
@@ -258,6 +266,13 @@ reference) and the measured matched-microphone bias
 uncalibrated (`b_common = 0`) and say so in the report. Measure both
 constants once per (interface, mic model, rate) triple following
 the bench procedure in `localization.md` §5.4.
+
+`plan-record` resolves the bench path from the plan directory and freezes its
+bytes and hash with the raw acquisition. Processing uses that frozen copy and
+retains it and raw loopback takes in the handoff. A declared bench correction
+without a matching snapshot is refused, rather than silently changing the result
+or continuing uncalibrated. Moving the retained bundle does not require the
+original bench file.
 
 Subwoofers: a sub cannot reproduce the 2–8 kHz arrival band, so run
 subs as a dedicated session whose plan sweep is low-frequency

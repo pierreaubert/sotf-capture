@@ -5,10 +5,11 @@
 //! simultaneous takes. Acoustic chirps, clock correction and uncertainty belong
 //! to the caller's measurement protocol; equal nominal rates do not imply sync.
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::DeviceTrait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+
+mod lifecycle;
 
 use super::CancelFlag;
 use super::measurement::measurement_sample_format_rank;
@@ -19,14 +20,10 @@ pub use super::types::{
 };
 
 // Thirty-two microphones plus one electrical loopback is the capture limit.
-// Grouped input frames fit in a fixed array so callbacks never allocate.
+// Callbacks copy selected channels into preallocated interleaved rings.
 const MAX_INPUTS: usize = 33;
-// Bound configuration-driven memory (at most 320 MB for planar capture).
+// Bound each input; the shared aggregate byte budget also covers all rings.
 const MAX_FRAMES: usize = 16_000_000;
-const START_TIMEOUT: Duration = Duration::from_secs(5);
-const POLL_INTERVAL: Duration = Duration::from_millis(5);
-// Keep recording after the final output buffer is submitted to the device.
-const DRAIN_TIME: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
 struct InputGroup {
@@ -85,37 +82,13 @@ fn group_inputs(request: &MultiCaptureRequest) -> Result<Vec<InputGroup>, String
             });
         }
     }
+    crate::limits::capture_bytes(
+        request.inputs.len(),
+        request.stimulus.len() + request.sample_rate_hz as usize * 10,
+        request.sample_rate_hz,
+        request.stimulus.len(),
+    )?;
     Ok(groups)
-}
-
-fn exact_device(
-    devices: impl Iterator<Item = cpal::Device>,
-    name: &str,
-) -> Result<cpal::Device, String> {
-    let mut devices: Vec<_> = devices.collect();
-    if let Some(index) = devices
-        .iter()
-        .position(|device| device.id().is_ok_and(|id| id.to_string() == name))
-    {
-        return Ok(devices.remove(index));
-    }
-    let mut found = None;
-    for device in devices {
-        if device
-            .description()
-            .map_err(|e| format!("cannot identify audio device: {e}"))?
-            .name()
-            == name
-        {
-            if found.is_some() {
-                return Err(format!(
-                    "audio device name is ambiguous: {name}; select its stable device ID"
-                ));
-            }
-            found = Some(device);
-        }
-    }
-    found.ok_or_else(|| format!("audio device not found: {name}"))
 }
 
 fn exact_config(
@@ -139,7 +112,7 @@ fn capture_frames<T>(
     data: &[T],
     channels: usize,
     selected: &[u16],
-    producer: &mut rtrb::Producer<[f32; MAX_INPUTS]>,
+    producer: &mut rtrb::Producer<f32>,
     failed: &AtomicBool,
 ) where
     T: cpal::SizedSample,
@@ -147,6 +120,7 @@ fn capture_frames<T>(
 {
     if channels == 0
         || !data.len().is_multiple_of(channels)
+        || selected.is_empty()
         || selected.len() > MAX_INPUTS
         || selected
             .iter()
@@ -156,18 +130,22 @@ fn capture_frames<T>(
         return;
     }
     for frame in data.chunks_exact(channels) {
-        let mut selected_frame = [0.0; MAX_INPUTS];
-        for (slot, channel) in selected.iter().enumerate() {
+        // The single producer owns these slots; the consumer can only free
+        // more. Reserve a whole frame logically before publishing its samples.
+        if producer.slots() < selected.len() {
+            failed.store(true, Ordering::Relaxed);
+            return;
+        }
+        for channel in selected {
             let sample = <f32 as cpal::FromSample<T>>::from_sample_(frame[usize::from(*channel)]);
             if !sample.is_finite() {
                 failed.store(true, Ordering::Relaxed);
                 return;
             }
-            selected_frame[slot] = sample;
-        }
-        if producer.push(selected_frame).is_err() {
-            failed.store(true, Ordering::Relaxed);
-            return;
+            if producer.push(sample).is_err() {
+                failed.store(true, Ordering::Relaxed);
+                return;
+            }
         }
     }
 }
@@ -213,7 +191,7 @@ fn input_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     selected: Vec<u16>,
-    mut producer: rtrb::Producer<[f32; MAX_INPUTS]>,
+    mut producer: rtrb::Producer<f32>,
     failed: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, String>
 where
@@ -234,6 +212,10 @@ where
         .map_err(|e| format!("cannot build capture input: {e}"))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Pass the preallocated callback state and its independent presentation/error signals explicitly."
+)]
 fn output_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -242,16 +224,19 @@ fn output_stream<T>(
     stimulus: Arc<Vec<f32>>,
     cursor: Arc<AtomicUsize>,
     failed: Arc<AtomicBool>,
+    presentation: Arc<super::presentation::PresentationClock>,
 ) -> Result<cpal::Stream, String>
 where
     T: cpal::SizedSample + cpal::FromSample<f32>,
 {
     let channels = usize::from(config.channels);
     let data_failed = Arc::clone(&failed);
+    let rate = config.sample_rate;
     device
         .build_output_stream::<T, _, _>(
             config,
-            move |data, _| {
+            move |data, info| {
+                let first = cursor.load(Ordering::Relaxed);
                 playback_frames(
                     data,
                     channels,
@@ -261,6 +246,9 @@ where
                     &cursor,
                     &data_failed,
                 );
+                if first < stimulus.len() && cursor.load(Ordering::Acquire) >= stimulus.len() {
+                    presentation.submit(info, stimulus.len() - first, rate, &data_failed);
+                }
             },
             move |_| {
                 failed.store(true, Ordering::Relaxed);
@@ -291,8 +279,8 @@ macro_rules! with_sample_format {
 }
 
 struct RunningInput {
-    stream: cpal::Stream,
-    consumer: rtrb::Consumer<[f32; MAX_INPUTS]>,
+    stream: Option<Box<dyn lifecycle::CaptureStream>>,
+    consumer: rtrb::Consumer<f32>,
     routes: Vec<(usize, u16)>,
     failed: Arc<AtomicBool>,
     name: String,
@@ -312,15 +300,16 @@ fn drain_inputs(
         }
         // Drain only a bounded snapshot. A running producer must not keep this
         // control loop busy forever and prevent cancellation/other-device polling.
-        for _ in 0..input.consumer.slots() {
-            let Ok(frame) = input.consumer.pop() else {
-                break;
-            };
-            for (slot, (index, _)) in input.routes.iter().enumerate() {
+        for _ in 0..input.consumer.slots() / input.routes.len() {
+            for (index, _) in &input.routes {
                 if recordings[*index].len() >= limit {
                     return Err("capture exceeded bounded recording storage".into());
                 }
-                recordings[*index].push(frame[slot]);
+                let sample = input
+                    .consumer
+                    .pop()
+                    .map_err(|_| "capture frame became incomplete")?;
+                recordings[*index].push(sample);
             }
         }
     }
@@ -341,10 +330,6 @@ fn drain_inputs(
     clippy::too_many_lines,
     reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
 )]
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "Allocated stimulus length is converted to f64 only to compute playback duration."
-)]
 pub fn capture_multidevice(
     request: MultiCaptureRequest,
     cancel: &CancelFlag,
@@ -353,11 +338,8 @@ pub fn capture_multidevice(
     if cancel.load(Ordering::Relaxed) {
         return Err("cancelled".into());
     }
-    let host = cpal::default_host();
-    let output = exact_device(
-        host.output_devices().map_err(|e| e.to_string())?,
-        &request.output_device,
-    )?;
+    let host = crate::devices::get_host_for_device(Some(&request.output_device));
+    let output = crate::devices::find_device(&host, &request.output_device, false)?;
     let output_config = exact_config(
         output
             .supported_output_configs()
@@ -392,10 +374,8 @@ pub fn capture_multidevice(
     // Build every stream before any stream starts. Dropping this vector handles
     // cleanup if device setup or any later play() call fails partway through.
     for group in groups {
-        let device = exact_device(
-            host.input_devices().map_err(|e| e.to_string())?,
-            &group.name,
-        )?;
+        let input_host = crate::devices::get_host_for_device(Some(&group.name));
+        let device = crate::devices::find_device(&input_host, &group.name, true)?;
         let device_id = device
             .id()
             .map_err(|e| format!("cannot identify microphone device: {e}"))?
@@ -423,7 +403,8 @@ pub fn capture_multidevice(
             input_sample_formats[*index] = format!("{:?}", config.sample_format());
             input_device_ids[*index].clone_from(&device_id);
         }
-        let (producer, consumer) = rtrb::RingBuffer::new(request.sample_rate_hz as usize);
+        let (producer, consumer) =
+            rtrb::RingBuffer::new(request.sample_rate_hz as usize * group.routes.len());
         let failed = Arc::new(AtomicBool::new(false));
         let selected = group.routes.iter().map(|(_, channel)| *channel).collect();
         let stream = with_sample_format!(
@@ -436,7 +417,7 @@ pub fn capture_multidevice(
             Arc::clone(&failed)
         )?;
         inputs.push(RunningInput {
-            stream,
+            stream: Some(Box::new(stream)),
             consumer,
             routes: group.routes,
             failed,
@@ -446,6 +427,7 @@ pub fn capture_multidevice(
     let stimulus = Arc::new(request.stimulus);
     let cursor = Arc::new(AtomicUsize::new(0));
     let output_failed = Arc::new(AtomicBool::new(false));
+    let presentation = Arc::new(super::presentation::PresentationClock::new());
     let output_stream = with_sample_format!(
         output_config.sample_format(),
         output_stream,
@@ -455,83 +437,35 @@ pub fn capture_multidevice(
         request.output_overrides,
         Arc::clone(&stimulus),
         Arc::clone(&cursor),
-        Arc::clone(&output_failed)
+        Arc::clone(&output_failed),
+        Arc::clone(&presentation)
     )?;
-    for input in &inputs {
-        input
-            .stream
-            .play()
-            .map_err(|e| format!("cannot start {}: {e}", input.name))?;
-    }
-    let start = Instant::now();
-    // At least 250 ms of real input frames from every mic before starting output.
-    while recordings
-        .iter()
-        .any(|samples| samples.len() < request.sample_rate_hz as usize / 4)
-    {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("cancelled".into());
-        }
-        drain_inputs(&mut inputs, &mut recordings, limit)?;
-        if start.elapsed() > START_TIMEOUT {
-            return Err("capture input did not start within five seconds".into());
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
-    let playback_input_starts: Vec<usize> = recordings.iter().map(Vec::len).collect();
-    output_stream
-        .play()
-        .map_err(|e| format!("cannot start playback: {e}"))?;
-    let playback_start = Instant::now();
-    let timeout =
-        Duration::from_secs_f64(stimulus.len() as f64 / f64::from(request.sample_rate_hz))
-            + START_TIMEOUT;
-    let mut completed_at = None;
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("cancelled".into());
-        }
-        if output_failed.load(Ordering::Relaxed) {
-            return Err("capture playback stream failed".into());
-        }
-        drain_inputs(&mut inputs, &mut recordings, limit)?;
-        if cursor.load(Ordering::Acquire) >= stimulus.len() {
-            let completed = completed_at.get_or_insert_with(Instant::now);
-            if completed.elapsed() >= DRAIN_TIME {
-                break;
-            }
-        }
-        if playback_start.elapsed() > timeout {
-            return Err("capture playback stalled".into());
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
-    drop(output_stream);
-    if output_failed.load(Ordering::Relaxed) {
-        return Err("capture playback stream failed while stopping".into());
-    }
-    for input in &inputs {
-        input
-            .stream
-            .pause()
-            .map_err(|e| format!("cannot stop {}: {e}", input.name))?;
-    }
-    drain_inputs(&mut inputs, &mut recordings, limit)?;
-    for (index, samples) in recordings.iter().enumerate() {
-        // The 500 ms drain interval accommodates normal crystal skew. A stream
-        // that stops delivering data mid-take must not be reported as successful.
-        if samples.len().saturating_sub(playback_input_starts[index]) < stimulus.len() {
-            return Err(format!(
-                "input {} stopped before the complete stimulus was captured",
-                request.inputs[index].device
-            ));
-        }
-    }
+    let mut recorder =
+        lifecycle::PreparedRecorder::new(inputs, recordings, request.sample_rate_hz, limit);
+    let mut playback =
+        lifecycle::PreparedPlayback::new(Box::new(output_stream), output_failed, presentation);
+    let logical_channels: Vec<_> = (0..request.inputs.len())
+        .map(|index| u16::try_from(index).map_err(|_| "input channel count overflow"))
+        .collect::<Result<_, _>>()?;
+    let captured = super::acquire::capture(
+        &mut playback,
+        &mut recorder,
+        super::acquire::CaptureRequest {
+            wav: std::path::Path::new("prepared-session-stimulus"),
+            frames: stimulus.len(),
+            rate: request.sample_rate_hz,
+            output_channel: request.output_channel,
+            input_channels: &logical_channels,
+            output_device: None,
+            input_device: None,
+        },
+        Some(cancel),
+    )?;
     Ok(MultiCaptureResult {
         input_device_ids,
         output_device_id,
-        sample_rate_hz: request.sample_rate_hz,
-        recordings,
+        sample_rate_hz: captured.analysis_sample_rate,
+        recordings: captured.recorded_per_channel,
         input_sample_formats,
         output_sample_format,
     })

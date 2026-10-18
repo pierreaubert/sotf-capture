@@ -111,11 +111,17 @@ pub struct RecordingResult {
     // Advanced metrics
     pub impulse_response: Option<Vec<f32>>,
     pub impulse_time_ms: Option<Vec<f32>>,
+    /// NaN denotes an unavailable bin; JSON encodes these gaps as null.
+    #[serde(default, with = "sparse_series")]
     pub thd_percent: Option<Vec<f32>>,
     pub harmonic_distortion_db: Option<Vec<Vec<f32>>>,
+    #[serde(default, with = "sparse_series")]
     pub excess_group_delay_ms: Option<Vec<f32>>,
+    #[serde(default, with = "sparse_series")]
     pub rt60_ms: Option<Vec<f32>>,
+    #[serde(default, with = "sparse_series")]
     pub clarity_c50_db: Option<Vec<f32>>,
+    #[serde(default, with = "sparse_series")]
     pub clarity_c80_db: Option<Vec<f32>>,
     pub spectrogram_db: Option<Vec<Vec<f32>>>,
     /// Per-take quality verdict from the engine. `None` for results captured
@@ -127,6 +133,42 @@ pub struct RecordingResult {
     /// or imported measurements whose stimulus configuration is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stimulus_config: Option<crate::recording_helpers::EffectiveAcquisitionConfig>,
+}
+
+mod sparse_series {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[expect(
+        clippy::ref_option,
+        reason = "Serde's field serializer receives a reference to the complete Option field."
+    )]
+    pub fn serialize<S: Serializer>(
+        series: &Option<Vec<f32>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        series
+            .as_ref()
+            .map(|values| {
+                values
+                    .iter()
+                    .map(|value| value.is_finite().then_some(*value))
+                    .collect::<Vec<_>>()
+            })
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<f32>>, D::Error> {
+        Ok(
+            Option::<Vec<Option<f32>>>::deserialize(deserializer)?.map(|values| {
+                values
+                    .into_iter()
+                    .map(|value| value.unwrap_or(f32::NAN))
+                    .collect()
+            }),
+        )
+    }
 }
 
 impl RecordingResult {

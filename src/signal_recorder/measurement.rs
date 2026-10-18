@@ -1,14 +1,17 @@
 /// Convert a measurement stimulus level in dBFS to a linear amplitude.
 ///
 /// The level is clamped to ≤ 0 dBFS (amplitude ≤ 1.0): anything hotter is
-/// hard-clamped sample-by-sample at the output (`fill_measurement_output`),
+/// hard-clamped sample-by-sample at the output,
 /// which would turn the stimulus into a fully clipped sweep and silently
 /// corrupt the measurement. Clamping here degrades a bad value to full
 /// scale instead of a distorted signal. User-facing validation of hot
 /// levels belongs to the CLI/UI layers, not this function.
 #[cfg(any(test, feature = "capture-io"))]
 pub(super) fn measurement_amplitude_from_level_db(level_db: f32) -> f32 {
-    10.0_f32.powf(level_db.clamp(-40.0, 0.0) / 20.0)
+    if !level_db.is_finite() {
+        return 0.0;
+    }
+    10.0_f32.powf(level_db.min(0.0) / 20.0)
 }
 
 #[cfg(feature = "capture-io")]

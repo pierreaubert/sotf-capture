@@ -129,6 +129,23 @@ pub fn publish_capture_handoff(
     for file in &report.ctc_files {
         roles.insert(file.clone(), CaptureArtifactRole::SupportingEvidence);
     }
+    if let Some(snapshot) = &report.localization_calibration {
+        let bytes = crate::artifacts::read_member(
+            output,
+            Path::new(&snapshot.file),
+            crate::artifacts::MAX_METADATA_BYTES,
+        )?;
+        if super::calibration_sha256(&bytes) != snapshot.sha256 {
+            return Err("localization calibration changed before handoff publication".into());
+        }
+        roles.insert(snapshot.file.clone(), CaptureArtifactRole::Calibration);
+    }
+    for take in &report.loopback_files {
+        roles.insert(
+            take.wav_file.clone(),
+            CaptureArtifactRole::SupportingEvidence,
+        );
+    }
     let selected_take_ids = report.selected_take_ids.as_ref().map(|ids| {
         ids.iter()
             .map(String::as_str)

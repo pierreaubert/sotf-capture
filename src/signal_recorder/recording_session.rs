@@ -120,10 +120,10 @@ impl RecordingSession {
     /// # Errors
     /// Returns an error if the session file cannot be read or its JSON cannot be decoded.
     pub fn load_from_file(path: &Path) -> Result<Self, String> {
-        let file =
-            std::fs::File::open(path).map_err(|e| format!("Failed to open session file: {e}"))?;
-        let session: Self = serde_json::from_reader(file)
+        let bytes = crate::artifacts::read_file(path, crate::artifacts::MAX_METADATA_BYTES)?;
+        let session: Self = serde_json::from_slice(&bytes)
             .map_err(|e| format!("Failed to deserialize session: {e}"))?;
+        validate_paths(path.parent().unwrap_or(Path::new(".")), &session)?;
         log::info!(
             "[RecordingSession] Loaded session from {} (version {})",
             path.display(),
@@ -131,6 +131,64 @@ impl RecordingSession {
         );
         Ok(session)
     }
+}
+
+fn validate_paths(root: &Path, session: &RecordingSession) -> Result<(), String> {
+    use crate::artifacts::member_path;
+    if session.channels.len() > 64 {
+        return Err("recording session exceeds 64 channels".into());
+    }
+    let mut inputs = std::collections::HashSet::new();
+    let mut outputs = std::collections::HashSet::new();
+    for channel in &session.channels {
+        if !channel.success {
+            continue;
+        }
+        member_path(root, Path::new(&channel.wav_path))?;
+        member_path(root, Path::new(&channel.csv_path))?;
+        if Path::new(&channel.csv_path)
+            .extension()
+            .and_then(|s| s.to_str())
+            != Some("csv")
+            || !outputs.insert(channel.csv_path.as_str())
+        {
+            return Err("recording output must be a unique local .csv file".into());
+        }
+        inputs.insert(channel.wav_path.as_str());
+    }
+    for name in session
+        .mic_calibration_path
+        .iter()
+        .chain(session.mic_calibration_paths.iter().flatten())
+        .chain(
+            session
+                .channels
+                .iter()
+                .filter_map(|channel| channel.mic_calibration_path.as_ref()),
+        )
+        .filter(|name| !name.is_empty())
+    {
+        member_path(root, Path::new(name))?;
+        inputs.insert(name.as_str());
+    }
+    if outputs.iter().any(|name| inputs.contains(name)) {
+        return Err("recording output would overwrite an input artifact".into());
+    }
+    Ok(())
+}
+
+fn snapshot(path: &Path, limit: usize) -> Result<tempfile::NamedTempFile, String> {
+    use std::io::Write;
+    let bytes = crate::artifacts::read_file(path, limit)?;
+    let suffix = format!(
+        ".{}",
+        path.extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("txt")
+    );
+    let mut copy = tempfile::NamedTempFile::with_suffix(&suffix).map_err(|e| e.to_string())?;
+    copy.write_all(&bytes).map_err(|e| e.to_string())?;
+    Ok(copy)
 }
 
 /// Re-process recordings from WAV files and regenerate CSV analysis files
@@ -163,6 +221,17 @@ pub fn reprocess_recordings(
 ) -> Result<RecordingSession, String> {
     use math_audio_dsp::analysis::{MicrophoneCompensation, analyze_recording, write_analysis_csv};
 
+    validate_paths(session_dir, session)?;
+    if reference_signal.is_empty()
+        || reference_signal.len() > 16_000_000
+        || reference_signal.iter().any(|sample| !sample.is_finite())
+    {
+        return Err("invalid or oversized reference signal".into());
+    }
+    let load_compensation = |path: &Path| {
+        let copy = snapshot(path, crate::artifacts::MAX_METADATA_BYTES)?;
+        MicrophoneCompensation::from_file(copy.path())
+    };
     log::info!(
         "[reprocess_recordings] Re-processing {} channels in {}",
         session.channels.len(),
@@ -171,11 +240,11 @@ pub fn reprocess_recordings(
 
     // Load global microphone compensation (used as fallback)
     let global_compensation = if let Some(comp_path) = mic_compensation_path {
-        Some(MicrophoneCompensation::from_file(comp_path)?)
+        Some(load_compensation(comp_path)?)
     } else if let Some(ref rel_path) = session.mic_calibration_path {
         let full_path = session_dir.join(rel_path);
         if full_path.exists() {
-            Some(MicrophoneCompensation::from_file(&full_path)?)
+            Some(load_compensation(&full_path)?)
         } else {
             None
         }
@@ -238,7 +307,7 @@ pub fn reprocess_recordings(
                 session_dir.join(ch_path)
             };
             if full_path.exists() {
-                Some(MicrophoneCompensation::from_file(&full_path)?)
+                Some(load_compensation(&full_path)?)
             } else {
                 log::warn!(
                     "[reprocess_recordings] Per-channel calibration file not found: {}, using global",
@@ -251,17 +320,26 @@ pub fn reprocess_recordings(
         };
 
         // Re-analyze the recording
+        // Analyze a bounded private snapshot, so a concurrent link replacement
+        // cannot redirect the analysis library's later path-based read.
+        let wav_snapshot = snapshot(&wav_path, crate::artifacts::MAX_AUDIO_BYTES)?;
         match analyze_recording(
-            &wav_path,
+            wav_snapshot.path(),
             reference_signal,
             session.sample_rate,
             session.sweep_range,
         ) {
             Ok(analysis) => {
-                // Write updated CSV
-                if let Err(e) =
-                    write_analysis_csv(&analysis, &csv_path, channel_compensation.as_ref())
-                {
+                // Rename a private temporary file over the destination; never
+                // follow a destination symlink substituted after preflight.
+                let write_csv = || -> Result<(), String> {
+                    let temporary =
+                        tempfile::NamedTempFile::new_in(session_dir).map_err(|e| e.to_string())?;
+                    write_analysis_csv(&analysis, temporary.path(), channel_compensation.as_ref())?;
+                    temporary.persist(&csv_path).map_err(|e| e.to_string())?;
+                    Ok(())
+                };
+                if let Err(e) = write_csv() {
                     log::error!(
                         "[reprocess_recordings] Failed to write CSV for channel '{}': {}",
                         channel_info.channel_name,
@@ -294,4 +372,85 @@ pub fn reprocess_recordings(
     }
 
     Ok(updated_session)
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    fn session() -> RecordingSession {
+        let mut session = RecordingSession::new(48000, "sweep", 0.1, -20.0, Some((20.0, 20000.0)));
+        session.add_channel(0, "left", 0, 0, "take.wav", "take.csv", true, None);
+        session
+    }
+
+    #[test]
+    fn local_recording_and_text_calibration_reprocess_successfully() {
+        let root = tempfile::tempdir().unwrap();
+        let reference =
+            math_audio_dsp::signals::try_gen_log_sweep(20.0, 20000.0, 0.1, 48000, 0.1).unwrap();
+        crate::signal_recorder::write_wav_file(&root.path().join("take.wav"), &reference, 48000, 1)
+            .unwrap();
+        std::fs::write(root.path().join("cal.txt"), "20 0\n1000 0\n20000 0\n").unwrap();
+        let mut session = session();
+        session.mic_calibration_path = Some("cal.txt".into());
+        let result = reprocess_recordings(root.path(), &session, &reference, None).unwrap();
+        assert!(result.channels[0].success, "{:?}", result.channels[0].error);
+        assert!(root.path().join("take.csv").is_file());
+        let snapshot = snapshot(&root.path().join("cal.txt"), 1024).unwrap();
+        let calibration =
+            math_audio_dsp::analysis::MicrophoneCompensation::from_file(snapshot.path()).unwrap();
+        assert_eq!(calibration.frequencies.first().copied(), Some(20.0));
+    }
+
+    #[test]
+    fn refuses_traversal_and_absolute_outputs_before_overwriting_sentinel() {
+        let root = tempfile::tempdir().unwrap();
+        let capture = root.path().join("capture");
+        std::fs::create_dir(&capture).unwrap();
+        let outside = root.path().join("sentinel.csv");
+        std::fs::write(&outside, b"keep me").unwrap();
+        for name in [
+            "../sentinel.csv".to_string(),
+            outside.to_string_lossy().into_owned(),
+        ] {
+            let mut session = session();
+            session.channels[0].csv_path = name;
+            assert!(reprocess_recordings(&capture, &session, &[0.1; 16], None).is_err());
+            let metadata = capture.join("recordings.json");
+            session.save_to_file(&metadata).unwrap();
+            assert!(RecordingSession::load_from_file(&metadata).is_err());
+            assert_eq!(std::fs::read(&outside).unwrap(), b"keep me");
+        }
+    }
+
+    #[test]
+    fn refuses_input_escape_duplicate_outputs_and_calibration_overwrite() {
+        let root = tempfile::tempdir().unwrap();
+        let mut session = session();
+        session.channels[0].wav_path = "../outside.wav".into();
+        assert!(validate_paths(root.path(), &session).is_err());
+        session.channels[0].wav_path = "take.wav".into();
+        session.mic_calibration_path = Some("../outside.txt".into());
+        assert!(validate_paths(root.path(), &session).is_err());
+        session.mic_calibration_path = Some("take.csv".into());
+        assert!(validate_paths(root.path(), &session).is_err());
+        session.mic_calibration_path = None;
+        session.channels.push(session.channels[0].clone());
+        assert!(validate_paths(root.path(), &session).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlinked_input_output_and_calibration() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        for name in ["take.wav", "take.csv", "cal.txt"] {
+            let mut session = session();
+            session.mic_calibration_path = Some("cal.txt".into());
+            std::os::unix::fs::symlink(outside.path(), root.path().join(name)).unwrap();
+            assert!(reprocess_recordings(root.path(), &session, &[0.1; 16], None).is_err());
+            std::fs::remove_file(root.path().join(name)).unwrap();
+        }
+    }
 }

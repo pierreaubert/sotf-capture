@@ -38,15 +38,24 @@ pub(super) fn find_real_output_device(host: &cpal::Host) -> Option<Device> {
     Some(default)
 }
 
-/// Find an audio device by name or ID with prioritization
+/// Find a measurement device by exact ID or unique complete name.
 ///
 /// # Errors
-/// Returns an error if device enumeration fails or no device matches the identifier.
+/// Returns an error if enumeration fails, the name is ambiguous, or no exact match exists.
 pub fn find_device(
     host: &cpal::Host,
     identifier: &str,
     is_input: bool,
 ) -> Result<cpal::Device, String> {
+    if super::is_asio_device(identifier) {
+        #[cfg(all(target_os = "windows", feature = "asio"))]
+        if host.id() != cpal::HostId::Asio {
+            return Err("requested ASIO host is unavailable".into());
+        }
+        #[cfg(not(all(target_os = "windows", feature = "asio")))]
+        return Err("ASIO capture requires Windows and the asio feature".into());
+    }
+    let identifier = super::strip_asio_prefix(identifier);
     let devices: Vec<cpal::Device> = if is_input {
         host.input_devices()
             .map_err(|e| format!("Failed to enumerate input devices: {e}"))?
@@ -74,7 +83,10 @@ pub fn find_device(
     if let Some(idx) = match_device_priority(&device_info, identifier) {
         Ok(devices[idx].clone())
     } else {
-        Err(device_not_found_message(identifier, is_input, &device_info))
+        Err(format!(
+            "{}; use an exact device ID or a unique full name",
+            device_not_found_message(identifier, is_input, &device_info)
+        ))
     }
 }
 

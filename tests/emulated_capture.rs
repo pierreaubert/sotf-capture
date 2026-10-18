@@ -589,21 +589,22 @@ fn synthetic_room_comb_and_mode_match_ground_truth() {
     // constructively at resonance, and tau keeps the resonance wider than
     // the analysis smoothing so the peak survives fractional-octave
     // averaging (bandwidth ~1/(pi * tau) ~ 6 Hz).
-    let fs = SAMPLE_RATE as f32;
+    let fs = f32::from(u16::try_from(SAMPLE_RATE).unwrap());
     let tau_s = 0.05f32;
     let amplitude = 2.0 / (tau_s * fs);
     let mut modal_ir = vec![0.0f32; SAMPLE_RATE as usize / 2];
     modal_ir[0] = 1.0;
     for (n, tap) in modal_ir.iter_mut().enumerate() {
-        let t = n as f32 / fs;
+        let t = f32::from(u16::try_from(n).unwrap()) / fs;
         *tap += amplitude * (-t / tau_s).exp() * (2.0 * std::f32::consts::PI * 120.0 * t).cos();
     }
     let modal = analyze_room(modal_ir, 0);
     assert!(modal.quality.trustworthy, "{:?}", modal.quality.issues);
     let mode_db = spl_at_nearest(&modal.result.frequencies, &modal.result.spl_db, 120.0);
-    let flank_db = 0.5
-        * (spl_at_nearest(&modal.result.frequencies, &modal.result.spl_db, 80.0)
-            + spl_at_nearest(&modal.result.frequencies, &modal.result.spl_db, 180.0));
+    let flank_db = f32::midpoint(
+        spl_at_nearest(&modal.result.frequencies, &modal.result.spl_db, 80.0),
+        spl_at_nearest(&modal.result.frequencies, &modal.result.spl_db, 180.0),
+    );
     assert!(
         mode_db - flank_db > 3.0,
         "modal peak {mode_db:.1} dB vs flanks {flank_db:.1} dB; theory predicts a clear local peak"

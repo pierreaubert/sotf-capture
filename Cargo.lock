@@ -2618,7 +2618,7 @@ dependencies = [
 
 [[package]]
 name = "math-dsp"
-version = "0.5.34"
+version = "0.5.35"
 dependencies = [
  "clap",
  "hound",
@@ -2639,7 +2639,7 @@ dependencies = [
 
 [[package]]
 name = "math-iir-fir"
-version = "0.5.26"
+version = "0.5.27"
 dependencies = [
  "base64",
  "byteorder",
@@ -2673,7 +2673,7 @@ dependencies = [
 
 [[package]]
 name = "math-rir"
-version = "0.5.12"
+version = "0.5.13"
 dependencies = [
  "math-iir-fir",
  "rayon",
@@ -4473,7 +4473,7 @@ dependencies = [
 
 [[package]]
 name = "sotf-capture"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "audioadapter-buffers",
  "autoeq",
@@ -4483,6 +4483,7 @@ dependencies = [
  "ctrlc",
  "env_logger",
  "hound",
+ "libc",
  "log",
  "math-dsp",
  "math-rir",

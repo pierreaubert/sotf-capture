@@ -364,6 +364,10 @@ impl CaptureSessionPlan {
         clippy::cast_possible_truncation,
         reason = "Checking the f32 cast detects amplitude underflow at the waveform boundary."
     )]
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "Validated positive frame counts are bounded to 16 million before integer conversion."
+    )]
     pub fn validate(self) -> Result<ValidatedCaptureSession, CapturePlanError> {
         let reject = |message: &str| CapturePlanError(message.to_owned());
         if self.version != 1 {
@@ -512,6 +516,13 @@ impl CaptureSessionPlan {
             return Err(reject("setup description must be nonempty when supplied"));
         }
         if let Some(probe) = &self.probe {
+            crate::limits::auxiliary_frames(
+                self.sample_rate_hz,
+                self.sources.len(),
+                f64::from(probe.probe_duration_ms) / 1000.0,
+                f64::from(probe.silence_duration_ms) / 1000.0,
+            )
+            .map_err(|error| reject(&error))?;
             if !probe.probe_duration_ms.is_finite()
                 || probe.probe_duration_ms <= 0.0
                 || !probe.silence_duration_ms.is_finite()
@@ -525,6 +536,13 @@ impl CaptureSessionPlan {
             }
         }
         if let Some(anchor) = &self.bass_anchor {
+            crate::limits::auxiliary_frames(
+                self.sample_rate_hz,
+                self.sources.len(),
+                f64::from(anchor.bass_duration_s),
+                f64::from(anchor.silence_duration_ms) / 1000.0,
+            )
+            .map_err(|error| reject(&error))?;
             let nyquist = f64::from(self.sample_rate_hz) / 2.0;
             if !anchor.bass_freq_hz.is_finite()
                 || anchor.bass_freq_hz <= 0.0
@@ -577,8 +595,19 @@ impl CaptureSessionPlan {
                     "ctc requires two distinct known ear microphones and a finite head position with a nonempty id",
                 ));
             }
-            if self.loopback.is_none() {
+            let Some(loopback) = self.loopback.as_ref() else {
                 return Err(reject("ctc requires a plan loopback route"));
+            };
+            let device = &loopback.device;
+            if self
+                .microphones
+                .iter()
+                .filter(|mic| mic.id == ctc.left_ear || mic.id == ctc.right_ear)
+                .any(|mic| &mic.device != device)
+            {
+                return Err(reject(
+                    "ctc ears and loopback must share one input device and clock",
+                ));
             }
         }
         let sweep = &self.sweep;
@@ -660,6 +689,13 @@ impl CaptureSessionPlan {
                 "sweep duration exceeds bounded capture storage at this sample rate",
             ));
         }
+        crate::limits::capture_bytes(
+            self.microphones.len() + usize::from(self.loopback.is_some()),
+            ((sweep_seconds + 14.0) * f64::from(self.sample_rate_hz)).ceil() as usize,
+            self.sample_rate_hz,
+            ((sweep_seconds + 4.0) * f64::from(self.sample_rate_hz)).ceil() as usize,
+        )
+        .map_err(|error| reject(&error))?;
         if sweep.amplitude as f32 == 0.0
             || sweep.duration_secs * f64::from(self.sample_rate_hz) < 2.0
         {

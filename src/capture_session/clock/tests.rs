@@ -50,6 +50,7 @@ fn fixture() -> (Golden, RawCaptureManifest, Vec<f32>, Vec<f32>) {
     let session = plan.validate().unwrap();
     let stimulus = prepare_capture_stimulus(&session).unwrap();
     let manifest = RawCaptureManifest {
+        localization_calibration: None,
         version: 1,
         plan: session.plan().clone(),
         stimulus: stimulus.layout,
@@ -69,7 +70,7 @@ fn fixture() -> (Golden, RawCaptureManifest, Vec<f32>, Vec<f32>) {
 // Independent first-order-hold sampling oracle. This intentionally does not use
 // the production FIR resampler; the interpolation adds a small waveform error.
 fn sample_clock(stimulus: &[f32], offset: f64, ppm: f64, propagation: f64) -> Vec<f32> {
-    (0..stimulus.len() + 4096)
+    (0..stimulus.len() + offset.max(0.0).ceil() as usize + 4096)
         .map(|n| {
             let time = (n as f64 - offset) / (1.0 + ppm / 1e6) - propagation;
             if time < 0.0 || time >= (stimulus.len() - 1) as f64 {
@@ -542,20 +543,45 @@ fn ctc_assembly_crops_raw_takes_into_stereo_ears_loopback_and_reference() {
             yaw_deg: 0.0,
         },
     });
-    let take_samples = manifest.takes[0].samples;
+    // Independent sampling oracle: one hardware timeline, a three-second
+    // startup offset, nonzero drift, and different physical ear delays.
+    for (index, mic) in manifest.plan.microphones.iter_mut().enumerate() {
+        mic.device = "shared-input".into();
+        mic.input_channel = index as u16;
+    }
+    manifest.plan.loopback.as_mut().unwrap().device = "shared-input".into();
+    let prepared = prepare_capture_stimulus(&manifest.plan.clone().validate().unwrap()).unwrap();
+    let offset = 144_000.0;
+    let ppm = 60.0;
+    for (index, delay) in [96.0, 120.0].into_iter().enumerate() {
+        let samples = sample_clock(&prepared.samples, offset, ppm, delay);
+        let take = &mut manifest.takes[index];
+        take.device_id = "shared-input".into();
+        take.samples = samples.len();
+        crate::signal_recorder::write_wav_file(
+            &root.path().join(&take.wav_file),
+            &samples,
+            manifest.plan.sample_rate_hz,
+            1,
+        )
+        .unwrap();
+    }
+    let electrical = sample_clock(&prepared.samples, offset, ppm, 0.0);
     manifest.loopback_files.push(CaptureLoopbackTake {
         repeat_index: 0,
         source_id: manifest.plan.sources[0].id.clone(),
         wav_file: "loopback.wav".into(),
-        samples: take_samples,
-        device_id: "id:loopback".into(),
-        input_sample_format: "F32".into(),
+        samples: electrical.len(),
+        device_id: "shared-input".into(),
+        input_sample_format: manifest.takes[0].input_sample_format.clone(),
         peak_amplitude: 0.1,
         clipped_samples: 0,
     });
-    std::fs::copy(
-        root.path().join(&manifest.takes[0].wav_file),
-        root.path().join("loopback.wav"),
+    crate::signal_recorder::write_wav_file(
+        &root.path().join("loopback.wav"),
+        &electrical,
+        manifest.plan.sample_rate_hz,
+        1,
     )
     .unwrap();
     std::fs::write(
@@ -596,8 +622,9 @@ fn ctc_assembly_crops_raw_takes_into_stereo_ears_loopback_and_reference() {
         reference_reader.duration() as usize,
         report.stimulus.sweep_samples
     );
-    // Channel order: left ear first.
-    let left: Vec<f32> = hound::WavReader::open(root.path().join(&manifest.takes[0].wav_file))
+    // Recover independently specified physical delays against the electrical
+    // sweep, rather than asserting equality with implementation crop indices.
+    let reference: Vec<f32> = hound::WavReader::open(output.join(&fragment.reference_sweep))
         .unwrap()
         .samples::<f32>()
         .collect::<Result<_, _>>()
@@ -606,15 +633,14 @@ fn ctc_assembly_crops_raw_takes_into_stereo_ears_loopback_and_reference() {
         .samples::<f32>()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(stereo[0], left[report.stimulus.sweep_offset]);
-    assert_eq!(stereo[1], {
-        let right: Vec<f32> = hound::WavReader::open(root.path().join(&manifest.takes[1].wav_file))
-            .unwrap()
-            .samples::<f32>()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        right[report.stimulus.sweep_offset]
-    });
+    let mut recovered = Vec::new();
+    for (channel, expected) in [96.0, 120.0].into_iter().enumerate() {
+        let ear: Vec<f32> = stereo.iter().skip(channel).step_by(2).copied().collect();
+        let lag = math_audio_dsp::analysis::estimate_lag_with_confidence(&reference, &ear).unwrap();
+        assert!((lag.lag_samples as f64 - expected).abs() < 2.0, "{lag:?}");
+        recovered.push(lag.lag_samples as f64);
+    }
+    assert!((recovered[1] - recovered[0] - 24.0).abs() < 2.0);
     let handoff: autoeq::capture_handoff::CaptureHandoff = serde_json::from_slice(
         &std::fs::read(output.join(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME)).unwrap(),
     )
@@ -626,6 +652,89 @@ fn ctc_assembly_crops_raw_takes_into_stereo_ears_loopback_and_reference() {
             "handoff inventories {file}"
         );
     }
+    // Matching plan selectors cannot excuse independently recorded clocks.
+    manifest.takes[1].device_id = "other-clock".into();
+    std::fs::write(
+        root.path().join("capture-raw.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let rejected = root.path().join("independent");
+    let error = io::process_capture_session(root.path(), &rejected).unwrap_err();
+    assert!(error.contains("hardware input timeline"), "{error}");
+    assert!(
+        !rejected
+            .join(crate::capture_session::ctc::CTC_FRAGMENT_FILE)
+            .exists()
+    );
+    assert!(
+        !rejected
+            .join(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME)
+            .exists()
+    );
+
+    manifest.takes[1].device_id = "shared-input".into();
+    std::fs::write(
+        root.path().join("capture-raw.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    crate::signal_recorder::write_wav_file(
+        &root.path().join("loopback.wav"),
+        &vec![0.0; electrical.len()],
+        manifest.plan.sample_rate_hz,
+        1,
+    )
+    .unwrap();
+    let rejected = root.path().join("missing-markers");
+    let error = io::process_capture_session(root.path(), &rejected).unwrap_err();
+    assert!(error.contains("loopback markers"), "{error}");
+    assert!(
+        !rejected
+            .join(crate::capture_session::ctc::CTC_FRAGMENT_FILE)
+            .exists()
+    );
+    let mut markers_only = prepared.samples.clone();
+    markers_only[manifest.stimulus.sweep_offset
+        ..manifest.stimulus.sweep_offset + manifest.stimulus.sweep_samples]
+        .fill(0.0);
+    let markers_only = sample_clock(&markers_only, offset, ppm, 0.0);
+    crate::signal_recorder::write_wav_file(
+        &root.path().join("loopback.wav"),
+        &markers_only,
+        manifest.plan.sample_rate_hz,
+        1,
+    )
+    .unwrap();
+    let rejected = root.path().join("markers-without-sweep");
+    let error = io::process_capture_session(root.path(), &rejected).unwrap_err();
+    assert!(error.contains("loopback sweep"), "{error}");
+    assert!(
+        !rejected
+            .join(crate::capture_session::ctc::CTC_FRAGMENT_FILE)
+            .exists()
+    );
+}
+
+#[test]
+fn complete_journal_without_declared_auxiliary_results_is_rejected_before_publication() {
+    let root = write_golden_directory();
+    let path = root.path().join("capture-raw.json");
+    let mut manifest: RawCaptureManifest =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest.plan.probe = Some(crate::capture_session::CaptureProbe {
+        probe_duration_ms: 100.0,
+        silence_duration_ms: 100.0,
+        signal_level_db: -20.0,
+    });
+    std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let output = root.path().join("processed");
+    assert!(
+        io::process_capture_session(root.path(), &output)
+            .unwrap_err()
+            .contains("missing declared auxiliary")
+    );
+    assert!(!output.exists());
 }
 
 #[test]

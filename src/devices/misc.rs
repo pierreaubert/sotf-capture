@@ -46,62 +46,27 @@ pub(super) fn build_sample_rate_candidates(
     candidates
 }
 
-/// Helper to match a device from a list of (id, name) tuples based on identifier
+/// Match an exact ID or one unique case-insensitive device name.
 ///
-/// Priority:
-/// 1. Exact ID match
-/// 2. Exact Name match (case-insensitive)
-/// 3. Starts With match (case-insensitive)
-/// 4. Contains match (case-insensitive)
+/// Measurement routing must not depend on enumeration order or substrings.
 pub(super) fn match_device_priority(
     devices: &[(String, String)],
     identifier: &str,
 ) -> Option<usize> {
-    let target = identifier.to_lowercase();
-
-    // 1. Exact ID match
-    if let Some(idx) = devices.iter().position(|(id, _)| id == identifier) {
-        log::debug!("[find_device] Found device by ID match: {}", devices[idx].0);
-        return Some(idx);
-    }
-
-    // 2. Exact Name match (case-insensitive)
-    if let Some(idx) = devices
+    let ids: Vec<_> = devices
         .iter()
-        .position(|(_, name)| name.to_lowercase() == target)
-    {
-        log::debug!(
-            "[find_device] Found device by Exact Name match: {}",
-            devices[idx].1
-        );
-        return Some(idx);
+        .enumerate()
+        .filter(|(_, (id, _))| id == identifier)
+        .collect();
+    if !ids.is_empty() {
+        return (ids.len() == 1).then(|| ids[0].0);
     }
-
-    // 3. Starts With match (case-insensitive)
-    if let Some(idx) = devices
+    let names: Vec<_> = devices
         .iter()
-        .position(|(_, name)| name.to_lowercase().starts_with(&target))
-    {
-        log::debug!(
-            "[find_device] Found device by Starts With match: {}",
-            devices[idx].1
-        );
-        return Some(idx);
-    }
-
-    // 4. Contains match (case-insensitive)
-    if let Some(idx) = devices
-        .iter()
-        .position(|(_, name)| name.to_lowercase().contains(&target))
-    {
-        log::debug!(
-            "[find_device] Found device by Contains match: {}",
-            devices[idx].1
-        );
-        return Some(idx);
-    }
-
-    None
+        .enumerate()
+        .filter(|(_, (_, name))| name.eq_ignore_ascii_case(identifier))
+        .collect();
+    (names.len() == 1).then(|| names[0].0)
 }
 
 pub(super) fn summarize_available_device_names(

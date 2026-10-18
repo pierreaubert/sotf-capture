@@ -11,10 +11,9 @@
 //! whose `ctc.json` drops directly under `RoomEQ`'s `ctc:` key with
 //! `matrix_source: "raw_sweep"`.
 //!
-//! Assembly deliberately uses raw takes, not clock-corrected ones: `RoomEQ`
-//! aligns each take to its own loopback peak, so ears and loopback must share
-//! one timeline. Drift across a single sweep is second order; prefer one
-//! interface for ears and loopback so all three share a clock.
+//! Both ears and loopback must share one hardware input timeline. A single
+//! electrical-loopback clock fit maps all three onto the stimulus timeline;
+//! independent acoustic-peak alignment would erase physical ear delays.
 
 use autoeq::roomeq::{CtcHeadPositionConfig, CtcMeasurementConfig, CtcMeasurementFileConfig};
 use std::collections::BTreeSet;
@@ -109,6 +108,7 @@ pub fn assemble_ctc_takes(
     let mut reserve = |name: String| -> Result<String, String> {
         if !autoeq::capture_handoff::portable_capture_filename(&name)
             || !used_names.insert(name.clone())
+            || output.join(&name).exists()
         {
             return Err(format!("ctc output filename is unsafe or collides: {name}"));
         }
@@ -119,6 +119,29 @@ pub fn assemble_ctc_takes(
         &raw_artifact(raw_root, "stimulus.wav")?,
         report.plan.sample_rate_hz,
     )?;
+    let chirp = read_mono_f32(
+        &raw_artifact(raw_root, "timing-chirp.wav")?,
+        report.plan.sample_rate_hz,
+    )?;
+    // The electrical reference has no microphone travel correction. Reuse
+    // the marker estimator with acoustic geometry explicitly disabled.
+    let mut timing_plan = report.plan.clone();
+    timing_plan.timing_reference = None;
+    let timing_manifest = super::record::RawCaptureManifest {
+        localization_calibration: None,
+        version: 1,
+        plan: timing_plan,
+        stimulus: layout.clone(),
+        timing_reference_output_channel: report.timing_reference_output_channel,
+        status: super::record::RawCaptureStatus::RawComplete,
+        pending_processing: Vec::new(),
+        calibrations: Vec::new(),
+        takes: Vec::new(),
+        loopback_files: Vec::new(),
+        error: None,
+        probe_pass: None,
+        bass_anchor_pass: None,
+    };
     let sweep_end = layout.sweep_offset + layout.sweep_samples;
     let reference = stimulus
         .get(layout.sweep_offset..sweep_end)
@@ -157,6 +180,19 @@ pub fn assemble_ctc_takes(
                     source.id, left.raw.repeat_index
                 )
             })?;
+        if left.raw.device_id.is_empty()
+            || left.raw.device_id != right.raw.device_id
+            || left.raw.device_id != loopback.device_id
+            || left.raw.samples != right.raw.samples
+            || left.raw.samples != loopback.samples
+            || left.raw.input_sample_format != right.raw.input_sample_format
+            || left.raw.input_sample_format != loopback.input_sample_format
+            || left.raw.output_device_id != right.raw.output_device_id
+        {
+            return Err(
+                "ctc ears and loopback must share one verified hardware input timeline".into(),
+            );
+        }
         let ears = read_mono_f32(
             &raw_artifact(raw_root, &left.raw.wav_file)?,
             report.plan.sample_rate_hz,
@@ -169,6 +205,44 @@ pub fn assemble_ctc_takes(
             &raw_artifact(raw_root, &loopback.wav_file)?,
             report.plan.sample_rate_hz,
         )?;
+        if ears.len() != left.raw.samples
+            || right_ear.len() != right.raw.samples
+            || loopback_samples.len() != loopback.samples
+        {
+            return Err("ctc raw lengths disagree with the journal".into());
+        }
+        let mut electrical_take = left.raw.clone();
+        electrical_take.microphone_id.clear();
+        let (clock, fit) = super::clock::fit_capture_clock(
+            &timing_manifest,
+            &electrical_take,
+            &loopback_samples,
+            &chirp,
+        );
+        let fit = fit.ok_or_else(|| {
+            format!("ctc loopback markers do not establish a common clock mapping: {clock:?}")
+        })?;
+        let map = |samples: &[f32]| -> Result<Vec<f32>, String> {
+            let ratio = 1.0 + fit.skew.skew_ppm / 1e6;
+            let first = fit.skew.offset_samples + window.start as f64 * ratio;
+            let end = fit.skew.offset_samples + window.end as f64 * ratio;
+            if !first.is_finite() || !end.is_finite() || first < 0.0 || end > samples.len() as f64 {
+                return Err(
+                    "ctc raw input does not contain the complete mapped sweep and decay".into(),
+                );
+            }
+            math_audio_dsp::capture_resample::resample_to_common_clock(
+                samples,
+                &fit.skew,
+                layout.total_samples,
+            )
+            .ok_or_else(|| "ctc common-clock resampling refused the mapping".into())
+        };
+        // Apply the identical mapping to all channels, preserving interaural
+        // delay and speaker-to-ear travel relative to the electrical loopback.
+        let ears = map(&ears)?;
+        let right_ear = map(&right_ear)?;
+        let loopback_samples = map(&loopback_samples)?;
         let ears = ears.get(window.clone()).ok_or_else(|| {
             format!(
                 "left-ear take for '{}' is shorter than the sweep window",
@@ -187,6 +261,31 @@ pub fn assemble_ctc_takes(
                 source.id
             )
         })?;
+        // Markers establish the common clock, but do not prove the electrical
+        // monitor contains this source's sweep (routing can carry chirps only).
+        let lag =
+            math_audio_dsp::analysis::estimate_lag_with_confidence(reference, loopback_samples)
+                .map_err(|error| format!("ctc loopback sweep is unusable: {error}"))?;
+        let minimum =
+            math_audio_dsp::analysis::MeasurementQualityConfig::default().minimum_lag_confidence;
+        if lag.confidence < minimum
+            || lag.lag_samples < 0
+            || usize::try_from(lag.lag_samples)
+                .ok()
+                .and_then(|lag| lag.checked_add(reference.len()))
+                .is_none_or(|end| end > loopback_samples.len())
+        {
+            return Err(
+                "ctc loopback sweep is missing, truncated, or does not match the reference".into(),
+            );
+        }
+        for samples in [ears, right_ear, loopback_samples] {
+            if samples.iter().all(|sample| *sample == 0.0)
+                || samples.iter().any(|sample| sample.abs() >= 1.0)
+            {
+                return Err("ctc sweep contains silent or digitally clipped input".into());
+            }
+        }
         let source_file = sanitize_filename_component(&source.id)?;
         let ears_file = reserve(format!("ctc_{head_file}_{source_file}_ears.wav"))?;
         let mut stereo = Vec::with_capacity(ears.len() * 2);
@@ -264,6 +363,28 @@ pub fn assemble_ctc_takes(
 ///
 /// # Errors
 /// Returns an error if fragments disagree, identities or files are invalid, or bundle I/O fails.
+pub fn merge_ctc_fragments(directories: &[PathBuf], output: &Path) -> Result<MergedCtc, String> {
+    // A failed import must not publish a partial or apparently usable bundle.
+    if directories.is_empty() || directories.len() > 128 {
+        return Err("ctc merge requires 1..=128 session directories".into());
+    }
+    if output.exists() {
+        return Err(format!(
+            "refusing to overwrite existing {}",
+            output.display()
+        ));
+    }
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let staging = tempfile::tempdir_in(parent).map_err(|e| e.to_string())?;
+    let merged = merge_into(directories, staging.path())?;
+    std::fs::rename(staging.path(), output).map_err(|e| e.to_string())?;
+    Ok(merged)
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
@@ -272,26 +393,25 @@ pub fn assemble_ctc_takes(
     clippy::float_cmp,
     reason = "Serialized sweep settings must match exactly before fragments can share one reference waveform."
 )]
-pub fn merge_ctc_fragments(directories: &[PathBuf], output: &Path) -> Result<MergedCtc, String> {
-    if directories.is_empty() {
-        return Err("ctc merge requires at least one session directory".into());
-    }
-    if output.exists() {
-        return Err(format!(
-            "refusing to overwrite existing {}",
-            output.display()
-        ));
-    }
-    std::fs::create_dir_all(output).map_err(|e| e.to_string())?;
+fn merge_into(directories: &[PathBuf], output: &Path) -> Result<MergedCtc, String> {
+    use crate::artifacts::{MAX_AUDIO_BYTES, MAX_METADATA_BYTES, read_member};
     let mut fragments = Vec::new();
+    let mut metadata_bytes = 0_usize;
     for directory in directories {
-        let bytes = std::fs::read(directory.join(CTC_FRAGMENT_FILE)).map_err(|e| {
-            format!(
-                "cannot read {} in {}: {e}",
-                CTC_FRAGMENT_FILE,
-                directory.display()
-            )
-        })?;
+        let bytes = read_member(directory, Path::new(CTC_FRAGMENT_FILE), MAX_METADATA_BYTES)
+            .map_err(|e| {
+                format!(
+                    "cannot read {} in {}: {e}",
+                    CTC_FRAGMENT_FILE,
+                    directory.display()
+                )
+            })?;
+        metadata_bytes = metadata_bytes
+            .checked_add(bytes.len())
+            .ok_or("ctc metadata size overflow")?;
+        if metadata_bytes > 32 * 1024 * 1024 {
+            return Err("ctc metadata exceeds the aggregate 32 MiB limit".into());
+        }
         let fragment: CtcFragment =
             serde_json::from_slice(&bytes).map_err(|e| format!("invalid ctc fragment: {e}"))?;
         if fragment.version != CTC_FRAGMENT_VERSION {
@@ -300,11 +420,13 @@ pub fn merge_ctc_fragments(directories: &[PathBuf], output: &Path) -> Result<Mer
                 fragment.version
             ));
         }
+        validate_fragment(&fragment)?;
         fragments.push((directory, fragment));
     }
     let (_, first) = &fragments[0];
     let mut heads = Vec::new();
     let mut seen_heads = BTreeSet::new();
+    let mut read_bytes = 0_usize;
     let mut measurements = CtcMeasurementConfig {
         speakers: first.measurements.speakers.clone(),
         mics: first.measurements.mics.clone(),
@@ -325,8 +447,25 @@ pub fn merge_ctc_fragments(directories: &[PathBuf], output: &Path) -> Result<Mer
                 directory.display()
             ));
         }
-        let reference_bytes = std::fs::read(directory.join(&fragment.reference_sweep))
+        if fragment.measurements.files.len() > 4096 {
+            return Err("ctc fragment contains too many measurements".into());
+        }
+        let reference_bytes = read_member(directory, &fragment.reference_sweep, MAX_AUDIO_BYTES)
             .map_err(|e| format!("cannot read ctc reference sweep: {e}"))?;
+        read_bytes = read_bytes
+            .checked_add(reference_bytes.len())
+            .ok_or("ctc import size overflow")?;
+        if read_bytes > 1024 * 1024 * 1024 {
+            return Err("ctc import exceeds its read budget".into());
+        }
+        let reference_frames = validate_ctc_wave(&reference_bytes, 1, fragment.sample_rate_hz)?;
+        if (f64::from(reference_frames)
+            - fragment.sweep_duration_s * f64::from(fragment.sample_rate_hz))
+        .abs()
+            > 1.0
+        {
+            return Err("ctc reference duration disagrees with its fragment".into());
+        }
         if crate::capture_session::calibration_sha256(&reference_bytes) != fragment.reference_sha256
         {
             return Err(format!(
@@ -364,28 +503,42 @@ pub fn merge_ctc_fragments(directories: &[PathBuf], output: &Path) -> Result<Mer
         }
     }
     let mut bundled = Vec::new();
-    let mut copy = |directory: &Path, name: &Path| -> Result<(), String> {
-        let file = name
-            .file_name()
-            .and_then(|stem| stem.to_str())
-            .ok_or("ctc bundle member must be a local filename")?;
-        if !autoeq::capture_handoff::portable_capture_filename(file) {
-            return Err(format!("ctc bundle member is not portable: {file}"));
-        }
-        let bytes = std::fs::read(directory.join(name))
-            .map_err(|e| format!("cannot read ctc file: {e}"))?;
-        let target = output.join(file);
-        if target.exists() {
-            let kept = std::fs::read(&target).map_err(|e| e.to_string())?;
-            if kept != bytes {
-                return Err(format!("ctc bundle filename collides: {file}"));
+    // Limit the whole bundle as well as individual files; keep at most one
+    // member buffer alive while copying potentially many fragments.
+    let mut total_bytes = 0_usize;
+    let mut copy =
+        |directory: &Path, name: &Path, channels: u16, hash: Option<&str>| -> Result<u32, String> {
+            let file = crate::artifacts::member_name(name)?;
+            let bytes = read_member(directory, name, MAX_AUDIO_BYTES)
+                .map_err(|e| format!("cannot read ctc file: {e}"))?;
+            read_bytes = read_bytes
+                .checked_add(bytes.len())
+                .ok_or("ctc import size overflow")?;
+            if read_bytes > 1024 * 1024 * 1024 {
+                return Err("ctc import exceeds its read budget".into());
             }
-            return Ok(());
-        }
-        std::fs::write(&target, bytes).map_err(|e| e.to_string())?;
-        bundled.push(file.to_string());
-        Ok(())
-    };
+            let frames = validate_ctc_wave(&bytes, channels, first.sample_rate_hz)?;
+            if hash.is_some_and(|hash| crate::capture_session::calibration_sha256(&bytes) != hash) {
+                return Err("ctc reference changed during merge".into());
+            }
+            let target = output.join(file);
+            if target.exists() {
+                let kept = std::fs::read(&target).map_err(|e| e.to_string())?;
+                if kept != bytes {
+                    return Err(format!("ctc bundle filename collides: {file}"));
+                }
+                return Ok(frames);
+            }
+            total_bytes = total_bytes
+                .checked_add(bytes.len())
+                .ok_or("ctc bundle size overflow")?;
+            if total_bytes > 1024 * 1024 * 1024 {
+                return Err("ctc bundle exceeds its 1 GiB size limit".into());
+            }
+            std::fs::write(&target, bytes).map_err(|e| e.to_string())?;
+            bundled.push(file.to_string());
+            Ok(frames)
+        };
     for (directory, fragment) in &fragments {
         for entry in &fragment.measurements.files {
             let raw = entry
@@ -396,17 +549,30 @@ pub fn merge_ctc_fragments(directories: &[PathBuf], output: &Path) -> Result<Mer
                 .loopback
                 .as_deref()
                 .ok_or("ctc merge requires loopback files")?;
-            copy(directory, raw)?;
-            copy(directory, loopback)?;
+            let ears = copy(directory, raw, 2, None)?;
+            let loopback = copy(directory, loopback, 1, None)?;
+            if ears != loopback
+                || f64::from(ears) < first.sweep_duration_s * f64::from(first.sample_rate_hz)
+            {
+                return Err(
+                    "ctc ear/loopback lengths differ or omit part of the reference sweep".into(),
+                );
+            }
         }
     }
-    copy(&directories[0], &first.reference_sweep)?;
+    copy(
+        &directories[0],
+        &first.reference_sweep,
+        1,
+        Some(&first.reference_sha256),
+    )?;
     let reference_name = first
         .reference_sweep
         .file_name()
         .and_then(|stem| stem.to_str())
         .ok_or("ctc reference sweep must be a local filename")?;
     for entry in &mut measurements.files {
+        entry.ir = None;
         for path in [&mut entry.raw_sweep, &mut entry.loopback]
             .into_iter()
             .flatten()
@@ -460,27 +626,85 @@ fn sanitize_filename_component(label: &str) -> Result<String, String> {
 
 /// Resolve a journaled raw artifact without following user traversal.
 fn raw_artifact(raw_root: &Path, file: &str) -> Result<PathBuf, String> {
-    if !autoeq::capture_handoff::portable_capture_filename(file) {
-        return Err(format!("raw artifact path is not portable: {file}"));
+    crate::artifacts::member_path(raw_root, Path::new(file))
+}
+
+fn validate_ctc_wave(bytes: &[u8], channels: u16, rate: u32) -> Result<u32, String> {
+    let mut reader =
+        hound::WavReader::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let spec = reader.spec();
+    if spec.channels != channels
+        || spec.sample_rate != rate
+        || spec.bits_per_sample != 32
+        || spec.sample_format != hound::SampleFormat::Float
+        || reader.duration() == 0
+        || reader.duration() > 16_000_000
+    {
+        return Err("ctc WAV has invalid channels, rate, format, or frame count".into());
     }
-    Ok(raw_root.join(file))
+    for sample in reader.samples::<f32>() {
+        if !sample.map_err(|e| e.to_string())?.is_finite() {
+            return Err("ctc WAV contains non-finite samples".into());
+        }
+    }
+    Ok(reader.duration())
+}
+
+fn validate_fragment(fragment: &CtcFragment) -> Result<(), String> {
+    let measurements = &fragment.measurements;
+    let speakers: BTreeSet<_> = measurements.speakers.iter().collect();
+    if !(1..=64).contains(&speakers.len())
+        || speakers.len() != measurements.speakers.len()
+        || measurements.files.len() != speakers.len()
+        || measurements.head_positions.len() != 1
+        || measurements.mics != CTC_MIC_ROLES
+        || !(16_001..=384_000).contains(&fragment.sample_rate_hz)
+        || !fragment.sweep_duration_s.is_finite()
+        || fragment.sweep_duration_s <= 0.0
+        || fragment.sweep_duration_s * f64::from(fragment.sample_rate_hz) > 16_000_000.0
+        || !fragment.sweep_start_hz.is_finite()
+        || !fragment.sweep_end_hz.is_finite()
+        || fragment.sweep_start_hz <= 0.0
+        || fragment.sweep_start_hz >= fragment.sweep_end_hz
+        || fragment.sweep_end_hz >= f64::from(fragment.sample_rate_hz) / 2.0
+    {
+        return Err("invalid ctc matrix dimensions or sweep parameters".into());
+    }
+    let head = &measurements.head_positions[0];
+    if head.id.trim().is_empty()
+        || head.id.len() > 128
+        || ![head.x, head.y, head.z, head.yaw_deg]
+            .iter()
+            .all(|value| value.is_finite())
+        || speakers
+            .iter()
+            .any(|speaker| speaker.trim().is_empty() || speaker.len() > 128)
+    {
+        return Err("invalid ctc head or speaker identity".into());
+    }
+    let mut cells = BTreeSet::new();
+    for entry in &measurements.files {
+        if entry.head_position != head.id
+            || !speakers.contains(&entry.speaker)
+            || !cells.insert(&entry.speaker)
+            || entry.ir.is_some()
+        {
+            return Err("ctc matrix contains unknown or duplicate cells".into());
+        }
+        for path in [entry.raw_sweep.as_deref(), entry.loopback.as_deref()] {
+            crate::artifacts::member_name(path.ok_or("ctc cell is missing an audio member")?)?;
+        }
+    }
+    crate::artifacts::member_name(&fragment.reference_sweep)?;
+    Ok(())
 }
 
 /// Read a mono 32-bit float WAV fully.
 fn read_mono_f32(path: &Path, sample_rate_hz: u32) -> Result<Vec<f32>, String> {
+    let bytes = crate::artifacts::read_file(path, crate::artifacts::MAX_AUDIO_BYTES)?;
+    validate_ctc_wave(&bytes, 1, sample_rate_hz)?;
     let mut reader =
-        hound::WavReader::open(path).map_err(|e| format!("cannot read capture WAV: {e}"))?;
-    let spec = reader.spec();
-    if spec.channels != 1
-        || spec.sample_rate != sample_rate_hz
-        || spec.bits_per_sample != 32
-        || spec.sample_format != hound::SampleFormat::Float
-    {
-        return Err(format!(
-            "ctc requires mono f32 WAVs at the session rate: {}",
-            path.display()
-        ));
-    }
+        hound::WavReader::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
     reader
         .samples::<f32>()
         .collect::<Result<Vec<_>, _>>()
@@ -513,10 +737,18 @@ mod tests {
             .collect();
         for entry in &files {
             for member in [&entry.raw_sweep, &entry.loopback] {
-                std::fs::write(dir.join(member.as_deref().unwrap()), b"wav-bytes").unwrap();
+                let channels = if member == &entry.raw_sweep { 2 } else { 1 };
+                crate::signal_recorder::write_wav_file(
+                    &dir.join(member.as_deref().unwrap()),
+                    &vec![0.1; 16 * usize::from(channels)],
+                    48000,
+                    channels,
+                )
+                .unwrap();
             }
         }
-        std::fs::write(dir.join(CTC_REFERENCE_FILE), b"reference-bytes").unwrap();
+        crate::signal_recorder::write_wav_file(&dir.join(CTC_REFERENCE_FILE), &[0.1; 16], 48000, 1)
+            .unwrap();
         CtcFragment {
             version: CTC_FRAGMENT_VERSION,
             measurements: CtcMeasurementConfig {
@@ -538,11 +770,13 @@ mod tests {
                 files,
             },
             reference_sweep: PathBuf::from(CTC_REFERENCE_FILE),
-            sweep_duration_s: 5.0,
+            sweep_duration_s: 16.0 / 48000.0,
             sweep_start_hz: 20.0,
             sweep_end_hz: 20000.0,
             sample_rate_hz: 48000,
-            reference_sha256: crate::capture_session::calibration_sha256(b"reference-bytes"),
+            reference_sha256: crate::capture_session::calibration_sha256(
+                &std::fs::read(dir.join(CTC_REFERENCE_FILE)).unwrap(),
+            ),
         }
     }
 
@@ -552,6 +786,100 @@ mod tests {
             serde_json::to_vec_pretty(fragment).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn merge_refuses_invalid_matrix_identities_and_reference_duration() {
+        let root = tempfile::tempdir().unwrap();
+        for mode in 0..4 {
+            let mut fragment = fragment(root.path(), "head", &["left", "right"]);
+            match mode {
+                0 => fragment.measurements.files[1].speaker = "left".into(),
+                1 => fragment.measurements.files[0].head_position = "other-head".into(),
+                2 => fragment.sweep_duration_s = 1000.0,
+                _ => fragment.sweep_start_hz = -1.0,
+            }
+            write_fragment(root.path(), &fragment);
+            let output = root.path().join("merged");
+            assert!(merge_ctc_fragments(&[root.path().to_path_buf()], &output).is_err());
+            assert!(!output.exists());
+        }
+    }
+
+    #[test]
+    fn merge_rejects_escape_paths_for_every_member_without_publishing() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().join("sentinel.wav");
+        std::fs::write(&outside, b"private sentinel").unwrap();
+        let source = root.path().join("session");
+        std::fs::create_dir(&source).unwrap();
+        for field in 0..3 {
+            for name in [PathBuf::from("../sentinel.wav"), outside.clone()] {
+                let mut fragment = fragment(&source, "head", &["left"]);
+                match field {
+                    0 => fragment.measurements.files[0].raw_sweep = Some(name),
+                    1 => fragment.measurements.files[0].loopback = Some(name),
+                    _ => fragment.reference_sweep = name,
+                }
+                write_fragment(&source, &fragment);
+                let output = root.path().join("bundle");
+                assert!(merge_ctc_fragments(std::slice::from_ref(&source), &output).is_err());
+                assert!(!output.exists());
+                assert_eq!(std::fs::read(&outside).unwrap(), b"private sentinel");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_refuses_symlinked_members_and_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("session");
+        std::fs::create_dir(&source).unwrap();
+        for field in 0..4 {
+            let fragment = fragment(&source, "head", &["left"]);
+            write_fragment(&source, &fragment);
+            let member = match field {
+                0 => fragment.measurements.files[0].raw_sweep.as_deref().unwrap(),
+                1 => fragment.measurements.files[0].loopback.as_deref().unwrap(),
+                2 => &fragment.reference_sweep,
+                _ => Path::new(CTC_FRAGMENT_FILE),
+            };
+            let target = root.path().join("outside");
+            std::fs::copy(source.join(member), &target).unwrap();
+            std::fs::remove_file(source.join(member)).unwrap();
+            std::os::unix::fs::symlink(&target, source.join(member)).unwrap();
+            let output = root.path().join("bundle");
+            assert!(merge_ctc_fragments(std::slice::from_ref(&source), &output).is_err());
+            assert!(!output.exists());
+            std::fs::remove_file(source.join(member)).unwrap();
+        }
+    }
+
+    #[test]
+    fn merge_refuses_invalid_nonfinite_and_oversized_audio() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("session");
+        std::fs::create_dir(&source).unwrap();
+        for mode in 0..3 {
+            let fragment = fragment(&source, "head", &["left"]);
+            let member = source.join(fragment.measurements.files[0].raw_sweep.as_ref().unwrap());
+            match mode {
+                0 => std::fs::write(&member, b"not audio").unwrap(),
+                1 => crate::signal_recorder::write_wav_file(&member, &[f32::NAN; 16], 48000, 2)
+                    .unwrap(),
+                _ => std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&member)
+                    .unwrap()
+                    .set_len(crate::artifacts::MAX_AUDIO_BYTES as u64 + 1)
+                    .unwrap(),
+            }
+            write_fragment(&source, &fragment);
+            let output = root.path().join("bundle");
+            assert!(merge_ctc_fragments(std::slice::from_ref(&source), &output).is_err());
+            assert!(!output.exists());
+        }
     }
 
     #[test]

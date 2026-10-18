@@ -178,26 +178,6 @@ pub fn prepare_signal(signal: Vec<f32>, sample_rate: u32) -> Vec<f32> {
     prepare_signal_for_playback(signal, sample_rate, FADE_MS, PADDING_MS)
 }
 
-#[cfg(feature = "capture-io")]
-pub(super) fn fill_measurement_output<T>(
-    data: &mut [T],
-    playback: &[f32],
-    cursor: &std::sync::atomic::AtomicUsize,
-) where
-    T: cpal::Sample + cpal::FromSample<f32>,
-{
-    use std::sync::atomic::Ordering as AtomicOrdering;
-
-    let start = cursor.fetch_add(data.len(), AtomicOrdering::Relaxed);
-    let available = playback.len().saturating_sub(start).min(data.len());
-    for i in 0..available {
-        data[i] = T::from_sample(playback[start + i].clamp(-1.0, 1.0));
-    }
-    if available < data.len() {
-        data[available..].fill(T::from_sample(0.0));
-    }
-}
-
 /// Parse comma-separated channel list (0-based indices)
 ///
 /// # Errors

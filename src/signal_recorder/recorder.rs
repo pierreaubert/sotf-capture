@@ -15,7 +15,7 @@
 #[cfg(feature = "capture-io")]
 use std::sync::Arc;
 #[cfg(feature = "capture-io")]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Input configuration negotiated with the device at capture start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +69,31 @@ pub trait SweepRecorder {
     /// Samples captured on the first requested channel (progress only).
     fn captured_samples(&self) -> usize;
 
+    /// Read received frame counts for every independently clocked input stream.
+    ///
+    /// Reuse `counts` storage. One-clock backends use the default; independent
+    /// streams must report each clock separately for readiness and tail checks.
+    fn input_frame_counts(&self, counts: &mut Vec<usize>) {
+        counts.clear();
+        counts.push(self.captured_samples());
+    }
+
+    /// Whether requested channels share one hardware sample timeline.
+    fn shares_input_timeline(&self) -> bool {
+        true
+    }
+
+    /// Report asynchronous stream errors or transport loss before accepting a take.
+    ///
+    /// Backends with asynchronous errors must override this method and latch
+    /// errors until the next successful start.
+    ///
+    /// # Errors
+    /// Returns a message when the active acquisition is no longer valid.
+    fn check_health(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Halt capture and return the drained take.
     ///
     /// # Errors
@@ -106,6 +131,7 @@ pub struct CpalRecorder {
     consumers: Vec<rtrb::Consumer<f32>>,
     counts: Vec<Arc<AtomicUsize>>,
     overruns: Arc<AtomicUsize>,
+    failed: Arc<AtomicBool>,
     sample_rate: u32,
     level_meter: Option<Arc<super::level_meter::CaptureLevelMeter>>,
 }
@@ -131,6 +157,7 @@ impl CpalRecorder {
             consumers: Vec::new(),
             counts: Vec::new(),
             overruns: Arc::new(AtomicUsize::new(0)),
+            failed: Arc::new(AtomicBool::new(false)),
             sample_rate: 0,
             level_meter: None,
         }
@@ -147,6 +174,10 @@ impl SweepRecorder for CpalRecorder {
         clippy::too_many_lines,
         reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
     )]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "The fixed maximum frame count is exactly representable in f64."
+    )]
     fn start(
         &mut self,
         device: Option<&str>,
@@ -159,11 +190,14 @@ impl SweepRecorder for CpalRecorder {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
         let tag = self.log_tag.as_str();
+        if self.stream.is_some() {
+            return Err("capture is already active".into());
+        }
         if channels.is_empty() {
             return Err(format!("[{tag}] No input channels requested"));
         }
 
-        let host = cpal::default_host();
+        let host = crate::devices::get_host_for_device(device);
         let input_device = if let Some(dev_name) = device {
             log::info!("[{tag}] Looking for input device: {dev_name}");
             crate::devices::find_device(&host, dev_name, true).map_err(|e| {
@@ -187,43 +221,26 @@ impl SweepRecorder for CpalRecorder {
             actionable_capture_error(&format!("[{tag}] Failed to get default input config"), &e)
         })?;
 
-        let default_input_channels = default_input_config.channels() as usize;
-        let default_input_sample_rate = default_input_config.sample_rate();
-
-        log::info!(
-            "[{tag}] Input device default config: {default_input_channels}ch, {default_input_sample_rate}Hz",
-        );
-
-        // Prefer a supported config matching the requested rate with
-        // enough channels (fewest channels first); fall back to default.
-        let min_channels_needed = channels.iter().copied().max().unwrap_or(0) as usize + 1;
-        let best_config = input_device
+        let supported: Vec<_> = input_device
             .supported_input_configs()
-            .ok()
-            .and_then(|configs| {
-                configs
-                    .filter(|c| {
-                        let ch = c.channels() as usize;
-                        ch >= min_channels_needed
-                            && c.min_sample_rate() <= sample_rate
-                            && c.max_sample_rate() >= sample_rate
-                    })
-                    .min_by_key(cpal::SupportedStreamConfigRange::channels)
-            });
-
-        let (hardware_input_channels, input_sample_rate) = if let Some(config) = best_config {
-            let ch = config.channels() as usize;
-            log::info!(
-                "[{tag}] Using supported config: {ch}ch, {sample_rate}Hz (requested {sample_rate}Hz)",
-            );
-            (ch, sample_rate)
-        } else {
-            log::warn!(
-                "[{tag}] No supported config for {min_channels_needed}ch at {sample_rate}Hz, using default ({default_input_channels}ch, {default_input_sample_rate}Hz)",
-            );
-            (default_input_channels, default_input_sample_rate)
-        };
-
+            .map_err(|error| error.to_string())?
+            .collect();
+        let min_channels = channels
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or("input channel overflow")?;
+        let selected =
+            super::choose::choose_measurement_input_config(&supported, min_channels, sample_rate)
+                .unwrap_or(super::types::MeasurementInputConfig {
+                    channels: default_input_config.channels(),
+                    sample_rate: default_input_config.sample_rate(),
+                    sample_format: default_input_config.sample_format(),
+                });
+        let hardware_input_channels = selected.channels as usize;
+        let input_sample_rate = selected.sample_rate;
         if input_sample_rate != sample_rate {
             log::warn!(
                 "[{tag}] INPUT SAMPLE RATE MISMATCH: recording at {input_sample_rate}Hz but sweep/reference at {sample_rate}Hz",
@@ -244,7 +261,13 @@ impl SweepRecorder for CpalRecorder {
         );
 
         // One lock-free ring per channel plus a shared overrun counter.
+        let frames = (expected_duration_secs + 4.5) * f64::from(input_sample_rate);
+        if !frames.is_finite() || frames <= 0.0 || frames > crate::limits::MAX_CAPTURE_FRAMES as f64
+        {
+            return Err("capture duration exceeds bounded input storage".into());
+        }
         let ring_capacity = capture_capacity(input_sample_rate, expected_duration_secs, 4.5);
+        crate::limits::capture_bytes(channels.len() * 2, ring_capacity, input_sample_rate, 0)?;
         let mut producers = Vec::with_capacity(channels.len());
         let mut consumers = Vec::with_capacity(channels.len());
         let mut counts = Vec::with_capacity(channels.len());
@@ -258,50 +281,75 @@ impl SweepRecorder for CpalRecorder {
         let overruns = Arc::new(AtomicUsize::new(0));
         let overruns_callback = Arc::clone(&overruns);
         let channels_vec: Vec<usize> = channels.iter().map(|&c| c as usize).collect();
-        let overrun_tag = self.log_tag.clone();
-        let error_tag = self.log_tag.clone();
+        let failed = Arc::new(AtomicBool::new(false));
+        let callback_failed = Arc::clone(&failed);
+        let error_failed = Arc::clone(&failed);
         let level_meter = self.level_meter.clone();
 
-        let stream = input_device
-            .build_input_stream(
-                &input_config,
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    let frames = data.len() / hardware_input_channels;
-                    if let Some(meter) = &level_meter {
-                        // Lock-free atomic stores only; the meter reads
-                        // samples this callback already walks for the rings.
-                        for &ch_idx in &channels_vec {
-                            meter.record_interleaved(data, hardware_input_channels, ch_idx);
+        macro_rules! build_typed {
+            ($sample_ty:ty) => {
+                input_device.build_input_stream(
+                    &input_config,
+                    move |data: &[$sample_ty], _: &cpal::InputCallbackInfo| {
+                        if !data.len().is_multiple_of(hardware_input_channels)
+                            || data.chunks_exact(hardware_input_channels).any(|frame| {
+                                channels_vec.iter().any(|channel| {
+                                    !<f32 as cpal::FromSample<$sample_ty>>::from_sample_(
+                                        frame[*channel],
+                                    )
+                                    .is_finite()
+                                })
+                            })
+                        {
+                            callback_failed.store(true, Ordering::Release);
+                            return;
                         }
-                    }
-                    for (mic_i, &ch_idx) in channels_vec.iter().enumerate() {
-                        let written = write_selected_channel_to_ring(
-                            &mut producers[mic_i],
-                            data,
-                            hardware_input_channels,
-                            ch_idx,
-                        );
-                        counts_callback[mic_i].fetch_add(written, Ordering::Relaxed);
-                        if written < frames {
-                            // Count the actual dropped samples, not just the
-                            // number of callbacks that saw a shortfall.
-                            overruns_callback.fetch_add(frames - written, Ordering::Relaxed);
-                            crate::rate_limited_log!(
-                                warn,
-                                5,
-                                "[{overrun_tag}] Input capture ring buffer overrun"
+                        let frames = data.len() / hardware_input_channels;
+                        if let Some(meter) = &level_meter {
+                            // Lock-free atomic stores only; the meter reads
+                            // samples this callback already walks for the rings.
+                            for &ch_idx in &channels_vec {
+                                meter.record_converted(data, hardware_input_channels, ch_idx);
+                            }
+                        }
+                        for (mic_i, &ch_idx) in channels_vec.iter().enumerate() {
+                            let written = write_selected_channel_to_ring(
+                                &mut producers[mic_i],
+                                data,
+                                hardware_input_channels,
+                                ch_idx,
                             );
+                            counts_callback[mic_i].fetch_add(written, Ordering::Relaxed);
+                            if written < frames {
+                                // Count the actual dropped samples, not just the
+                                // number of callbacks that saw a shortfall.
+                                overruns_callback.fetch_add(frames - written, Ordering::Relaxed);
+                            }
                         }
-                    }
-                },
-                move |err| {
-                    crate::rate_limited_log!(warn, 5, "[{error_tag}] Input stream error: {err}");
-                },
-                None,
-            )
-            .map_err(|e| {
-                actionable_capture_error(&format!("[{tag}] Failed to build input stream"), &e)
-            })?;
+                    },
+                    move |_| error_failed.store(true, Ordering::Release),
+                    None,
+                )
+            };
+        }
+        let stream = match selected.sample_format {
+            cpal::SampleFormat::F32 => build_typed!(f32),
+            cpal::SampleFormat::F64 => build_typed!(f64),
+            cpal::SampleFormat::I8 => build_typed!(i8),
+            cpal::SampleFormat::I16 => build_typed!(i16),
+            cpal::SampleFormat::I24 => build_typed!(cpal::I24),
+            cpal::SampleFormat::I32 => build_typed!(i32),
+            cpal::SampleFormat::I64 => build_typed!(i64),
+            cpal::SampleFormat::U8 => build_typed!(u8),
+            cpal::SampleFormat::U16 => build_typed!(u16),
+            cpal::SampleFormat::U24 => build_typed!(cpal::U24),
+            cpal::SampleFormat::U32 => build_typed!(u32),
+            cpal::SampleFormat::U64 => build_typed!(u64),
+            other => return Err(format!("unsupported input sample format: {other:?}")),
+        }
+        .map_err(|e| {
+            actionable_capture_error(&format!("[{tag}] Failed to build input stream"), &e)
+        })?;
 
         stream.play().map_err(|e| {
             actionable_capture_error(&format!("[{tag}] Failed to start input stream"), &e)
@@ -312,6 +360,7 @@ impl SweepRecorder for CpalRecorder {
         self.consumers = consumers;
         self.counts = counts;
         self.overruns = overruns;
+        self.failed = failed;
         self.sample_rate = input_sample_rate;
 
         Ok(NegotiatedInput {
@@ -324,6 +373,17 @@ impl SweepRecorder for CpalRecorder {
         self.counts
             .first()
             .map_or(0, |count| count.load(Ordering::Relaxed))
+    }
+
+    fn check_health(&self) -> Result<(), String> {
+        if self.failed.load(Ordering::Acquire) {
+            return Err("input audio stream failed".into());
+        }
+        let lost = self.overruns.load(Ordering::Relaxed);
+        if lost != 0 {
+            return Err(format!("capture lost {lost} input samples"));
+        }
+        Ok(())
     }
 
     fn stop(&mut self) -> Result<RecordedTake, String> {
@@ -348,6 +408,7 @@ impl SweepRecorder for CpalRecorder {
                 self.log_tag
             );
         }
+        self.check_health()?;
         Ok(RecordedTake {
             recorded_per_channel,
             analysis_sample_rate: self.sample_rate,

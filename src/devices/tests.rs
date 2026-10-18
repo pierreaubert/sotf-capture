@@ -29,28 +29,18 @@ fn test_match_device_priority() {
     assert_eq!(match_device_priority(&devices, "Speakers"), Some(3));
     assert_eq!(match_device_priority(&devices, "speakers"), Some(3)); // Case insensitive
 
-    // 3. Starts With
-    // "Microphone" should match "Microphone (USB)" (idx 2) NOT "My Microphone" (idx 0) or "Built-in" (idx 1)
-    // Wait, "Microphone" as exact match doesn't exist.
-    // "Microphone (USB)" starts with "Microphone".
-    // "My Microphone" contains "Microphone".
-    // "Built-in Microphone" contains "Microphone".
-    // The logic prioritizes Starts With.
-    assert_eq!(match_device_priority(&devices, "Microphone"), Some(2));
+    // Substrings never authorize selecting a measurement route.
+    assert_eq!(match_device_priority(&devices, "Microphone"), None);
 
-    // 4. Contains
-    assert_eq!(match_device_priority(&devices, "Built-in"), Some(1));
-
-    // Edge case: "Micro"
-    // "Microphone (USB)" starts with it -> idx 2
-    assert_eq!(match_device_priority(&devices, "Micro"), Some(2));
-
-    // Edge case: "USB"
-    // "Microphone (USB)" contains it -> idx 2
-    assert_eq!(match_device_priority(&devices, "USB"), Some(2));
+    assert_eq!(match_device_priority(&devices, "Built-in"), None);
+    assert_eq!(match_device_priority(&devices, "Micro"), None);
+    assert_eq!(match_device_priority(&devices, "USB"), None);
 
     // Non-matching
     assert_eq!(match_device_priority(&devices, "Not Found"), None);
+    let duplicates = vec![("id1".into(), "Mic".into()), ("id2".into(), "mic".into())];
+    assert_eq!(match_device_priority(&duplicates, "MIC"), None);
+    assert_eq!(match_device_priority(&duplicates, "id2"), Some(1));
 }
 
 #[test]

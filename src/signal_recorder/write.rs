@@ -5,32 +5,28 @@ use std::path::Path;
 use tempfile::NamedTempFile;
 
 #[cfg(feature = "capture-io")]
-pub(super) fn write_selected_channel_to_ring(
+pub(super) fn write_selected_channel_to_ring<T: cpal::Sample>(
     producer: &mut rtrb::Producer<f32>,
-    data: &[f32],
+    data: &[T],
     channels: usize,
     channel_idx: usize,
-) -> usize {
+) -> usize
+where
+    f32: cpal::FromSample<T>,
+{
     if channels == 0 || channel_idx >= channels {
         return 0;
     }
 
-    let frames = data.len() / channels;
-    let writable = producer.slots().min(frames);
-    if writable == 0 {
-        return 0;
+    let mut written = 0;
+    for frame in data.chunks_exact(channels) {
+        let sample = <f32 as cpal::FromSample<T>>::from_sample_(frame[channel_idx]);
+        if producer.push(sample).is_err() {
+            break;
+        }
+        written += 1;
     }
-
-    let Ok(mut chunk) = producer.write_chunk_uninit(writable) else {
-        return 0;
-    };
-
-    let (first, second) = chunk.as_mut_slices();
-    for (frame_idx, slot) in first.iter_mut().chain(second.iter_mut()).enumerate() {
-        slot.write(data[frame_idx * channels + channel_idx]);
-    }
-    unsafe { chunk.commit(writable) };
-    writable
+    written
 }
 
 #[cfg(feature = "capture-io")]

@@ -37,7 +37,7 @@ use std::sync::atomic::Ordering;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RawCaptureStatus {
-    /// One or more sources remain to be recorded.
+    /// One or more declared sweep or auxiliary passes remain to be committed.
     Capturing,
     /// All raw takes exist; timing and calibrated analysis remain pending.
     RawComplete,
@@ -55,6 +55,15 @@ pub struct CaptureCalibration {
     /// Snapshot file relative to the capture directory.
     pub file: String,
     /// SHA-256 of the exact snapshot bytes.
+    pub sha256: String,
+}
+
+/// Exact supporting input bytes frozen before acquisition begins.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureFileSnapshot {
+    /// Single filename within the capture directory.
+    pub file: String,
+    /// SHA-256 of the captured file bytes.
     pub sha256: String,
 }
 
@@ -138,6 +147,9 @@ pub struct CaptureLoopbackTake {
 /// Durable acquisition journal, separate from corrected recording imports.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawCaptureManifest {
+    /// Frozen bench calibration; absent when no bench correction was declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub localization_calibration: Option<CaptureFileSnapshot>,
     /// Raw artifact schema version.
     pub version: u32,
     /// Frozen user declaration, including geometry, gains, and orientations.
@@ -235,7 +247,7 @@ fn wake_session_chain(
     use std::time::Instant;
 
     let rate = session.plan().sample_rate_hz;
-    let burst = wake_burst_samples(rate);
+    let burst = wake_burst_samples(rate, session.plan().sweep.amplitude as f32);
     let Some(first_source) = session.plan().sources.first() else {
         return Ok(());
     };
@@ -351,6 +363,10 @@ const BASS_ANCHOR_WAV_FILE: &str = "bass-anchor.wav";
 /// preserving completed sweeps for explicit-selection processing. Runners are
 /// injected so hardware-free tests can supply canned results.
 #[cfg(any(test, feature = "capture-io"))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Journal every auxiliary phase and terminal outcome in one control flow."
+)]
 pub(crate) fn run_auxiliary_passes(
     session: &ValidatedCaptureSession,
     output_directory: &Path,
@@ -391,6 +407,8 @@ pub(crate) fn run_auxiliary_passes(
     if plan.probe.is_none() && plan.bass_anchor.is_none() {
         return Ok(manifest);
     }
+    manifest.status = RawCaptureStatus::Capturing;
+    save_manifest(output_directory, &manifest)?;
     let fail = |manifest: &mut RawCaptureManifest, error: String| -> String {
         manifest.status = if error == "cancelled" {
             RawCaptureStatus::Cancelled
@@ -480,6 +498,11 @@ pub(crate) fn run_auxiliary_passes(
             Err(error) => return Err(fail(&mut manifest, error)),
         }
     }
+    if cancel.load(Ordering::Relaxed) {
+        return Err(fail(&mut manifest, "cancelled".into()));
+    }
+    manifest.status = RawCaptureStatus::RawComplete;
+    save_manifest(output_directory, &manifest)?;
     Ok(manifest)
 }
 
@@ -505,6 +528,24 @@ fn record_with(
     let snapshots =
         tempfile::tempdir().map_err(|e| format!("cannot stage calibration files: {e}"))?;
     let mut calibrations = Vec::new();
+    let localization_calibration = session
+        .plan()
+        .localization_calibration_file
+        .as_ref()
+        .map(|path| -> Result<CaptureFileSnapshot, String> {
+            let bytes = crate::artifacts::read_file(
+                &plan_directory.join(path),
+                crate::artifacts::MAX_METADATA_BYTES,
+            )?;
+            super::localization::parse_bench_calibration(&bytes)?;
+            let file = "localization-calibration.json".to_string();
+            std::fs::write(snapshots.path().join(&file), &bytes).map_err(|e| e.to_string())?;
+            Ok(CaptureFileSnapshot {
+                file,
+                sha256: super::calibration_sha256(&bytes),
+            })
+        })
+        .transpose()?;
     for (index, mic) in session.plan().microphones.iter().enumerate() {
         let path = plan_directory.join(&mic.calibration_file);
         // Calibration is a small text curve. Bound external file reads to 1 MiB.
@@ -538,6 +579,7 @@ fn record_with(
     std::fs::create_dir(output_directory)
         .map_err(|e| format!("cannot create new capture directory: {e}"))?;
     let mut manifest = RawCaptureManifest {
+        localization_calibration,
         version: 1,
         plan: session.plan().clone(),
         stimulus: stimulus.layout,
@@ -555,8 +597,18 @@ fn record_with(
         probe_pass: None,
         bass_anchor_pass: None,
     };
+    if let Some(snapshot) = &manifest.localization_calibration {
+        manifest.plan.localization_calibration_file = Some(snapshot.file.clone().into());
+    }
     save_manifest(output_directory, &manifest)?;
     let result = (|| -> Result<(), String> {
+        if let Some(snapshot) = &manifest.localization_calibration {
+            std::fs::copy(
+                snapshots.path().join(&snapshot.file),
+                output_directory.join(&snapshot.file),
+            )
+            .map_err(|e| e.to_string())?;
+        }
         for calibration in &manifest.calibrations {
             std::fs::copy(
                 snapshots.path().join(&calibration.file),
@@ -718,7 +770,18 @@ fn record_with(
     })();
     match result {
         Ok(()) => {
-            manifest.status = RawCaptureStatus::RawComplete;
+            if cancel.load(Ordering::Relaxed) {
+                manifest.status = RawCaptureStatus::Cancelled;
+                manifest.error = Some("cancelled".into());
+                save_manifest(output_directory, &manifest)?;
+                return Err("cancelled".into());
+            }
+            manifest.status =
+                if manifest.plan.probe.is_some() || manifest.plan.bass_anchor.is_some() {
+                    RawCaptureStatus::Capturing
+                } else {
+                    RawCaptureStatus::RawComplete
+                };
             save_manifest(output_directory, &manifest)?;
             Ok(manifest)
         }

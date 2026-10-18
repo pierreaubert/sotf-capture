@@ -2,7 +2,6 @@
 
 use super::consts::CANCELLED_ERR;
 use super::consts::MIN_REPEAT_SWEEPS;
-use super::misc::actionable_capture_error;
 use super::misc::check_capture_clipping;
 use super::quality::CaptureAnalysis;
 use super::quality::{
@@ -19,6 +18,7 @@ use math_audio_dsp::analysis::{
     ClockDriftEstimate, LagEstimate, MeasurementQualityConfig, MicrophoneCompensation,
     analyze_recording_with_lag,
 };
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 /// Pause between repeat-sweep takes, letting the room decay and the device
@@ -181,10 +181,6 @@ pub(super) fn cancel_aware_stop(
 /// `Err(CANCELLED_ERR)` ("cancelled").
 #[allow(clippy::too_many_arguments)]
 #[expect(
-    clippy::too_many_lines,
-    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
-)]
-#[expect(
     clippy::cast_precision_loss,
     reason = "Sample counts convert to floating-point seconds and RMS normalization for capture diagnostics."
 )]
@@ -200,126 +196,20 @@ fn capture_sweep_take(
     input_device_name: Option<&str>,
     cancel: Option<&CancelFlag>,
 ) -> Result<RawSweepTake, String> {
-    use std::thread::sleep;
-    use std::time::Duration;
-
-    if cancel_requested(cancel) {
-        return Err(CANCELLED_ERR.to_string());
-    }
-
-    log::debug!("[record_and_analyze] Starting playback and recording...");
-    log::debug!(
-        "[record_and_analyze]   Playback file: {}",
-        temp_wav_path.display()
-    );
-    log::debug!("[record_and_analyze]   Output channel: {output_channel}");
-    log::debug!("[record_and_analyze]   Input channel: {input_channel}");
-    log::debug!("[record_and_analyze]   Sample rate: {sample_rate}");
-
-    // Calculate expected duration
-    let expected_duration = reference_signal.len() as f64 / f64::from(sample_rate);
-    log::info!("[record_and_analyze]   Expected duration: {expected_duration:.2}s");
-
-    // Open the input side first so a missing or unusable mic fails fast,
-    // before playback starts through the caller-chosen backend.
-    let negotiated = recorder.start(
-        input_device_name,
-        &[input_channel],
-        sample_rate,
-        expected_duration,
+    let take = super::acquire::capture(
+        playback,
+        recorder,
+        super::acquire::CaptureRequest {
+            wav: temp_wav_path,
+            frames: reference_signal.len(),
+            rate: sample_rate,
+            output_channel,
+            input_channels: &[input_channel],
+            output_device: output_device_name,
+            input_device: input_device_name,
+        },
+        cancel,
     )?;
-
-    // Small delay to let recording buffer fill
-    sleep(Duration::from_millis(100));
-
-    // Honor cancellation before starting playback (mirrors the aux path).
-    if cancel_requested(cancel) {
-        let _ = recorder.stop();
-        return Err(CANCELLED_ERR.to_string());
-    }
-
-    // Start routed playback on the output device through the caller-chosen
-    // backend (engine-backed in sotf frontends, cpal-native in sotf-capture).
-    // A playback failure halts the already-running capture before returning.
-    if let Err(e) = playback.start(
-        temp_wav_path,
-        output_device_name,
-        output_channel,
-        sample_rate,
-    ) {
-        let _ = recorder.stop();
-        return Err(actionable_capture_error(
-            "[record_and_analyze] Failed to start playback",
-            &e,
-        ));
-    }
-
-    log::debug!("[record_and_analyze] Playback started, waiting for completion...");
-
-    // Wait for playback to complete
-    // Maximum timeout: expected duration + 3 seconds for buffer/latency
-    let total_wait = Duration::from_secs_f64(expected_duration + 3.0);
-    let check_interval = Duration::from_millis(50);
-    let mut elapsed = Duration::ZERO;
-    let mut cancelled = false;
-
-    while elapsed < total_wait {
-        sleep(check_interval);
-        elapsed += check_interval;
-
-        // Honor cancellation between polls (worst-case ~50 ms latency).
-        if cancel_requested(cancel) {
-            cancelled = true;
-            log::info!("[record_and_analyze] Cancellation requested — aborting capture");
-            break;
-        }
-
-        // Check recording progress
-        let current_sample_count = recorder.captured_samples();
-
-        // Print progress every second
-        if elapsed.as_millis() % 1000 < check_interval.as_millis() {
-            let recorded_duration = current_sample_count as f64 / f64::from(negotiated.sample_rate);
-            log::info!(
-                "[record_and_analyze] Recording progress: {recorded_duration:.2}s / {expected_duration:.2}s ({current_sample_count} samples)"
-            );
-        }
-
-        if playback.is_finished() {
-            log::debug!("[record_and_analyze] Playback finished");
-            break;
-        }
-    }
-
-    // Add a buffer after playback finishes to capture any tail/latency
-    // 1 second is generous but ensures we don't cut off the end of the sweep
-    // on high-latency systems (e.g. large buffers, wireless, or complex routing).
-    // On cancel, skip the tail capture so the UI gets snappy feedback.
-    if !cancelled {
-        sleep(Duration::from_millis(1000));
-    }
-
-    // Stop both sides. Capture must halt even when playback.stop fails
-    // (the old local input stream was scope-dropped on every return path),
-    // and on cancel a stop failure must not mask the cancellation.
-    let playback_stop = playback.stop();
-    let take_result = recorder.stop();
-    cancel_aware_stop(playback_stop, cancelled)?;
-    log::debug!("[record_and_analyze] Recording stopped");
-
-    // Small delay to ensure all buffers are flushed
-    sleep(Duration::from_millis(100));
-
-    if cancelled {
-        if let Err(e) = take_result {
-            log::warn!(
-                "[record_and_analyze] Ignoring capture-stop failure after cancellation: {e}"
-            );
-        }
-        return Err(CANCELLED_ERR.to_string());
-    }
-    let take =
-        take_result.map_err(|e| format!("[record_and_analyze] Failed to stop capture: {e}"))?;
     if take.recorded_per_channel.len() != 1 {
         return Err(format!(
             "[record_and_analyze] Recorder returned {} channels for 1 requested — capture corrupted",
@@ -386,10 +276,6 @@ fn capture_sweep_take(
 /// [`analyze_sweep_takes`].
 #[allow(clippy::too_many_arguments)]
 #[expect(
-    clippy::too_many_lines,
-    reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
-)]
-#[expect(
     clippy::cast_precision_loss,
     reason = "Sample counts convert to f64 seconds only for capture progress and diagnostics."
 )]
@@ -405,106 +291,21 @@ fn capture_sweep_take_multi(
     input_device_name: Option<&str>,
     cancel: Option<&CancelFlag>,
 ) -> Result<RawSweepTakeMulti, String> {
-    use std::thread::sleep;
-    use std::time::Duration;
-
-    if cancel_requested(cancel) {
-        return Err(CANCELLED_ERR.to_string());
-    }
-
     let num_mics = input_channels.len();
-    log::info!(
-        "[record_and_analyze_multi] Starting: {num_mics} mics, output_ch={output_channel}, input_chs={input_channels:?}",
-    );
-
-    let expected_duration = reference_signal.len() as f64 / f64::from(sample_rate);
-    log::info!("[record_and_analyze_multi] Expected duration: {expected_duration:.2}s");
-
-    // Open the input side first so a missing or unusable mic fails fast,
-    // before playback starts through the caller-chosen backend.
-    let negotiated = recorder.start(
-        input_device_name,
-        input_channels,
-        sample_rate,
-        expected_duration,
+    let take = super::acquire::capture(
+        playback,
+        recorder,
+        super::acquire::CaptureRequest {
+            wav: temp_wav_path,
+            frames: reference_signal.len(),
+            rate: sample_rate,
+            output_channel,
+            input_channels,
+            output_device: output_device_name,
+            input_device: input_device_name,
+        },
+        cancel,
     )?;
-
-    sleep(Duration::from_millis(100));
-
-    // Honor cancellation before starting playback (mirrors the aux path).
-    if cancel_requested(cancel) {
-        let _ = recorder.stop();
-        return Err(CANCELLED_ERR.to_string());
-    }
-
-    // --- Start playback (caller-chosen backend) ---
-    // A playback failure halts the already-running capture before returning.
-    if let Err(e) = playback.start(
-        temp_wav_path,
-        output_device_name,
-        output_channel,
-        sample_rate,
-    ) {
-        let _ = recorder.stop();
-        return Err(actionable_capture_error(
-            "[record_and_analyze_multi] Failed to start playback",
-            &e,
-        ));
-    }
-
-    // --- Wait for playback to complete ---
-    let total_wait = Duration::from_secs_f64(expected_duration + 3.0);
-    let check_interval = Duration::from_millis(50);
-    let mut elapsed = Duration::ZERO;
-    let mut cancelled = false;
-
-    while elapsed < total_wait {
-        sleep(check_interval);
-        elapsed += check_interval;
-
-        // Honor cancellation between polls (worst-case ~50 ms latency).
-        if cancel_requested(cancel) {
-            cancelled = true;
-            log::info!("[record_and_analyze_multi] Cancellation requested — aborting capture");
-            break;
-        }
-
-        let current_sample_count = recorder.captured_samples();
-
-        if elapsed.as_millis() % 1000 < check_interval.as_millis() {
-            let recorded_duration = current_sample_count as f64 / f64::from(negotiated.sample_rate);
-            log::info!(
-                "[record_and_analyze_multi] Progress: {recorded_duration:.2}s / {expected_duration:.2}s",
-            );
-        }
-
-        if playback.is_finished() {
-            break;
-        }
-    }
-
-    // On cancel, skip the tail-capture sleep so the UI gets snappy feedback.
-    if !cancelled {
-        sleep(Duration::from_millis(1000));
-    }
-    // Stop both sides. Capture must halt even when playback.stop fails
-    // (the old local input stream was scope-dropped on every return path),
-    // and on cancel a stop failure must not mask the cancellation.
-    let playback_stop = playback.stop();
-    let take_result = recorder.stop();
-    cancel_aware_stop(playback_stop, cancelled)?;
-    sleep(Duration::from_millis(100));
-
-    if cancelled {
-        if let Err(e) = take_result {
-            log::warn!(
-                "[record_and_analyze_multi] Ignoring capture-stop failure after cancellation: {e}"
-            );
-        }
-        return Err(CANCELLED_ERR.to_string());
-    }
-    let take = take_result
-        .map_err(|e| format!("[record_and_analyze_multi] Failed to stop capture: {e}"))?;
     if take.recorded_per_channel.len() != num_mics {
         return Err(format!(
             "[record_and_analyze_multi] Recorder returned {} channels for {num_mics} requested — capture corrupted",
@@ -589,18 +390,18 @@ pub(super) struct ChirpTiming<'a> {
 ///   lock onto the reference ([`correction_keeps_lock`]); if the lock
 ///   collapses the estimate was wrong, not the clock, and the correction is
 ///   discarded (the raw take is kept, the advisory still stands).
-pub(super) fn correct_take_clock_drift(
-    recorded: &[f32],
+pub(super) fn correct_take_clock_drift<'a>(
+    recorded: &'a [f32],
     analysis_reference: &[f32],
     analysis_sample_rate: u32,
     log_tag: &str,
     chirps: Option<ChirpTiming<'_>>,
-) -> (Vec<f32>, TakeDrift) {
+) -> (Cow<'a, [f32]>, TakeDrift) {
     let Some(chirps) = chirps else {
         log::debug!(
             "[{log_tag}] No timing chirps — skipping clock-drift estimation (chirpless takes have no unbiased drift source)"
         );
-        return (recorded.to_vec(), (None, false, None));
+        return (Cow::Borrowed(recorded), (None, false, None));
     };
     let drift = math_audio_dsp::analysis::estimate_clock_drift(
         chirps.template,
@@ -621,7 +422,7 @@ pub(super) fn correct_take_clock_drift(
         );
     }
     match (drift_action(drift.as_ref()), drift) {
-        (DriftAction::None, _) | (_, None) => (recorded.to_vec(), (drift, false, None)),
+        (DriftAction::None, _) | (_, None) => (Cow::Borrowed(recorded), (drift, false, None)),
         (DriftAction::Implausible, Some(estimate)) => {
             log::warn!(
                 "[{log_tag}] Clock-drift estimate {:.0} ppm is physically implausible for an \
@@ -637,7 +438,10 @@ pub(super) fn correct_take_clock_drift(
                     estimate.ppm,
                 ),
             );
-            (recorded.to_vec(), (Some(estimate), false, Some(advisory)))
+            (
+                Cow::Borrowed(recorded),
+                (Some(estimate), false, Some(advisory)),
+            )
         }
         (action, Some(estimate)) => {
             log::warn!(
@@ -664,7 +468,7 @@ pub(super) fn correct_take_clock_drift(
                         &corrected,
                         analysis_sample_rate,
                     ) {
-                        (corrected, (Some(estimate), true, advisory))
+                        (Cow::Owned(corrected), (Some(estimate), true, advisory))
                     } else {
                         log::warn!(
                             "[{log_tag}] Clock-drift correction collapsed the lag lock — \
@@ -678,14 +482,14 @@ pub(super) fn correct_take_clock_drift(
                             )),
                             None => Some((estimate.ppm.abs(), discard_message)),
                         };
-                        (recorded.to_vec(), (Some(estimate), false, advisory))
+                        (Cow::Borrowed(recorded), (Some(estimate), false, advisory))
                     }
                 }
                 Err(e) => {
                     log::warn!(
                         "[{log_tag}] Clock-drift correction failed ({e}) — using the uncorrected capture"
                     );
-                    (recorded.to_vec(), (Some(estimate), false, advisory))
+                    (Cow::Borrowed(recorded), (Some(estimate), false, advisory))
                 }
             }
         }
@@ -991,7 +795,19 @@ pub(super) fn analyze_sweep_takes(
     compensation: Option<&MicrophoneCompensation>,
     dropped_samples: u64,
     log_tag: &str,
+    cancel: Option<&CancelFlag>,
 ) -> Result<CaptureAnalysis, String> {
+    let check_cancel = || -> Result<(), String> {
+        if cancel_requested(cancel) {
+            Err(CANCELLED_ERR.into())
+        } else {
+            Ok(())
+        }
+    };
+    check_cancel()?;
+    if dropped_samples != 0 {
+        return Err(format!("capture lost {dropped_samples} input samples"));
+    }
     if raw_takes.is_empty() {
         return Err(format!("[{log_tag}] No takes were captured"));
     }
@@ -1010,6 +826,7 @@ pub(super) fn analyze_sweep_takes(
     let mut per_take_drift: Vec<TakeDrift> = Vec::with_capacity(raw_takes.len());
     let mut take_lags = Vec::with_capacity(raw_takes.len());
     for (take_index, raw) in raw_takes.iter().enumerate() {
+        check_cancel()?;
         let take_tag = if single_take {
             log_tag.to_string()
         } else {
@@ -1061,9 +878,20 @@ pub(super) fn analyze_sweep_takes(
         per_take_drift.push(take_drift);
         corrected_takes.push(corrected);
     }
+    // Ordinary chirpless sweeps have no correction: borrow the raw set instead
+    // of duplicating every take. Only mixed/actually corrected sets need the
+    // owned Vec interface required by the downstream averaging API.
+    let corrected_takes: Cow<'_, [Vec<f32>]> = if corrected_takes
+        .iter()
+        .all(|take| matches!(take, Cow::Borrowed(_)))
+    {
+        Cow::Borrowed(raw_takes)
+    } else {
+        Cow::Owned(corrected_takes.into_iter().map(Cow::into_owned).collect())
+    };
 
     let lag_for_quality: LagEstimate;
-    let analysis_capture: Vec<f32>;
+    let analysis_capture: Cow<'_, [f32]>;
     let accepted_count: usize;
     let rejected_count: usize;
     let relevant_takes: Vec<usize>;
@@ -1076,10 +904,7 @@ pub(super) fn analyze_sweep_takes(
 
     if single_take {
         lag_for_quality = take_lags[0];
-        analysis_capture = corrected_takes
-            .into_iter()
-            .next()
-            .expect("single-take path has exactly one take");
+        analysis_capture = Cow::Borrowed(&corrected_takes[0]);
         accepted_count = 1;
         rejected_count = 0;
         relevant_takes = vec![0];
@@ -1146,8 +971,11 @@ pub(super) fn analyze_sweep_takes(
             );
         }
 
-        analysis_capture =
-            average_aligned_takes(&corrected_takes, &averaged.lag_estimates, accepted)?;
+        analysis_capture = Cow::Owned(average_aligned_takes(
+            &corrected_takes,
+            &averaged.lag_estimates,
+            accepted,
+        )?);
         accepted_count = accepted.len();
         rejected_count = rejected.len();
         relevant_takes = accepted.clone();
@@ -1178,7 +1006,7 @@ pub(super) fn analyze_sweep_takes(
         } else {
             coherence_grid = Some((
                 fft_bin_frequencies(averaged.averaged.coherence.len(), analysis_sample_rate),
-                averaged.averaged.coherence.clone(),
+                averaged.averaged.coherence,
             ));
         }
 
@@ -1238,6 +1066,7 @@ pub(super) fn analyze_sweep_takes(
         "[{log_tag}] Writing {} mono samples to WAV file...",
         analysis_capture.len()
     );
+    check_cancel()?;
     write_and_verify_mono_wav(recorded_wav_path, &analysis_capture, analysis_sample_rate)?;
     log::info!(
         "[{log_tag}] Wrote {} samples as MONO (1 channel) to {}",
@@ -1341,6 +1170,7 @@ pub(super) fn analyze_sweep_takes(
     let noise_floor_column = noise_floor_grid.as_ref().map(|(freqs, values)| {
         interpolate_log_frequency_grid(freqs, values, &analysis.frequencies)
     });
+    check_cancel()?;
     write_analysis_csv_extended(
         &analysis,
         output_csv_path,
@@ -1403,6 +1233,7 @@ pub(super) fn analyze_sweep_takes(
     );
     log_capture_quality(&quality, log_tag);
 
+    check_cancel()?;
     Ok(CaptureAnalysis {
         result: analysis,
         quality,
@@ -1491,6 +1322,10 @@ pub fn record_and_analyze_with_recorder(
         playback,
         recorder,
         sample_rate,
+        reference_signal
+            .iter()
+            .map(|sample| sample.abs())
+            .fold(0.0_f32, f32::max),
         output_channel,
         input_channel,
         output_device_name,
@@ -1562,6 +1397,7 @@ pub fn record_and_analyze_with_recorder(
         compensation.as_ref(),
         dropped_samples,
         "record_and_analyze",
+        cancel.as_ref(),
     )
 }
 
@@ -1700,6 +1536,10 @@ pub fn record_and_analyze_with_multi_recorder(
             playback,
             recorder,
             sample_rate,
+            reference_signal
+                .iter()
+                .map(|sample| sample.abs())
+                .fold(0.0_f32, f32::max),
             output_channel,
             first_input,
             output_device_name,
@@ -1779,6 +1619,7 @@ pub fn record_and_analyze_with_multi_recorder(
             compensation.as_ref(),
             dropped_samples,
             &lag_tag,
+            cancel.as_ref(),
         )?);
     }
 

@@ -368,10 +368,14 @@ struct BenchCalibrationFile {
 /// non-finite bias, a measured flag without a value, and files
 /// providing neither a lag map nor a measured bias.
 pub fn load_bench_calibration(path: &Path) -> Result<BenchCalibration, String> {
-    let json = std::fs::read_to_string(path)
+    let bytes = crate::artifacts::read_file(path, crate::artifacts::MAX_METADATA_BYTES)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    let file: BenchCalibrationFile = serde_json::from_str(&json)
-        .map_err(|error| format!("cannot parse {}: {error}", path.display()))?;
+    parse_bench_calibration(&bytes)
+}
+
+pub(crate) fn parse_bench_calibration(bytes: &[u8]) -> Result<BenchCalibration, String> {
+    let file: BenchCalibrationFile = serde_json::from_slice(bytes)
+        .map_err(|error| format!("cannot parse bench calibration: {error}"))?;
     if file.schema.as_deref() != Some(BENCH_CALIBRATION_SCHEMA) {
         return Err(format!("schema must be {BENCH_CALIBRATION_SCHEMA}"));
     }
@@ -416,11 +420,9 @@ pub fn load_bench_calibration(path: &Path) -> Result<BenchCalibration, String> {
 
 /// Resolve a bench calibration path for processing.
 ///
-/// Absolute paths pass through; relative paths resolve against the raw
-/// session root, where the operator stages the per-interface file
-/// alongside the takes. `plan-validate` checks the same path against
-/// the plan directory instead, so prefer absolute paths for bench
-/// files and treat the validate check as readability guidance.
+/// Legacy/in-memory reports resolve relative paths against their raw root.
+/// The file-backed processor requires a frozen, hash-verified bench snapshot
+/// and passes its parsed value directly into localization.
 fn resolve_bench_path(raw_root: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
@@ -1877,15 +1879,26 @@ fn loopback_stable(
 /// arrivals into the range matrix, then multilaterates one 3D position
 /// per source row. Never fails: missing evidence yields refused cells
 /// and session issues, never an aborted run.
-#[expect(
-    clippy::too_many_lines,
-    reason = "The ordered localization pipeline keeps grouping, mode decision, and conversion together with its evidence."
-)]
+#[cfg(test)]
 pub(super) fn localize_session(
     report: &ClockProcessedManifest,
     raw_root: &Path,
     output: &Path,
     fits: &[Option<CaptureClockFit>],
+) -> LocalizationReport {
+    localize_session_with_bench(report, raw_root, output, fits, None)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep localization decisions and their evidence together."
+)]
+pub(super) fn localize_session_with_bench(
+    report: &ClockProcessedManifest,
+    raw_root: &Path,
+    output: &Path,
+    fits: &[Option<CaptureClockFit>],
+    frozen_bench: Option<BenchCalibration>,
 ) -> LocalizationReport {
     let (sound_speed, sound_speed_uncertainty, sound_source) = resolve_sound_speed(&report.plan);
     let mut issues = Vec::new();
@@ -2010,23 +2023,23 @@ pub(super) fn localize_session(
     // A missing pool means no usable fits, so no arrival below succeeds
     // and this ratio never scales real data; 1.0 keeps refused cells exact.
     let skew_ratio = pooled.map_or(1.0, |ppm| 1.0 + ppm / 1e6);
-    // Bench calibration (§5.4): a measured bias shifts every absolute
-    // range and widens sigma by the residual budget; any load failure
-    // falls back to uncalibrated with an issue, never an aborted run.
-    // Relative paths resolve against the raw session root here (see
-    // `resolve_bench_path`); `plan-validate` checks the plan directory.
-    let bench = match report.plan.localization_calibration_file.as_ref() {
-        Some(path) => match load_bench_calibration(&resolve_bench_path(raw_root, path)) {
-            Ok(calibration) => Some(calibration),
-            Err(error) => {
-                issues.push(format!(
-                    "localization bench calibration unusable ({error}); continuing uncalibrated"
-                ));
-                None
-            }
+    // File-backed processing supplies the validated immutable snapshot.
+    // Legacy in-memory callers retain diagnostic fallback; acquisition-file
+    // validation already refuses missing/altered declared bench evidence.
+    let bench = frozen_bench.or_else(
+        || match report.plan.localization_calibration_file.as_ref() {
+            Some(path) => match load_bench_calibration(&resolve_bench_path(raw_root, path)) {
+                Ok(calibration) => Some(calibration),
+                Err(error) => {
+                    issues.push(format!(
+                        "localization bench calibration unusable ({error}); continuing uncalibrated"
+                    ));
+                    None
+                }
+            },
+            None => None,
         },
-        None => None,
-    };
+    );
     let (mic_bias_m, mic_bias_residual_m) = match &bench {
         Some(calibration) if calibration.mic_bias_measured => {
             (calibration.mic_bias_correction_m, BENCH_BIAS_RESIDUAL_M)
@@ -3861,6 +3874,7 @@ mod tests {
         let raw_root = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
         let mut manifest = RawCaptureManifest {
+            localization_calibration: None,
             version: 1,
             plan: plan.clone(),
             loopback_files: Vec::new(),
@@ -3950,6 +3964,7 @@ mod tests {
         )
         .unwrap();
         let report = crate::capture_session::clock::io::ClockProcessedManifest {
+            localization_calibration: None,
             version: 1,
             plan,
             raw_status: Some(RawCaptureStatus::RawComplete),

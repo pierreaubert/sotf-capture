@@ -409,6 +409,8 @@ fn storage_budget_prices_bass_weighted_sweeps() {
 #[test]
 fn ctc_declaration_round_trips_when_valid() {
     let mut value = plan();
+    value.microphones[1].device = value.microphones[0].device.clone();
+    value.microphones[1].input_channel = 1;
     value.loopback = Some(CaptureLoopback {
         device: value.microphones[0].device.clone(),
         input_channel: 7,
@@ -430,6 +432,59 @@ fn ctc_declaration_round_trips_when_valid() {
     assert!(json.contains("\"ctc\""));
     let restored: CaptureSessionPlan = serde_json::from_str(&json).unwrap();
     restored.validate().unwrap();
+    value.microphones[1].device = "independent-clock".into();
+    assert!(value.validate().is_err());
+}
+
+#[test]
+fn shipped_ctc_examples_declare_a_common_input_clock() {
+    for json in [
+        include_str!("../../examples/ctc-head-position.json"),
+        include_str!("../../examples/full-roomeq-session.json"),
+    ] {
+        let plan: CaptureSessionPlan = serde_json::from_str(json).unwrap();
+        plan.validate().unwrap();
+    }
+}
+
+#[test]
+fn auxiliary_and_aggregate_memory_budgets_fail_during_plan_validation() {
+    for (duration, gap) in [(1e20, 100.0), (100.0, 1e20)] {
+        let mut value = plan();
+        value.probe = Some(CaptureProbe {
+            probe_duration_ms: duration,
+            silence_duration_ms: gap,
+            signal_level_db: -20.0,
+        });
+        assert!(value.validate().is_err());
+    }
+    let mut value = plan();
+    value.bass_anchor = Some(CaptureBassAnchor {
+        bass_freq_hz: 30.0,
+        bass_duration_s: 1e20,
+        fade_ms: 50.0,
+        num_windows: 8,
+        silence_duration_ms: 100.0,
+        signal_level_db: -20.0,
+    });
+    assert!(value.validate().is_err());
+    let mut value = plan();
+    let template = value.microphones[0].clone();
+    value.microphones = (0_u16..32)
+        .map(|index| {
+            let mut microphone = template.clone();
+            microphone.id = format!("mic-{index}");
+            microphone.input_channel = index;
+            microphone.position_m = None;
+            microphone.position_uncertainty_mm = None;
+            microphone
+        })
+        .collect();
+    value.geometry = CaptureGeometry::Spread;
+    value.sample_rate_hz = 384_000;
+    value.sweep.duration_secs = 10.0;
+    let error = value.validate().unwrap_err().to_string();
+    assert!(error.contains("512 MiB"), "{error}");
 }
 
 #[test]

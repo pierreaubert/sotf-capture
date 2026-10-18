@@ -275,6 +275,12 @@ fn probe_channel_delays_core(
     signal_level_db: f32,
     cancel: Option<&CancelFlag>,
 ) -> Result<(ProbeDelayResults, Vec<f32>, u32), String> {
+    crate::limits::auxiliary_frames(
+        sample_rate,
+        channel_indices.len(),
+        f64::from(probe_duration_ms) / 1000.0,
+        f64::from(silence_duration_ms) / 1000.0,
+    )?;
     let num_channels = channel_indices.len();
     if num_channels == 0 {
         return Err("No channels to probe".to_string());
@@ -298,7 +304,7 @@ fn probe_channel_delays_core(
         "[probe_channel_delays] Generated narrowband probe: {} samples ({:.1}ms), 800-2000Hz, level={:.1}dBFS",
         probe_samples,
         probe_duration_ms,
-        signal_level_db.clamp(-40.0, 0.0)
+        signal_level_db.min(0.0)
     );
 
     // Play on each output channel in turn and capture the mic — shared

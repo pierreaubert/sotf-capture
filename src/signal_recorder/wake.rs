@@ -14,7 +14,7 @@ use super::consts::CANCELLED_ERR;
 use super::playback::SweepPlayback;
 use super::quality::{check_lag_lock, estimate_lag_or_advise};
 use super::recorder::SweepRecorder;
-use super::types::{CancelFlag, cancel_requested};
+use super::types::{CancelFlag, cancel_requested, cancel_wait};
 use super::write::write_temp_wav;
 use std::time::{Duration, Instant};
 
@@ -26,8 +26,7 @@ pub(crate) const WAKE_BURST_SECS: f32 = 0.25;
 /// of attempts; beyond this the chain is broken, not sleepy.
 pub(crate) const WAKE_BUDGET_SECS: f64 = 5.0;
 
-/// Wake-up burst peak amplitude: loud enough to dominate room noise for
-/// the lag lock, below the clip threshold with margin.
+/// Upper ceiling for wake bursts; the configured capture ceiling may be lower.
 const WAKE_PEAK: f32 = 0.5;
 
 /// Deterministic burst seed: every wake-up plays the identical burst.
@@ -50,7 +49,7 @@ const WAKE_POST_SETTLE_MS: u64 = 150;
 pub(crate) const WAKE_ERROR_BACKOFF_MS: u64 = 200;
 
 /// Deterministic wake-up burst: white noise with raised-cosine fades,
-/// peak-normalized to [`WAKE_PEAK`]. White correlates unambiguously for
+/// peak-normalized to the capture ceiling (at most [`WAKE_PEAK`]). White correlates unambiguously for
 /// the lag lock; pink would waste energy where short windows resolve
 /// poorly.
 #[expect(
@@ -59,7 +58,10 @@ pub(crate) const WAKE_ERROR_BACKOFF_MS: u64 = 200;
     clippy::cast_sign_loss,
     reason = "The fixed positive fade rounds to bounded whole frames; taper phases use f32 audio arithmetic."
 )]
-pub(crate) fn wake_burst_samples(sample_rate: u32) -> Vec<f32> {
+pub(crate) fn wake_burst_samples(sample_rate: u32, amplitude: f32) -> Vec<f32> {
+    if !amplitude.is_finite() || amplitude <= 0.0 {
+        return Vec::new();
+    }
     let mut burst = math_audio_dsp::signals::gen_white_noise_seeded(
         1.0,
         sample_rate,
@@ -71,7 +73,7 @@ pub(crate) fn wake_burst_samples(sample_rate: u32) -> Vec<f32> {
         .map(|sample| sample.abs())
         .fold(0.0_f32, f32::max);
     if peak > 0.0 {
-        let gain = WAKE_PEAK / peak;
+        let gain = amplitude.min(WAKE_PEAK) / peak;
         for sample in &mut burst {
             *sample *= gain;
         }
@@ -101,6 +103,7 @@ pub(super) fn wake_audio_chain(
     playback: &mut impl SweepPlayback,
     recorder: &mut impl SweepRecorder,
     sample_rate: u32,
+    amplitude: f32,
     output_channel: u16,
     input_channel: u16,
     output_device_name: Option<&str>,
@@ -109,7 +112,7 @@ pub(super) fn wake_audio_chain(
     budget: Duration,
     log_tag: &str,
 ) -> Result<(), String> {
-    let burst = wake_burst_samples(sample_rate);
+    let burst = wake_burst_samples(sample_rate, amplitude);
     if burst.is_empty() {
         return Ok(());
     }
@@ -122,7 +125,7 @@ pub(super) fn wake_audio_chain(
         if cancel_requested(cancel) {
             return Err(CANCELLED_ERR.to_string());
         }
-        if wake_attempt(
+        let awake = wake_attempt(
             playback,
             recorder,
             burst_wav.path(),
@@ -133,8 +136,13 @@ pub(super) fn wake_audio_chain(
             input_channel,
             output_device_name,
             input_device_name,
+            cancel,
             log_tag,
-        ) {
+        );
+        if cancel_requested(cancel) {
+            return Err(CANCELLED_ERR.into());
+        }
+        if awake {
             if attempts > 1 {
                 log::info!("[{log_tag}] Audio chain awake after {attempts} wake-up attempts");
             } else {
@@ -164,10 +172,9 @@ fn wake_attempt(
     input_channel: u16,
     output_device_name: Option<&str>,
     input_device_name: Option<&str>,
+    cancel: Option<&CancelFlag>,
     log_tag: &str,
 ) -> bool {
-    use std::thread::sleep;
-
     if recorder
         .start(
             input_device_name,
@@ -177,27 +184,38 @@ fn wake_attempt(
         )
         .is_err()
     {
-        sleep(Duration::from_millis(WAKE_ERROR_BACKOFF_MS));
+        let _ = cancel_wait(Duration::from_millis(WAKE_ERROR_BACKOFF_MS), cancel);
         return false;
     }
-    sleep(Duration::from_millis(WAKE_PRE_SETTLE_MS));
+    if cancel_wait(Duration::from_millis(WAKE_PRE_SETTLE_MS), cancel).is_err() {
+        let _ = recorder.stop();
+        return false;
+    }
     if playback
         .start(burst_wav, output_device_name, output_channel, sample_rate)
         .is_err()
     {
         let _ = recorder.stop();
-        sleep(Duration::from_millis(WAKE_ERROR_BACKOFF_MS));
+        let _ = cancel_wait(Duration::from_millis(WAKE_ERROR_BACKOFF_MS), cancel);
         return false;
     }
     let timeout = Duration::from_secs_f64(f64::from(WAKE_BURST_SECS) + 2.0);
     let started = Instant::now();
     while !playback.is_finished() && started.elapsed() < timeout {
-        sleep(Duration::from_millis(20));
+        if recorder.check_health().is_err()
+            || playback.check_health().is_err()
+            || cancel_wait(Duration::from_millis(20), cancel).is_err()
+        {
+            break;
+        }
     }
-    sleep(Duration::from_millis(WAKE_POST_SETTLE_MS));
+    let completed = playback.is_finished();
+    let healthy = recorder.check_health().is_ok() && playback.check_health().is_ok();
+    let tail = cancel_wait(Duration::from_millis(WAKE_POST_SETTLE_MS), cancel);
     let playback_stop = playback.stop();
     let take = recorder.stop();
-    if playback_stop.is_err() {
+    if !completed || !healthy || tail.is_err() || playback_stop.is_err() || cancel_requested(cancel)
+    {
         return false;
     }
     let Ok(take) = take else {

@@ -2,7 +2,7 @@
 
 [package]
 name = "sotf-capture"
-version = "0.5.3"
+version = "0.6.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["Pierre F. Aubert pierre@spinorama.org"]
@@ -35,6 +35,10 @@ math-rir = { version = "0.5", path = "../math-audio/crates/math-rir" }
 # Optional so tvOS (no cpal backend: mach2 refuses tvOS) builds DSP-only
 # with `--no-default-features`; see README.md §tvOS.
 cpal = { version = "0.17", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW prevents imported session members from escaping through symlinks.
+libc = "0.2"
 
 # CLI-only: the binary is skipped without `capture-io`, and tvOS ships no
 # CLI (ctrlc's nix backend needs fork/exec, absent from tvOS libc).

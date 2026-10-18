@@ -10,7 +10,6 @@ use crate::recording_helpers::save_recording_session_json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt::Write as _;
-use std::io::Read;
 use std::path::{Component, Path};
 
 /// One processed audio artifact and the clock evidence governing its use.
@@ -30,6 +29,9 @@ pub struct ClockProcessedTake {
 /// Clock-stage output with magnitude analysis and incomplete measurement QA.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClockProcessedManifest {
+    /// Frozen bench correction retained with its exact-byte identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub localization_calibration: Option<crate::capture_session::record::CaptureFileSnapshot>,
     /// Clock-processing schema version.
     pub version: u32,
     /// Original geometry, gains, routes, and timing-reference survey.
@@ -110,16 +112,7 @@ pub(crate) fn artifact(root: &Path, name: &str) -> Result<std::path::PathBuf, St
 }
 
 fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
-    let file =
-        std::fs::File::open(path).map_err(|e| format!("cannot open capture artifact: {e}"))?;
-    let mut data = Vec::new();
-    file.take(limit as u64 + 1)
-        .read_to_end(&mut data)
-        .map_err(|e| e.to_string())?;
-    if data.len() > limit {
-        return Err("capture metadata exceeds its size limit".into());
-    }
-    Ok(data)
+    crate::artifacts::read_file(path, limit)
 }
 
 pub(crate) fn read_wave(path: &Path, rate: u32, frames: usize) -> Result<Vec<f32>, String> {
@@ -127,7 +120,8 @@ pub(crate) fn read_wave(path: &Path, rate: u32, frames: usize) -> Result<Vec<f32
         return Err("invalid capture wave length".into());
     }
     let mut reader =
-        hound::WavReader::open(path).map_err(|e| format!("cannot read capture WAV: {e}"))?;
+        hound::WavReader::new(std::io::BufReader::new(crate::artifacts::open_read(path)?))
+            .map_err(|e| format!("cannot read capture WAV: {e}"))?;
     let spec = reader.spec();
     if spec.channels != 1
         || spec.sample_rate != rate
@@ -446,6 +440,12 @@ pub fn process_capture_session_with_options(
     {
         return Err("completed raw capture is missing source/microphone/repeat takes".into());
     }
+    if manifest.status == RawCaptureStatus::RawComplete
+        && ((manifest.plan.probe.is_some() && manifest.probe_pass.is_none())
+            || (manifest.plan.bass_anchor.is_some() && manifest.bass_anchor_pass.is_none()))
+    {
+        return Err("completed raw capture is missing declared auxiliary passes".into());
+    }
     let selected_take_ids = if options.selected_take_ids.is_empty() {
         if manifest.status == RawCaptureStatus::RawComplete && manifest.plan.repeat_count == 1 {
             Some(
@@ -487,6 +487,46 @@ pub fn process_capture_session_with_options(
     if calibration_ids.len() != manifest.plan.microphones.len() {
         return Err("capture is missing microphone calibration identities".into());
     }
+    let mut frozen_bench = None;
+    let bench_bytes = match (
+        &manifest.plan.localization_calibration_file,
+        &manifest.localization_calibration,
+    ) {
+        (None, None) => None,
+        (Some(path), Some(snapshot)) if path == Path::new(&snapshot.file) => {
+            let bytes =
+                crate::artifacts::read_member(&root, path, crate::artifacts::MAX_METADATA_BYTES)?;
+            if crate::capture_session::calibration_sha256(&bytes) != snapshot.sha256 {
+                return Err("localization calibration snapshot has changed".into());
+            }
+            frozen_bench =
+                Some(crate::capture_session::localization::parse_bench_calibration(&bytes)?);
+            if !output_names.insert(snapshot.file.to_ascii_lowercase()) {
+                return Err(
+                    "localization calibration filename collides with another artifact".into(),
+                );
+            }
+            Some((&snapshot.file, bytes))
+        }
+        _ => {
+            return Err(
+                "declared localization calibration requires a frozen matching snapshot".into(),
+            );
+        }
+    };
+    let mut loopback_names = HashSet::new();
+    for take in &manifest.loopback_files {
+        if !loopback_names.insert(&take.wav_file)
+            || !output_names.insert(take.wav_file.to_ascii_lowercase())
+        {
+            return Err("loopback artifact filename is duplicated or collides".into());
+        }
+        read_wave(
+            &artifact(&root, &take.wav_file)?,
+            manifest.plan.sample_rate_hz,
+            take.samples,
+        )?;
+    }
     std::fs::create_dir(output_directory)
         .map_err(|e| format!("cannot create new processed capture directory: {e}"))?;
     std::fs::write(
@@ -501,6 +541,17 @@ pub fn process_capture_session_with_options(
     }
     for (file, bytes) in calibration_bytes {
         std::fs::write(output_directory.join(file), bytes).map_err(|e| e.to_string())?;
+    }
+    if let Some((file, bytes)) = bench_bytes {
+        std::fs::write(output_directory.join(file), bytes).map_err(|e| e.to_string())?;
+    }
+    for take in &manifest.loopback_files {
+        let bytes = crate::artifacts::read_member(
+            &root,
+            Path::new(&take.wav_file),
+            crate::artifacts::MAX_AUDIO_BYTES,
+        )?;
+        std::fs::write(output_directory.join(&take.wav_file), bytes).map_err(|e| e.to_string())?;
     }
     for name in ["timing-chirp.wav", "stimulus.wav"] {
         std::fs::copy(artifact(&root, name)?, output_directory.join(name))
@@ -523,6 +574,7 @@ pub fn process_capture_session_with_options(
             .map_err(|e| e.to_string())?;
     }
     let mut result = ClockProcessedManifest {
+        localization_calibration: manifest.localization_calibration.clone(),
         version: 1,
         plan: manifest.plan.clone(),
         raw_status: Some(manifest.status),
@@ -634,12 +686,15 @@ pub fn process_capture_session_with_options(
     result
         .pending_processing
         .retain(|stage| stage != "reflection_directions");
-    result.localization_report = Some(crate::capture_session::localization::localize_session(
-        &result,
-        &root,
-        output_directory,
-        &take_fits,
-    ));
+    result.localization_report = Some(
+        crate::capture_session::localization::localize_session_with_bench(
+            &result,
+            output_directory,
+            output_directory,
+            &take_fits,
+            frozen_bench,
+        ),
+    );
     result
         .pending_processing
         .retain(|stage| stage != "localization");
@@ -673,7 +728,9 @@ pub fn process_capture_session_with_options(
             .pending_processing
             .push(format!("recording_manifest: {reason}")),
     }
-    if let Some(ctc) = super::super::ctc::assemble_ctc_takes(&result, &root, output_directory)? {
+    if let Some(ctc) =
+        super::super::ctc::assemble_ctc_takes(&result, output_directory, output_directory)?
+    {
         result.ctc_measurements = Some(ctc.fragment_file);
         result.ctc_files = ctc.files;
     }

@@ -179,6 +179,10 @@ pub fn run_bass_anchor_with_recording(
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the validation, capture, and analysis sequence together."
+)]
 fn run_bass_anchor_core(
     channel_indices: &[u16],
     channel_names: &[String],
@@ -195,6 +199,23 @@ fn run_bass_anchor_core(
     signal_level_db: f32,
     cancel: Option<&CancelFlag>,
 ) -> Result<(BassAnchorResults, Vec<f32>, Option<Vec<f32>>, u32), String> {
+    crate::limits::auxiliary_frames(
+        sample_rate,
+        channel_indices.len(),
+        f64::from(bass_duration_s),
+        f64::from(silence_duration_ms) / 1000.0,
+    )?;
+    if !bass_freq_hz.is_finite()
+        || bass_freq_hz <= 0.0
+        || f64::from(bass_freq_hz) >= f64::from(sample_rate) / 2.0
+        || !fade_ms.is_finite()
+        || fade_ms < 0.0
+        || fade_ms * 2.0 > bass_duration_s * 1000.0
+        || !signal_level_db.is_finite()
+        || !(-60.0..=0.0).contains(&signal_level_db)
+    {
+        return Err("invalid bass-anchor frequency, fade, or level".into());
+    }
     let num_channels = channel_indices.len();
     if num_channels == 0 {
         return Err("No channels for bass anchor".to_string());
@@ -232,7 +253,7 @@ fn run_bass_anchor_core(
         fade_ms,
         num_windows,
         sample_rate,
-        signal_level_db.clamp(-40.0, 0.0),
+        signal_level_db.min(0.0),
         if loopback_input_channel.is_some() {
             " + loopback ref"
         } else {
@@ -341,6 +362,7 @@ pub fn run_spl_calibration(
     if !amp.is_finite() || amp <= 0.0 || amp > 1.0 {
         return Err(format!("SPL cal amplitude must be in (0, 1], got {amp}"));
     }
+    crate::limits::auxiliary_frames(sample_rate, 1, f64::from(duration_s), 0.2)?;
 
     // Generate a Hann-windowed tone so the start/end don't click.
     // The 200 ms skirt on each end is ignored during analysis, so the
@@ -430,6 +452,13 @@ pub fn run_spl_calibration(
 #[cfg(test)]
 mod spl_tests {
     use super::run_spl_calibration;
+
+    #[test]
+    fn extreme_duration_is_refused_before_tone_generation() {
+        let error =
+            run_spl_calibration(0, 48_000, 1_000.0, 0.25, 1e20, None, None, 0, None).unwrap_err();
+        assert!(error.contains("bounded capture storage"), "{error}");
+    }
 
     #[test]
     fn invalid_reference_is_refused_before_opening_devices() {

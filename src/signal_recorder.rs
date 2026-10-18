@@ -3,6 +3,7 @@
 //! This module provides functionality to generate test signals, play them back,
 //! record the output, and analyze the results.
 
+mod acquire;
 mod build;
 #[cfg(feature = "capture-io")]
 mod choose;
@@ -18,6 +19,8 @@ mod misc;
 #[cfg(feature = "capture-io")]
 pub mod multi_capture;
 mod playback;
+#[cfg(feature = "capture-io")]
+mod presentation;
 mod probe;
 mod quality;
 mod record;

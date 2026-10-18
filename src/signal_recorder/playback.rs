@@ -16,7 +16,7 @@ use std::path::Path;
 #[cfg(feature = "capture-io")]
 use std::sync::Arc;
 #[cfg(feature = "capture-io")]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Mono stimulus playback on one hardware output channel.
 ///
@@ -41,6 +41,16 @@ pub trait SweepPlayback {
 
     /// Pump backend events; true once the stimulus fully played.
     fn is_finished(&mut self) -> bool;
+
+    /// Report latched asynchronous stream errors before accepting completion.
+    ///
+    /// Backends with asynchronous errors must override this method.
+    ///
+    /// # Errors
+    /// Returns a message when playback failed even if all samples were submitted.
+    fn check_health(&self) -> Result<(), String> {
+        Ok(())
+    }
 
     /// Stop playback; succeeds when silent afterwards (idempotent).
     ///
@@ -99,6 +109,8 @@ pub struct CpalPlayback {
     stream: Option<cpal::Stream>,
     rendered_frames: Arc<AtomicUsize>,
     total_frames: usize,
+    failed: Arc<AtomicBool>,
+    presentation: Option<Arc<super::presentation::PresentationClock>>,
 }
 
 #[cfg(feature = "capture-io")]
@@ -111,7 +123,7 @@ impl std::fmt::Debug for CpalPlayback {
                 &self.rendered_frames.load(Ordering::Relaxed),
             )
             .field("total_frames", &self.total_frames)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -131,54 +143,53 @@ impl CpalPlayback {
 )]
 #[cfg(any(test, feature = "test-util", feature = "capture-io"))]
 pub(crate) fn read_stimulus_mono(wav: &Path) -> Result<Vec<f32>, String> {
-    let mut reader =
-        hound::WavReader::open(wav).map_err(|e| format!("Failed to load file: {e}"))?;
-    let spec = reader.spec();
-    if spec.channels == 0 {
-        return Err("Failed to load file: WAV has no channels".to_string());
+    let file = crate::artifacts::open_read(wav)?;
+    if file.metadata().map_err(|e| e.to_string())?.len() > crate::artifacts::MAX_AUDIO_BYTES as u64
+    {
+        return Err("stimulus WAV exceeds its size limit".into());
     }
-    let mono: Vec<f32> = match (spec.sample_format, spec.bits_per_sample) {
-        (hound::SampleFormat::Float, _) => reader
-            .samples::<f32>()
-            .collect::<Result<Vec<f32>, _>>()
-            .map_err(|e| format!("Failed to load file: {e}"))?
-            .chunks(spec.channels as usize)
-            .map(|frame| frame[0])
-            .collect(),
-        (hound::SampleFormat::Int, 16) => reader
-            .samples::<i16>()
-            .collect::<Result<Vec<i16>, _>>()
-            .map_err(|e| format!("Failed to load file: {e}"))?
-            .chunks(spec.channels as usize)
-            .map(|frame| f32::from(frame[0]) / f32::from(i16::MAX))
-            .collect(),
-        (hound::SampleFormat::Int, 32) => reader
-            .samples::<i32>()
-            .collect::<Result<Vec<i32>, _>>()
-            .map_err(|e| format!("Failed to load file: {e}"))?
-            .chunks(spec.channels as usize)
-            .map(|frame| (frame[0] as f32) / (i32::MAX as f32))
-            .collect(),
-        (format, bits) => {
-            return Err(format!(
-                "Failed to load file: unsupported WAV format {format:?} with {bits} bits"
-            ));
+    let mut reader = hound::WavReader::new(std::io::BufReader::new(file))
+        .map_err(|e| format!("Failed to load file: {e}"))?;
+    let spec = reader.spec();
+    if spec.channels == 0
+        || spec.channels > 64
+        || reader.duration() == 0
+        || reader.duration() as usize > crate::limits::MAX_CAPTURE_FRAMES
+    {
+        return Err("invalid stimulus WAV channel count or duration".into());
+    }
+    let mut mono = Vec::new();
+    mono.try_reserve_exact(reader.duration() as usize)
+        .map_err(|e| e.to_string())?;
+    match (spec.sample_format, spec.bits_per_sample) {
+        (hound::SampleFormat::Float, 32) => {
+            for (index, sample) in reader.samples::<f32>().enumerate() {
+                let sample = sample.map_err(|e| e.to_string())?;
+                if !sample.is_finite() {
+                    return Err("stimulus WAV contains non-finite audio".into());
+                }
+                if index % spec.channels as usize == 0 {
+                    mono.push(sample);
+                }
+            }
         }
-    };
+        (hound::SampleFormat::Int, bits @ 1..=32) => {
+            let scale = 2.0_f32.powi(i32::from(bits) - 1);
+            for (index, sample) in reader.samples::<i32>().enumerate() {
+                let sample = sample.map_err(|e| e.to_string())? as f32 / scale;
+                if index % spec.channels as usize == 0 {
+                    mono.push(sample);
+                }
+            }
+        }
+        (format, bits) => return Err(format!("unsupported stimulus WAV format {format:?}/{bits}")),
+    }
+
     Ok(mono)
 }
 
 #[cfg(feature = "capture-io")]
 impl SweepPlayback for CpalPlayback {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
-    )]
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "Clamped normalized samples are intentionally quantized to the selected 16-bit PCM output format."
-    )]
     fn start(
         &mut self,
         wav: &Path,
@@ -188,33 +199,36 @@ impl SweepPlayback for CpalPlayback {
     ) -> Result<(), String> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-        let host = cpal::default_host();
+        if self.stream.is_some() {
+            return Err("playback is already active".into());
+        }
+        let host = crate::devices::get_host_for_device(device_name);
         let output_device = if let Some(name) = device_name {
             crate::devices::find_device(&host, name, false)?
         } else {
             host.default_output_device()
                 .ok_or_else(|| "No default output device available".to_string())?
         };
-        let hardware_channels = output_channel_count(&output_device);
-        check_output_channel(channel, hardware_channels)?;
-
         let default_config = output_device
             .default_output_config()
-            .map_err(|e| format!("Failed to query output device: {e}"))?;
-        // Prefer the sweep rate when the hardware supports it at the
-        // configured channel count; resampling the stimulus is exact but
-        // avoiding it keeps the played signal bit-identical to the file.
-        let mut device_rate = default_config.sample_rate();
-        if device_rate != sweep_rate
-            && let Ok(configs) = output_device.supported_output_configs()
-            && configs.into_iter().any(|config| {
-                config.channels() as usize == hardware_channels
-                    && config.min_sample_rate() <= sweep_rate
-                    && sweep_rate <= config.max_sample_rate()
-            })
-        {
-            device_rate = sweep_rate;
-        }
+            .map_err(|e| e.to_string())?;
+        let supported: Vec<_> = output_device
+            .supported_output_configs()
+            .map_err(|e| e.to_string())?
+            .collect();
+        let min_channels = channel.checked_add(1).ok_or("output channel overflow")?;
+        let selected =
+            super::choose::choose_measurement_output_config(&supported, min_channels, sweep_rate)
+                .or_else(|_| {
+                super::choose::choose_measurement_output_config(
+                    &supported,
+                    min_channels,
+                    default_config.sample_rate(),
+                )
+            })?;
+        let hardware_channels = selected.channels as usize;
+        let device_rate = selected.sample_rate;
+        check_output_channel(channel, hardware_channels)?;
 
         let stimulus = read_stimulus_mono(wav)?;
         let stimulus = if device_rate == sweep_rate {
@@ -226,100 +240,51 @@ impl SweepPlayback for CpalPlayback {
             super::record::resample_reference_signal(&stimulus, sweep_rate, device_rate)?
         };
 
-        let config = cpal::StreamConfig {
-            channels: u16::try_from(hardware_channels)
-                .map_err(|_| "hardware output channel count exceeds u16".to_string())?,
-            sample_rate: device_rate,
-            buffer_size: cpal::BufferSize::Default,
-        };
         self.rendered_frames.store(0, Ordering::Relaxed);
+        self.failed.store(false, Ordering::Release);
         self.total_frames = stimulus.len();
-        let rendered = Arc::clone(&self.rendered_frames);
-        let channel_index = channel as usize;
-        let stimulus: Arc<[f32]> = Arc::from(stimulus);
-        let stream = match default_config.sample_format() {
-            cpal::SampleFormat::F32 => {
-                let rendered = Arc::clone(&rendered);
-                let stimulus = Arc::clone(&stimulus);
-                output_device.build_output_stream(
-                    &config,
-                    move |data: &mut [f32], _| {
-                        let start =
-                            rendered.fetch_add(data.len() / hardware_channels, Ordering::Relaxed);
-                        for (i, frame) in data.chunks_mut(hardware_channels).enumerate() {
-                            frame.fill(0.0);
-                            frame[channel_index] = stimulus.get(start + i).copied().unwrap_or(0.0);
-                        }
-                    },
-                    |e| log::error!("[sotf-capture] output stream error: {e}"),
-                    None,
-                )
-            }
-            cpal::SampleFormat::I16 => {
-                let rendered = Arc::clone(&rendered);
-                let stimulus = Arc::clone(&stimulus);
-                output_device.build_output_stream(
-                    &config,
-                    move |data: &mut [i16], _| {
-                        let start =
-                            rendered.fetch_add(data.len() / hardware_channels, Ordering::Relaxed);
-                        for (i, frame) in data.chunks_mut(hardware_channels).enumerate() {
-                            frame.fill(0);
-                            let sample = (stimulus
-                                .get(start + i)
-                                .copied()
-                                .unwrap_or(0.0)
-                                .clamp(-1.0, 1.0)
-                                * f32::from(i16::MAX))
-                                as i16;
-                            frame[channel_index] = sample;
-                        }
-                    },
-                    |e| log::error!("[sotf-capture] output stream error: {e}"),
-                    None,
-                )
-            }
-            cpal::SampleFormat::U16 => {
-                let rendered = Arc::clone(&rendered);
-                let stimulus = Arc::clone(&stimulus);
-                output_device.build_output_stream(
-                    &config,
-                    move |data: &mut [u16], _| {
-                        let start =
-                            rendered.fetch_add(data.len() / hardware_channels, Ordering::Relaxed);
-                        for (i, frame) in data.chunks_mut(hardware_channels).enumerate() {
-                            frame.fill(u16::MAX / 2 + 1);
-                            let centered = stimulus
-                                .get(start + i)
-                                .copied()
-                                .unwrap_or(0.0)
-                                .clamp(-1.0, 1.0);
-                            let sample = (centered * 32767.0 + 32768.0) as i32 as u16;
-                            frame[channel_index] = sample;
-                        }
-                    },
-                    |e| log::error!("[sotf-capture] output stream error: {e}"),
-                    None,
-                )
-            }
-            format => {
-                return Err(format!("Unsupported output sample format: {format:?}"));
-            }
-        }
-        .map_err(|e| format!("Failed to start playback: {e}"))?;
+        let playback = Arc::new(super::build::SequentialPlayback {
+            signal: stimulus,
+            routes: vec![channel],
+            silence_frames: 0,
+            channels: hardware_channels,
+            total_frames: self.total_frames,
+        });
+        let presentation = Arc::new(super::presentation::PresentationClock::new());
+        let stream = super::build::build_measurement_output_stream(
+            &output_device,
+            selected,
+            playback,
+            Arc::clone(&self.rendered_frames),
+            Arc::clone(&self.failed),
+            Arc::clone(&presentation),
+            "sotf-capture",
+        )?;
         stream
             .play()
             .map_err(|e| format!("Failed to start playback: {e}"))?;
         self.stream = Some(stream);
+        self.presentation = Some(presentation);
         Ok(())
     }
 
     fn is_finished(&mut self) -> bool {
-        self.rendered_frames.load(Ordering::Relaxed) >= self.total_frames
+        self.presentation
+            .as_ref()
+            .is_some_and(|clock| clock.is_finished())
+    }
+
+    fn check_health(&self) -> Result<(), String> {
+        if self.failed.load(Ordering::Acquire) {
+            Err("output audio stream failed".into())
+        } else {
+            Ok(())
+        }
     }
 
     fn stop(&mut self) -> Result<(), String> {
         self.stream.take();
-        Ok(())
+        self.presentation = None;
+        self.check_health()
     }
 }

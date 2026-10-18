@@ -320,6 +320,7 @@ struct FakeCapture {
     channels: Vec<u16>,
     sample_rate: u32,
     expected_duration_secs: f64,
+    started: std::time::Instant,
 }
 
 /// In-memory [`SweepRecorder`] rendering from a [`VirtualWire`].
@@ -501,6 +502,7 @@ impl SweepRecorder for FakeRecorder {
             config.input_channels,
         );
         self.capture = Some(FakeCapture {
+            started: std::time::Instant::now(),
             channels: channels.to_vec(),
             sample_rate: negotiated,
             expected_duration_secs,
@@ -512,39 +514,17 @@ impl SweepRecorder for FakeRecorder {
         })
     }
 
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss,
-        reason = "This progress estimate rounds a nonnegative rate-scaled stimulus length up to whole frames."
-    )]
     fn captured_samples(&self) -> usize {
         let Some(capture) = &self.capture else {
             return 0;
         };
-        let Ok(state) = self.wire.state.lock() else {
-            return 0;
-        };
-        if !state.played || state.sweep_rate == 0 {
-            return 0;
-        }
-        // Progress-only estimate; drift warping (±0.1%) is ignored here.
-        (state.stimulus.len() as f64 * f64::from(capture.sample_rate) / f64::from(state.sweep_rate))
-            .ceil() as usize
-            + self.wire.config.latency_frames
-            + capture
-                .channels
-                .iter()
-                .filter_map(|channel| {
-                    self.wire
-                        .config
-                        .channel_impulse_responses
-                        .get(usize::from(*channel))
-                })
-                .map(|response| response.len().saturating_sub(1))
-                .max()
-                .unwrap_or(0)
-            + self.tail_frames(capture.sample_rate)
+        // Progress models an independently running input stream. Numerical
+        // samples are rendered separately when stopped; output submission must
+        // not manufacture input readiness or freeze tail progress.
+        usize::try_from(
+            capture.started.elapsed().as_nanos() * u128::from(capture.sample_rate) / 1_000_000_000,
+        )
+        .unwrap_or(usize::MAX)
     }
 
     fn stop(&mut self) -> Result<RecordedTake, String> {
@@ -619,9 +599,28 @@ fn warp_drift(samples: &[f32], drift_ppm: f64) -> Vec<f32> {
 }
 
 /// Apply a causal room response while retaining the response's full decay.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "FFT convolution accumulates in f64 and returns the emulated f32 audio format."
+)]
 fn convolve_causal(signal: &[f32], impulse_response: &[f32]) -> Vec<f32> {
     if signal.is_empty() || impulse_response.is_empty() {
         return signal.to_vec();
+    }
+    // Long room tails otherwise make the physics integration suite quadratic
+    // (the modal fixture alone has 24,000 taps). Keep direct summation for
+    // small fixtures and use independently tested f64 FFT convolution above
+    // one million multiplies, retaining the entire causal decay.
+    if signal.len().saturating_mul(impulse_response.len()) > 1_000_000 {
+        let signal: Vec<_> = signal.iter().map(|value| f64::from(*value)).collect();
+        let impulse: Vec<_> = impulse_response
+            .iter()
+            .map(|value| f64::from(*value))
+            .collect();
+        return math_audio_dsp::psychoacoustics::convolve_time_domain(&signal, &impulse)
+            .into_iter()
+            .map(|value| value as f32)
+            .collect();
     }
     let output_len = signal.len() + impulse_response.len() - 1;
     let mut output = vec![0.0; output_len];
@@ -653,5 +652,36 @@ impl XorShift64 {
     )]
     fn next_unit(&mut self) -> f32 {
         (self.next_u64() >> 33) as f32 / (1_u64 << 31) as f32 - 1.0
+    }
+}
+
+#[cfg(test)]
+mod convolution_tests {
+    use super::convolve_causal;
+
+    #[test]
+    fn long_room_convolution_matches_independent_direct_sum_and_retains_tail() {
+        for length in [4095, 4096, 4097] {
+            let signal: Vec<f32> = (0..length)
+                .map(|index| (f32::from(u16::try_from(index).unwrap()) * 0.137).sin() * 0.1)
+                .collect();
+            let impulse: Vec<f32> = (0_u16..257)
+                .map(|index| {
+                    (f32::from(index) * 0.31).cos() * (-0.01 * f32::from(index)).exp() * 0.02
+                })
+                .collect();
+            let mut oracle = vec![0.0_f64; length + impulse.len() - 1];
+            for (index, sample) in signal.iter().enumerate() {
+                for (tap, gain) in impulse.iter().enumerate() {
+                    oracle[index + tap] += f64::from(*sample) * f64::from(*gain);
+                }
+            }
+            let actual = convolve_causal(&signal, &impulse);
+            assert_eq!(actual.len(), oracle.len());
+            for (actual, expected) in actual.iter().zip(oracle) {
+                assert!((f64::from(*actual) - expected).abs() < 1e-7);
+            }
+            assert!(actual.last().unwrap().abs() > 0.0);
+        }
     }
 }

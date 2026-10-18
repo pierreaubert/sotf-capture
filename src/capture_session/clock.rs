@@ -76,6 +76,30 @@ fn finite(value: f64) -> Option<f64> {
     value.is_finite().then_some(value)
 }
 
+// The correlation API reports signed circular lags. A late positive marker
+// can lie past half the FFT length and be reported as negative. Acquisition
+// searches require a complete marker inside the input window, so unwrap only
+// when that positive interpretation fits; truly negative/truncated lags fail.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Validated capture windows contain at most 16 million samples."
+)]
+fn estimate_positive_chirp(
+    reference: &[f32],
+    recorded: &[f32],
+    config: &TdoaConfig,
+) -> TdoaEstimate {
+    let mut estimate = estimate_chirp_tdoa(reference, recorded, config);
+    if estimate.valid && estimate.offset_samples < 0.0 {
+        let positive =
+            estimate.offset_samples + (reference.len() + recorded.len()).next_power_of_two() as f64;
+        if positive >= 0.0 && positive + reference.len() as f64 <= recorded.len() as f64 {
+            estimate.offset_samples = positive;
+        }
+    }
+    estimate
+}
+
 /// Affine clock fit for one take, independent of resampling.
 ///
 /// The same fit that [`correct_capture_clock`] uses, exposed so later
@@ -161,7 +185,7 @@ pub(crate) fn fit_capture_clock(
     // device startup offsets rather than assuming host play() is synchronized.
     let minimum_spacing = (spacing as f64 * (1.0 - MAX_PLAUSIBLE_SKEW_PPM / 1e6)).floor() as usize;
     let first_end = recorded.len().saturating_sub(minimum_spacing);
-    let first = estimate_chirp_tdoa(reference, &recorded[..first_end], &config);
+    let first = estimate_positive_chirp(reference, &recorded[..first_end], &config);
     provenance.start_confidence_db = finite(first.confidence_db);
     if !first.valid
         || first.offset_samples < 0.0
@@ -176,7 +200,7 @@ pub(crate) fn fit_capture_clock(
     let end_start = ((predicted_end - radius).max(0.0) as usize).min(recorded.len());
     let end_stop =
         ((predicted_end + radius + reference.len() as f64).ceil() as usize).min(recorded.len());
-    let second = estimate_chirp_tdoa(reference, &recorded[end_start..end_stop], &config);
+    let second = estimate_positive_chirp(reference, &recorded[end_start..end_stop], &config);
     provenance.end_confidence_db = finite(second.confidence_db);
     if !second.valid
         || second.offset_samples < 0.0

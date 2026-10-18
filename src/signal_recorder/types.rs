@@ -10,10 +10,6 @@ use super::choose::choose_measurement_output_config;
 use super::consts::CANCELLED_ERR;
 #[cfg(feature = "capture-io")]
 use super::misc::actionable_capture_error;
-#[cfg(feature = "capture-io")]
-use super::misc::drain_capture;
-#[cfg(feature = "capture-io")]
-use math_audio_dsp::signals::interleave_per_channel;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,6 +28,47 @@ pub type CancelFlag = Arc<AtomicBool>;
 #[inline]
 pub(super) fn cancel_requested(cancel: Option<&CancelFlag>) -> bool {
     cancel.is_some_and(|c| c.load(Ordering::Relaxed))
+}
+
+pub(super) fn cancel_wait(
+    duration: std::time::Duration,
+    cancel: Option<&CancelFlag>,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + duration;
+    loop {
+        if cancel_requested(cancel) {
+            return Err(super::consts::CANCELLED_ERR.into());
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
+    }
+}
+
+#[cfg(feature = "capture-io")]
+fn input_frame_offset(frame: usize, output_rate: u32, input_rate: u32) -> usize {
+    // Rates are validated before scheduling. Rescale the actual output frame
+    // coordinate once; rounding each gap/segment separately accumulates drift.
+    let numerator = frame as u128 * u128::from(input_rate) + u128::from(output_rate / 2);
+    usize::try_from(numerator / u128::from(output_rate)).unwrap_or(usize::MAX)
+}
+
+#[cfg(all(test, feature = "capture-io"))]
+mod frame_offset_tests {
+    use super::*;
+
+    #[test]
+    fn sequential_layout_uses_exact_frames_and_one_rate_conversion() {
+        assert_eq!(crate::limits::sequential_frames(55, 319, 3).unwrap(), 1441);
+        assert!(crate::limits::sequential_frames(usize::MAX, 1, 3).is_err());
+        assert_eq!(input_frame_offset(319, 44_100, 48_000), 347);
+        assert_eq!(
+            input_frame_offset(319 + 63 * (319 + 55), 44_100, 48_000),
+            25_993
+        );
+    }
 }
 
 /// Parameters for signal generation
@@ -274,11 +311,24 @@ pub(super) fn play_per_channel_and_record_mono(
         return Err(format!("[{log_tag}] Empty stimulus signal"));
     }
 
+    crate::limits::auxiliary_frames(
+        sample_rate,
+        num_channels,
+        signal.len() as f64 / f64::from(sample_rate),
+        f64::from(silence_duration_ms) / 1000.0,
+    )?;
+    if signal.iter().any(|sample| !sample.is_finite())
+        || channel_indices.iter().any(|channel| *channel >= 64)
+    {
+        return Err("invalid auxiliary signal or output route".into());
+    }
+
     let signal_samples = signal.len();
-    let silence_samples = (silence_duration_ms / 1000.0 * sample_rate as f32) as usize;
+    let silence_samples =
+        (f64::from(silence_duration_ms) / 1000.0 * f64::from(sample_rate)) as usize;
 
     // --- Output device discovery + hardware channel count ---
-    let host = cpal::default_host();
+    let host = crate::devices::get_host_for_device(output_device_name);
     let output_device = if let Some(dev_name) = output_device_name {
         crate::devices::find_device(&host, dev_name, false).map_err(|e| {
             actionable_capture_error(&format!("[{log_tag}] Output device not usable"), &e)
@@ -327,23 +377,17 @@ pub(super) fn play_per_channel_and_record_mono(
     )?;
     let playback_channels = output_config.channels as usize;
 
-    // --- Build the playback buffer ---
-    let segment_len = silence_samples + signal_samples;
-    let total_frames = silence_samples + num_channels * segment_len;
-
-    let mut per_channel: Vec<Vec<f32>> = (0..playback_channels)
-        .map(|_| vec![0.0_f32; total_frames])
-        .collect();
-
-    for (i, &ch_idx) in channel_indices.iter().enumerate() {
-        let frame_offset = silence_samples + i * segment_len;
-        for (j, &s) in signal.iter().enumerate() {
-            per_channel[ch_idx as usize][frame_offset + j] = s;
-        }
-        log::debug!("[{log_tag}] Channel {i} at frame {frame_offset}, output ch {ch_idx}");
-    }
-
-    let playback = Arc::new(interleave_per_channel(&per_channel));
+    // Retain one mono waveform plus a compact routing schedule. Silent
+    // hardware channels are generated directly into the callback buffer.
+    let total_frames =
+        crate::limits::sequential_frames(signal_samples, silence_samples, num_channels)?;
+    let playback = Arc::new(super::build::SequentialPlayback {
+        signal: signal.to_vec(),
+        routes: channel_indices.to_vec(),
+        silence_frames: silence_samples,
+        channels: playback_channels,
+        total_frames,
+    });
     let playback_cursor = Arc::new(AtomicUsize::new(0));
     log::info!(
         "[{log_tag}] Prepared direct {}ch playback stream ({} target ch): {} frames ({:.2}s)",
@@ -354,12 +398,13 @@ pub(super) fn play_per_channel_and_record_mono(
     );
 
     // --- Input device + stream setup ---
+    let input_host = crate::devices::get_host_for_device(input_device_name);
     let input_device = if let Some(dev_name) = input_device_name {
-        crate::devices::find_device(&host, dev_name, true).map_err(|e| {
+        crate::devices::find_device(&input_host, dev_name, true).map_err(|e| {
             actionable_capture_error(&format!("[{log_tag}] Input device not usable"), &e)
         })?
     } else {
-        host.default_input_device().ok_or_else(|| {
+        input_host.default_input_device().ok_or_else(|| {
             actionable_capture_error(
                 &format!("[{log_tag}]"),
                 &"No default input device available",
@@ -414,12 +459,11 @@ pub(super) fn play_per_channel_and_record_mono(
     // Derive analysis offsets at the mic's actual sample rate so a
     // downstream mismatch (cpal negotiated a different rate than we
     // asked for) does not leak into per-channel segment slicing.
-    let analysis_silence_samples = (silence_duration_ms / 1000.0 * input_sr as f32) as usize;
-    let analysis_signal_samples =
-        ((signal_samples as f64 * f64::from(input_sr)) / f64::from(sample_rate)).round() as usize;
-    let analysis_segment_len = analysis_silence_samples + analysis_signal_samples;
+    let analysis_silence_samples = input_frame_offset(silence_samples, sample_rate, input_sr);
+    let analysis_signal_samples = input_frame_offset(signal_samples, sample_rate, input_sr);
+    let segment_len = silence_samples + signal_samples;
     let analysis_offsets: Vec<usize> = (0..num_channels)
-        .map(|i| analysis_silence_samples + i * analysis_segment_len)
+        .map(|i| input_frame_offset(silence_samples + i * segment_len, sample_rate, input_sr))
         .collect();
 
     let input_stream_config = cpal::StreamConfig {
@@ -429,11 +473,44 @@ pub(super) fn play_per_channel_and_record_mono(
     };
     // Mic + optional loopback are pushed into one SPSC ring as a pair, so
     // they stay exactly in lock-step without locking inside the input callback.
-    let expected_input_samples = ((total_frames as f64 * f64::from(input_sr)
-        / f64::from(sample_rate)) as usize)
-        + (input_sr as usize / 2);
+    crate::limits::auxiliary_frames(
+        input_sr,
+        num_channels,
+        signal.len() as f64 / f64::from(sample_rate),
+        f64::from(silence_duration_ms) / 1000.0,
+    )?;
+    let expected_input_samples =
+        ((total_frames as f64 * f64::from(input_sr) / f64::from(sample_rate)).ceil() as usize)
+            .checked_add(input_sr as usize * 6)
+            .ok_or("input frame budget overflow")?;
+    if expected_input_samples > crate::limits::MAX_CAPTURE_FRAMES {
+        return Err("auxiliary capture exceeds bounded input storage".into());
+    }
     let (capture_producer, mut capture_consumer) =
-        rtrb::RingBuffer::<(f32, f32)>::new(expected_input_samples.max(1024));
+        rtrb::RingBuffer::<(f32, f32)>::new(input_sr as usize);
+    let mut recorded = Vec::new();
+    recorded
+        .try_reserve_exact(expected_input_samples)
+        .map_err(|e| e.to_string())?;
+    let mut loopback_recorded = loopback_input_channel.map(|_| Vec::new());
+    if let Some(samples) = loopback_recorded.as_mut() {
+        samples
+            .try_reserve_exact(expected_input_samples)
+            .map_err(|e| e.to_string())?;
+    }
+    let mut drain = || -> Result<(), String> {
+        while let Ok((mic, loopback)) = capture_consumer.pop() {
+            if recorded.len() >= expected_input_samples {
+                return Err("auxiliary capture exceeded its frame budget".into());
+            }
+            recorded.push(mic);
+            if let Some(samples) = loopback_recorded.as_mut() {
+                samples.push(loopback);
+            }
+        }
+        Ok(())
+    };
+    let stream_failed = Arc::new(AtomicBool::new(false));
     let capture_count = Arc::new(AtomicUsize::new(0));
     let capture_count_callback = Arc::clone(&capture_count);
     let capture_overruns = Arc::new(AtomicUsize::new(0));
@@ -449,101 +526,103 @@ pub(super) fn play_per_channel_and_record_mono(
         capture_producer,
         capture_count_callback,
         capture_overruns_callback,
+        Arc::clone(&stream_failed),
         hw_ch,
         input_ch_idx,
         loopback_ch_idx,
         log_tag,
     )?;
 
+    let check = || -> Result<(), String> {
+        if cancel_requested(cancel) {
+            return Err(CANCELLED_ERR.into());
+        }
+        if stream_failed.load(AtomicOrdering::Acquire) {
+            return Err(format!(
+                "[{log_tag}] Audio stream failed during acquisition"
+            ));
+        }
+        let lost = capture_overruns.load(AtomicOrdering::Relaxed);
+        if lost != 0 {
+            return Err(format!("[{log_tag}] Capture lost {lost} input frames"));
+        }
+        Ok(())
+    };
     input_stream.play().map_err(|e| {
         actionable_capture_error(&format!("[{log_tag}] Failed to start input stream"), &e)
     })?;
-    sleep(Duration::from_millis(100));
-
-    // --- Start direct playback ---
-    if cancel_requested(cancel) {
-        std::mem::drop(input_stream);
-        return Err(CANCELLED_ERR.to_string());
+    let startup_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while capture_count.load(AtomicOrdering::Relaxed) < input_sr as usize / 4 {
+        check()?;
+        drain()?;
+        if std::time::Instant::now() >= startup_deadline {
+            return Err(format!(
+                "[{log_tag}] Input did not become ready before the startup deadline"
+            ));
+        }
+        sleep(Duration::from_millis(10));
     }
+    check()?;
+    drain()?;
+    let presentation = Arc::new(super::presentation::PresentationClock::new());
     let output_stream = build_measurement_output_stream(
         &output_device,
         output_config,
-        playback.clone(),
+        playback,
         playback_cursor.clone(),
+        Arc::clone(&stream_failed),
+        Arc::clone(&presentation),
         log_tag,
     )?;
+    check()?;
     output_stream.play().map_err(|e| {
         actionable_capture_error(&format!("[{log_tag}] Failed to start output stream"), &e)
     })?;
-
-    // Wait for playback to finish — same stability-loop pattern both
-    // original functions used. Honors `cancel` between polls so a UI
-    // stop button propagates with at most ~50 ms of latency.
     let expected_duration = total_frames as f64 / f64::from(sample_rate);
-    let total_wait = Duration::from_secs_f64(expected_duration + 3.0);
-    let check_interval = Duration::from_millis(50);
-    let mut elapsed = Duration::ZERO;
-    let mut last_count = 0_usize;
-    let mut stable = 0_u32;
-    let mut cancelled = false;
-    while elapsed < total_wait {
-        sleep(check_interval);
-        elapsed += check_interval;
-        if cancel_requested(cancel) {
-            cancelled = true;
-            log::info!("[{log_tag}] Cancellation requested — aborting capture");
-            break;
-        }
-        let played = playback_cursor.load(AtomicOrdering::Relaxed);
+    let deadline = std::time::Instant::now() + Duration::from_secs_f64(expected_duration + 3.0);
+    let mut last_input_count = capture_count.load(AtomicOrdering::Relaxed);
+    let mut last_input = std::time::Instant::now();
+    while !presentation.is_finished() {
+        check()?;
+        drain()?;
+        let now = std::time::Instant::now();
         let count = capture_count.load(AtomicOrdering::Relaxed);
-        if count == last_count && count > 0 {
-            stable += 1;
-            if stable >= 3 && played >= playback.len() {
-                break;
-            }
-        } else {
-            stable = 0;
+        if count != last_input_count {
+            last_input_count = count;
+            last_input = now;
         }
-        last_count = count;
-        if played >= playback.len() && elapsed >= Duration::from_secs_f64(expected_duration + 0.2) {
-            break;
+        if now.duration_since(last_input) > Duration::from_secs(1) {
+            return Err(format!(
+                "[{log_tag}] Input callbacks stalled during playback"
+            ));
         }
+        if now >= deadline {
+            return Err(format!("[{log_tag}] Playback timed out"));
+        }
+        sleep(Duration::from_millis(10));
     }
-
-    // Tear everything down in playback → input-stream → sleep order.
-    // Skipping the sleep reliably leaves the audio device busy for the
-    // next consecutive run. On cancel, skip the tail-capture sleep so
-    // the UI gets snappy feedback.
-    if !cancelled {
-        sleep(Duration::from_millis(500));
+    // Keep receiving the bounded decay tail while checking cancel/error/loss.
+    let tail_started = std::time::Instant::now();
+    let tail_frames = capture_count
+        .load(AtomicOrdering::Relaxed)
+        .checked_add(input_sr as usize / 2)
+        .ok_or("input drain frame count overflow")?;
+    while tail_started.elapsed() < Duration::from_millis(500)
+        || capture_count.load(AtomicOrdering::Relaxed) < tail_frames
+    {
+        check()?;
+        drain()?;
+        if tail_started.elapsed() >= Duration::from_millis(5500) {
+            return Err(format!(
+                "[{log_tag}] Input drain timed out after output presentation"
+            ));
+        }
+        sleep(Duration::from_millis(10));
     }
     std::mem::drop(output_stream);
     std::mem::drop(input_stream);
-    sleep(Duration::from_millis(500));
-
-    if cancelled {
-        return Err(CANCELLED_ERR.to_string());
-    }
-
-    let capture_pairs = drain_capture(
-        &mut capture_consumer,
-        capture_count.load(AtomicOrdering::Relaxed),
-    );
-    let mut recorded = Vec::with_capacity(capture_pairs.len());
-    let mut loopback_recorded =
-        loopback_input_channel.map(|_| Vec::with_capacity(capture_pairs.len()));
-    for (mic, loopback) in capture_pairs {
-        recorded.push(mic);
-        if let Some(lb) = loopback_recorded.as_mut() {
-            lb.push(loopback);
-        }
-    }
-    let dropped_samples = capture_overruns.load(AtomicOrdering::Relaxed);
-    if dropped_samples > 0 {
-        log::warn!(
-            "[{log_tag}] Dropped {dropped_samples} input frames because the capture ring buffer filled"
-        );
-    }
+    drain()?;
+    check()?;
     log::info!(
         "[{log_tag}] Recorded {} samples ({:.2}s) at {} Hz",
         recorded.len(),
@@ -560,7 +639,7 @@ pub(super) fn play_per_channel_and_record_mono(
 
     if let Some(ref lb) = loopback_recorded {
         // Mic and loopback are pushed in lock-step under the same
-        // Mutex; if they diverge here something deeper went wrong
+        // ring; if they diverge here something deeper went wrong
         // (callback panic, cpal frame anomaly) and we must refuse
         // rather than silently truncate downstream.
         if lb.len() != recorded.len() {

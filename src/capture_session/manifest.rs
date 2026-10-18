@@ -617,6 +617,7 @@ mod tests {
             fabricated_take("right", "seat-right", 3, None),
         ];
         ClockProcessedManifest {
+            localization_calibration: None,
             version: 1,
             plan,
             raw_status: None,
