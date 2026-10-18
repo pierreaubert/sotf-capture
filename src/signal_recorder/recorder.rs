@@ -45,6 +45,13 @@ pub struct RecordedTake {
 /// Each successful `start` must be followed by exactly one `stop`; a
 /// failed `start` needs no matching `stop`.
 pub trait SweepRecorder {
+    /// Attach a live level meter fed from the capture path.
+    ///
+    /// The default ignores the meter (emulated backends may still fold
+    /// their generated take into it at `stop`). Production backends
+    /// update it from the audio callback with lock-free stores only.
+    fn set_level_meter(&mut self, _meter: std::sync::Arc<super::level_meter::CaptureLevelMeter>) {}
+
     /// Open the device and start capturing `channels`.
     ///
     /// # Errors
@@ -100,6 +107,7 @@ pub struct CpalRecorder {
     counts: Vec<Arc<AtomicUsize>>,
     overruns: Arc<AtomicUsize>,
     sample_rate: u32,
+    level_meter: Option<Arc<super::level_meter::CaptureLevelMeter>>,
 }
 
 #[cfg(feature = "capture-io")]
@@ -124,12 +132,17 @@ impl CpalRecorder {
             counts: Vec::new(),
             overruns: Arc::new(AtomicUsize::new(0)),
             sample_rate: 0,
+            level_meter: None,
         }
     }
 }
 
 #[cfg(feature = "capture-io")]
 impl SweepRecorder for CpalRecorder {
+    fn set_level_meter(&mut self, meter: Arc<super::level_meter::CaptureLevelMeter>) {
+        self.level_meter = Some(meter);
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
@@ -247,12 +260,20 @@ impl SweepRecorder for CpalRecorder {
         let channels_vec: Vec<usize> = channels.iter().map(|&c| c as usize).collect();
         let overrun_tag = self.log_tag.clone();
         let error_tag = self.log_tag.clone();
+        let level_meter = self.level_meter.clone();
 
         let stream = input_device
             .build_input_stream(
                 &input_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     let frames = data.len() / hardware_input_channels;
+                    if let Some(meter) = &level_meter {
+                        // Lock-free atomic stores only; the meter reads
+                        // samples this callback already walks for the rings.
+                        for &ch_idx in &channels_vec {
+                            meter.record_interleaved(data, hardware_input_channels, ch_idx);
+                        }
+                    }
                     for (mic_i, &ch_idx) in channels_vec.iter().enumerate() {
                         let written = write_selected_channel_to_ring(
                             &mut producers[mic_i],

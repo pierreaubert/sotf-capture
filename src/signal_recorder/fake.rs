@@ -222,6 +222,7 @@ impl VirtualWire {
             wire: self.clone(),
             capture: None,
             starts: 0,
+            level_meter: None,
         }
     }
 
@@ -332,6 +333,7 @@ pub struct FakeRecorder {
     wire: VirtualWire,
     capture: Option<FakeCapture>,
     starts: usize,
+    level_meter: Option<std::sync::Arc<super::level_meter::CaptureLevelMeter>>,
 }
 
 impl FakeRecorder {
@@ -447,6 +449,10 @@ impl FakeRecorder {
 }
 
 impl SweepRecorder for FakeRecorder {
+    fn set_level_meter(&mut self, meter: std::sync::Arc<super::level_meter::CaptureLevelMeter>) {
+        self.level_meter = Some(meter);
+    }
+
     fn start(
         &mut self,
         device: Option<&str>,
@@ -554,6 +560,16 @@ impl SweepRecorder for FakeRecorder {
         let mut recorded_per_channel = Vec::with_capacity(capture.channels.len());
         for &input_channel in &capture.channels {
             recorded_per_channel.push(self.render_channel(&capture, usize::from(input_channel))?);
+        }
+        if let Some(meter) = &self.level_meter {
+            // Emulated takes have no live callback; fold the rendered
+            // take into the meter in callback-sized blocks so the UI's
+            // final level verdict matches the rendered samples.
+            for channel_samples in &recorded_per_channel {
+                for block in channel_samples.chunks(512) {
+                    meter.record_mono(block);
+                }
+            }
         }
         let dropped_samples = self.wire.config.dropped_samples;
         if dropped_samples > 0 {

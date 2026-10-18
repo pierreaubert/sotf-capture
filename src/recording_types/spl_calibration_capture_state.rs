@@ -166,6 +166,26 @@ mod tests {
     }
 
     #[test]
+    fn reported_68_db_maps_to_full_scale_offset_not_a_correction() {
+        let mut state = SplCalibrationCaptureState::default();
+        // Tone captured at RMS 0.0141 (−37 dBFS): a typical quiet mic level.
+        state.apply_engine_result(SplCalibrationResult {
+            peak_sample_level: 0.02,
+            rms_sample_level: 0.0141,
+            ..captured()
+        });
+        state.reported_db_spl = Some(68.0);
+        let anchor = state.to_spl_calibration().unwrap();
+        // The stored offset is the SPL a full-scale (0 dBFS) RMS signal
+        // would produce at this mic gain: 68 − (−37) ≈ 105 dB. It is an
+        // absolute map, not a +105 dB correction to the reading.
+        assert!((anchor.spl_offset_db - 105.0).abs() < 0.1);
+        // Round-trip: the captured tone reads back as the entered 68 dB SPL.
+        let tone_spl = 20.0 * 0.0141_f32.log10() + anchor.spl_offset_db;
+        assert!((tone_spl - 68.0).abs() < 1e-3);
+    }
+
+    #[test]
     fn invalid_capture_cannot_be_saved_or_marked_complete() {
         let valid = captured();
         let invalid = [

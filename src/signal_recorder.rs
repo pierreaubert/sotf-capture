@@ -12,6 +12,7 @@ pub mod fake;
 #[cfg(test)]
 mod fake_tests;
 mod generate;
+pub mod level_meter;
 mod measurement;
 mod misc;
 #[cfg(feature = "capture-io")]
@@ -36,6 +37,7 @@ pub use consts::*;
 #[cfg(any(test, feature = "test-util"))]
 pub use fake::{FakeAudioConfig, FakeAudioProfile, FakePlayback, FakeRecorder, VirtualWire};
 pub use generate::*;
+pub use level_meter::{CaptureLevelMeter, CaptureLevelSnapshot, GainAdvice, LevelZone};
 pub use misc::*;
 pub use playback::*;
 #[cfg(feature = "capture-io")]
