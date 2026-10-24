@@ -1,0 +1,7 @@
+    Finished `bench` profile [optimized] target(s) in 0.54s
+     Running benches/capture_callbacks.rs (/Volumes/home_tmp/tmp/sotf-capture-audit-20261018-target/release/deps/capture_callbacks-ad06e7dc17c46c7a)
+
+thread 'main' (320929523) panicked at benches/capture_callbacks.rs:167:5:
+callback deadline threshold exceeded; inspect JSON results
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: bench failed, to rerun pass `--bench capture_callbacks`

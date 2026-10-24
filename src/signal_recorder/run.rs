@@ -68,6 +68,7 @@ pub fn run_bass_anchor(
         loopback_input_channel,
         DEFAULT_AUXILIARY_SIGNAL_LEVEL_DB,
         cancel.as_ref(),
+        None,
     )?;
     Ok(results)
 }
@@ -79,6 +80,8 @@ pub fn run_bass_anchor(
 /// a 2-channel f32 file (channel 0 = mic, channel 1 = loopback) so the
 /// session can be re-analysed offline with
 /// [`analyze_bass_anchor_recording`]; otherwise it is single-channel.
+/// Transport failures save `capture-loss-*.json` beside the requested WAV;
+/// rejected acquisitions do not publish a recording.
 ///
 /// # Errors
 /// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
@@ -123,6 +126,7 @@ pub fn run_bass_anchor_with_recording(
         loopback_input_channel,
         signal_level_db,
         cancel.as_ref(),
+        Some(super::continuity::recording_parent(recording_wav_path)),
     )?;
 
     let channels_out: u16 = if loopback_recorded.is_some() { 2 } else { 1 };
@@ -198,6 +202,7 @@ fn run_bass_anchor_core(
     loopback_input_channel: Option<u16>,
     signal_level_db: f32,
     cancel: Option<&CancelFlag>,
+    evidence_directory: Option<&std::path::Path>,
 ) -> Result<(BassAnchorResults, Vec<f32>, Option<Vec<f32>>, u32), String> {
     crate::limits::auxiliary_frames(
         sample_rate,
@@ -273,6 +278,7 @@ fn run_bass_anchor_core(
         loopback_input_channel,
         "run_bass_anchor",
         cancel,
+        evidence_directory,
     )?;
 
     // Per-channel analysis via the pure helper.
@@ -395,6 +401,7 @@ pub fn run_spl_calibration(
         None,
         "run_spl_calibration",
         cancel.as_ref(),
+        None,
     )?;
 
     // Slice the mic recording to the stable portion of the tone.

@@ -341,6 +341,7 @@ pub fn process_capture_session_with_options(
     let raw_journal_bytes = bounded_read(&artifact(&root, "capture-raw.json")?, 2_097_152)?;
     let mut manifest: RawCaptureManifest = serde_json::from_slice(&raw_journal_bytes)
         .map_err(|e| format!("cannot parse raw capture journal: {e}"))?;
+    crate::capture_session::record::validate_acquisition_checkpoint(&manifest)?;
     if manifest.version != 1
         || manifest.status == RawCaptureStatus::Capturing
         || manifest.takes.is_empty()
@@ -446,6 +447,18 @@ pub fn process_capture_session_with_options(
     {
         return Err("completed raw capture is missing declared auxiliary passes".into());
     }
+    let expected_loopback_count = manifest
+        .plan
+        .sources
+        .len()
+        .checked_mul(manifest.plan.repeat_count as usize)
+        .ok_or("raw loopback pass count overflow")?;
+    if manifest.status == RawCaptureStatus::RawComplete
+        && manifest.plan.loopback.is_some()
+        && manifest.loopback_files.len() != expected_loopback_count
+    {
+        return Err("completed raw capture is missing declared loopback passes".into());
+    }
     let selected_take_ids = if options.selected_take_ids.is_empty() {
         if manifest.status == RawCaptureStatus::RawComplete && manifest.plan.repeat_count == 1 {
             Some(
@@ -515,7 +528,18 @@ pub fn process_capture_session_with_options(
         }
     };
     let mut loopback_names = HashSet::new();
+    let mut loopback_passes = HashSet::new();
     for take in &manifest.loopback_files {
+        if take.repeat_index >= manifest.plan.repeat_count
+            || !manifest
+                .plan
+                .sources
+                .iter()
+                .any(|source| source.id == take.source_id)
+            || !loopback_passes.insert((&take.source_id, take.repeat_index))
+        {
+            return Err("loopback pass identities are unknown or duplicated".into());
+        }
         if !loopback_names.insert(&take.wav_file)
             || !output_names.insert(take.wav_file.to_ascii_lowercase())
         {
@@ -526,6 +550,13 @@ pub fn process_capture_session_with_options(
             manifest.plan.sample_rate_hz,
             take.samples,
         )?;
+    }
+    let transport_bytes =
+        crate::capture_session::loss_evidence::read_verified(&root, &manifest.transport_evidence)?;
+    for (name, _) in &transport_bytes {
+        if !output_names.insert(name.to_ascii_lowercase()) {
+            return Err("transport evidence artifact filename collides".into());
+        }
     }
     std::fs::create_dir(output_directory)
         .map_err(|e| format!("cannot create new processed capture directory: {e}"))?;
@@ -538,6 +569,10 @@ pub fn process_capture_session_with_options(
         .map_err(|error| format!("cannot verify preserved raw acquisition journal: {error}"))?;
     if preserved_journal != raw_journal_bytes {
         return Err("preserved raw acquisition journal bytes changed during copy".into());
+    }
+    for (name, bytes) in transport_bytes {
+        std::fs::write(output_directory.join(name), bytes)
+            .map_err(|e| format!("cannot preserve transport evidence: {e}"))?;
     }
     for (file, bytes) in calibration_bytes {
         std::fs::write(output_directory.join(file), bytes).map_err(|e| e.to_string())?;

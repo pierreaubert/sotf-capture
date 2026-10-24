@@ -1,0 +1,83 @@
+{
+  "recorded_at_utc": "2026-10-19T21:18:18.351283+00:00",
+  "host": {
+    "cpu": "Apple M4 Pro",
+    "logical_cpus": 14,
+    "os": "Darwin",
+    "os_version": "27.0.1",
+    "architecture": "arm64",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)"
+  },
+  "capture_head": "341757e8ecb2eb8820dabbe0d79a2182e7def563",
+  "capture_source_sha256": "d35bb30afae771ce37163e1b8aafd4bf9e2c0570a70a46eeaba1e111bdbbae22",
+  "capture_dirty": true,
+  "fingerprint_scope": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "src/**/*.rs",
+    "benches/**/*.rs",
+    "tests/**/*.rs"
+  ],
+  "fingerprint_method": "SHA-256 over sorted relative UTF-8 paths, each followed by NUL then exact file bytes",
+  "dependencies": {
+    "autoeq": {
+      "head": "867976de9ef0d23d2e02d6400052a12bfbeccac2",
+      "dirty": true
+    },
+    "math-audio": {
+      "head": "a32fd133311fbbf921a0c21d012d400b721f50a4",
+      "dirty": true
+    }
+  },
+  "dependency_observation": "Observed after measurement; live sibling checkouts are not a hermetic source snapshot.",
+  "command": "/Volumes/home_tmp/tmp/sotf-capture-audit-20261018-target/release/deps/capture_callbacks-ad06e7dc17c46c7a --iterations 4096 --rate 48000 --max-deadline-fraction 1 --cpu-clock thread",
+  "exit_code": 101,
+  "cases": 256,
+  "measured_invocations": 1048576,
+  "heap_operations": 0,
+  "deadline_miss_cases": 46,
+  "worst_wall_case": {
+    "case": {
+      "core": "multidevice_input",
+      "format": "f32",
+      "channels": 94,
+      "selected": 33,
+      "frames": 32
+    },
+    "iterations": 4096,
+    "rate": 48000,
+    "p50_ns": 1459,
+    "p99_ns": 37166,
+    "max_ns": 70651959,
+    "deadline_ns": 666666,
+    "max_deadline_fraction": 105.97804447804448,
+    "thread_cpu_p50_ns": 1584,
+    "thread_cpu_max_ns": 15958,
+    "thread_cpu_ns_at_max_wall": 10167,
+    "wall_minus_cpu_lower_bound_ns_at_max_wall": 70641792,
+    "heap_operations": 0
+  },
+  "maximum_thread_cpu_ns": 380625,
+  "load": "Host was not isolated. This agent completed its own tests and builds before launching the matrix; other host activity was not controlled.",
+  "scope": "Production callback cores with interval tracking on sweep, auxiliary, and multi-device inputs. Excludes native stream scheduling, callback entry/exit, driver buffering, and hardware timestamp delivery.",
+  "validation": {
+    "full_suite": {
+      "passed": 479,
+      "ignored": 1,
+      "suites": 5
+    },
+    "dsp_only": {
+      "passed": 382,
+      "ignored": 1
+    },
+    "strict_clippy": "passed, all targets with test-util, no dependency linting",
+    "tvos": "DSP-only library compile check passed",
+    "format_and_diff": "passed",
+    "transport_regressions": "Actual missing blocks in all three input cores; exact retained sequences/positions, invalid-block clock advancement, bounded truncation, native metadata reset, public sweep rejection with saved reports, auxiliary save/inline diagnostics, cancellation marker, write failure"
+  },
+  "remaining": [
+    "Portable processed handoffs must retain referenced raw loss reports with verified hashes",
+    "Physical input/output and sustained disk throughput qualification",
+    "Native callback deadline qualification; failed wall gates retained"
+  ]
+}

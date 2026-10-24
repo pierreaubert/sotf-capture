@@ -293,6 +293,7 @@ pub(super) fn play_per_channel_and_record_mono(
     loopback_input_channel: Option<u16>,
     log_tag: &str,
     cancel: Option<&CancelFlag>,
+    evidence_directory: Option<&std::path::Path>,
 ) -> Result<PlayPerChannelOutput, String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -499,7 +500,11 @@ pub(super) fn play_per_channel_and_record_mono(
             .map_err(|e| e.to_string())?;
     }
     let mut drain = || -> Result<(), String> {
-        while let Ok((mic, loopback)) = capture_consumer.pop() {
+        // A running producer must not extend a control drain indefinitely.
+        for _ in 0..capture_consumer.slots() {
+            let (mic, loopback) = capture_consumer
+                .pop()
+                .map_err(|_| "auxiliary capture frame became unavailable")?;
             if recorded.len() >= expected_input_samples {
                 return Err("auxiliary capture exceeded its frame budget".into());
             }
@@ -510,6 +515,15 @@ pub(super) fn play_per_channel_and_record_mono(
         }
         Ok(())
     };
+    let continuity = Arc::new(super::continuity::Continuity::default());
+    let input_device_id = input_device
+        .id()
+        .map_err(|e| format!("cannot identify input device: {e}"))?
+        .to_string();
+    let output_device_id = output_device
+        .id()
+        .map_err(|e| format!("cannot identify output device: {e}"))?
+        .to_string();
     let stream_failed = Arc::new(AtomicBool::new(false));
     let capture_count = Arc::new(AtomicUsize::new(0));
     let capture_count_callback = Arc::clone(&capture_count);
@@ -527,6 +541,7 @@ pub(super) fn play_per_channel_and_record_mono(
         capture_count_callback,
         capture_overruns_callback,
         Arc::clone(&stream_failed),
+        Arc::clone(&continuity),
         hw_ch,
         input_ch_idx,
         loopback_ch_idx,
@@ -548,81 +563,101 @@ pub(super) fn play_per_channel_and_record_mono(
         }
         Ok(())
     };
-    input_stream.play().map_err(|e| {
-        actionable_capture_error(&format!("[{log_tag}] Failed to start input stream"), &e)
+    let acquisition = (|| -> Result<(), String> {
+        input_stream.play().map_err(|e| {
+            actionable_capture_error(&format!("[{log_tag}] Failed to start input stream"), &e)
+        })?;
+        let startup_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while capture_count.load(AtomicOrdering::Relaxed) < input_sr as usize / 4 {
+            check()?;
+            drain()?;
+            if std::time::Instant::now() >= startup_deadline {
+                return Err(format!(
+                    "[{log_tag}] Input did not become ready before the startup deadline"
+                ));
+            }
+            sleep(Duration::from_millis(10));
+        }
+        check()?;
+        drain()?;
+        let presentation = Arc::new(super::presentation::PresentationClock::new());
+        let output_stream = build_measurement_output_stream(
+            &output_device,
+            output_config,
+            playback,
+            playback_cursor.clone(),
+            Arc::clone(&stream_failed),
+            Arc::clone(&presentation),
+            log_tag,
+        )?;
+        check()?;
+        output_stream.play().map_err(|e| {
+            actionable_capture_error(&format!("[{log_tag}] Failed to start output stream"), &e)
+        })?;
+        let expected_duration = total_frames as f64 / f64::from(sample_rate);
+        let deadline = std::time::Instant::now() + Duration::from_secs_f64(expected_duration + 3.0);
+        let mut last_input_count = capture_count.load(AtomicOrdering::Relaxed);
+        let mut last_input = std::time::Instant::now();
+        while !presentation.is_finished() {
+            check()?;
+            drain()?;
+            let now = std::time::Instant::now();
+            let count = capture_count.load(AtomicOrdering::Relaxed);
+            if count != last_input_count {
+                last_input_count = count;
+                last_input = now;
+            }
+            if now.duration_since(last_input) > Duration::from_secs(1) {
+                return Err(format!(
+                    "[{log_tag}] Input callbacks stalled during playback"
+                ));
+            }
+            if now >= deadline {
+                return Err(format!("[{log_tag}] Playback timed out"));
+            }
+            sleep(Duration::from_millis(10));
+        }
+        // Keep receiving the bounded decay tail while checking cancel/error/loss.
+        let tail_started = std::time::Instant::now();
+        let tail_frames = capture_count
+            .load(AtomicOrdering::Relaxed)
+            .checked_add(input_sr as usize / 2)
+            .ok_or("input drain frame count overflow")?;
+        while tail_started.elapsed() < Duration::from_millis(500)
+            || capture_count.load(AtomicOrdering::Relaxed) < tail_frames
+        {
+            check()?;
+            drain()?;
+            if tail_started.elapsed() >= Duration::from_millis(5500) {
+                return Err(format!(
+                    "[{log_tag}] Input drain timed out after output presentation"
+                ));
+            }
+            sleep(Duration::from_millis(10));
+        }
+        std::mem::drop(output_stream);
+        std::mem::drop(input_stream);
+        drain()?;
+        check()?;
+        Ok(())
+    })();
+    acquisition.map_err(|error| {
+        let mut routes = vec![super::CaptureInputRoute { input_index: 0, hardware_channel: input_channel }];
+        if let Some(channel) = loopback_input_channel {
+            routes.push(super::CaptureInputRoute { input_index: 1, hardware_channel: channel });
+        }
+        super::continuity::report_error(evidence_directory, &super::continuity::FailureEvidence {
+            version: 1, error: &error,
+            timeline_origin: "frame zero is the first input callback frame; mic and loopback share one clock; positions are not stimulus offsets",
+            output_device_id: Some(&output_device_id), output_device_selector: output_device_name,
+            take_index: None, capture_kind: log_tag, output_channels: channel_indices,
+            output_channel: channel_indices[0], stimulus_frames: total_frames,
+            inputs: vec![super::CaptureInputEvidence {
+                clock_index: 0, device_selector: input_device_name.unwrap_or("default input").to_owned(),
+                device_id: input_device_id, sample_rate_hz: input_sr, routes, continuity: continuity.snapshot(),
+            }],
+        })
     })?;
-    let startup_deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while capture_count.load(AtomicOrdering::Relaxed) < input_sr as usize / 4 {
-        check()?;
-        drain()?;
-        if std::time::Instant::now() >= startup_deadline {
-            return Err(format!(
-                "[{log_tag}] Input did not become ready before the startup deadline"
-            ));
-        }
-        sleep(Duration::from_millis(10));
-    }
-    check()?;
-    drain()?;
-    let presentation = Arc::new(super::presentation::PresentationClock::new());
-    let output_stream = build_measurement_output_stream(
-        &output_device,
-        output_config,
-        playback,
-        playback_cursor.clone(),
-        Arc::clone(&stream_failed),
-        Arc::clone(&presentation),
-        log_tag,
-    )?;
-    check()?;
-    output_stream.play().map_err(|e| {
-        actionable_capture_error(&format!("[{log_tag}] Failed to start output stream"), &e)
-    })?;
-    let expected_duration = total_frames as f64 / f64::from(sample_rate);
-    let deadline = std::time::Instant::now() + Duration::from_secs_f64(expected_duration + 3.0);
-    let mut last_input_count = capture_count.load(AtomicOrdering::Relaxed);
-    let mut last_input = std::time::Instant::now();
-    while !presentation.is_finished() {
-        check()?;
-        drain()?;
-        let now = std::time::Instant::now();
-        let count = capture_count.load(AtomicOrdering::Relaxed);
-        if count != last_input_count {
-            last_input_count = count;
-            last_input = now;
-        }
-        if now.duration_since(last_input) > Duration::from_secs(1) {
-            return Err(format!(
-                "[{log_tag}] Input callbacks stalled during playback"
-            ));
-        }
-        if now >= deadline {
-            return Err(format!("[{log_tag}] Playback timed out"));
-        }
-        sleep(Duration::from_millis(10));
-    }
-    // Keep receiving the bounded decay tail while checking cancel/error/loss.
-    let tail_started = std::time::Instant::now();
-    let tail_frames = capture_count
-        .load(AtomicOrdering::Relaxed)
-        .checked_add(input_sr as usize / 2)
-        .ok_or("input drain frame count overflow")?;
-    while tail_started.elapsed() < Duration::from_millis(500)
-        || capture_count.load(AtomicOrdering::Relaxed) < tail_frames
-    {
-        check()?;
-        drain()?;
-        if tail_started.elapsed() >= Duration::from_millis(5500) {
-            return Err(format!(
-                "[{log_tag}] Input drain timed out after output presentation"
-            ));
-        }
-        sleep(Duration::from_millis(10));
-    }
-    std::mem::drop(output_stream);
-    std::mem::drop(input_stream);
-    drain()?;
-    check()?;
     log::info!(
         "[{log_tag}] Recorded {} samples ({:.2}s) at {} Hz",
         recorded.len(),

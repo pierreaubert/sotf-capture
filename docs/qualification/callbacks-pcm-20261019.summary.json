@@ -1,0 +1,42 @@
+{
+  "recorded_at_utc": "2026-10-19T21:46:16.378762+00:00",
+  "capture_head": "341757e8ecb2eb8820dabbe0d79a2182e7def563",
+  "capture_source_sha256": "6bddba6e939b24453a8333e7d9d1c6859e4fcba4859494bc1f43ac1e238c5981",
+  "fingerprint_scope": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "src/**/*.rs",
+    "benches/**/*.rs",
+    "tests/**/*.rs"
+  ],
+  "fingerprint_method": "SHA-256 over sorted relative UTF-8 paths, each followed by NUL then exact file bytes",
+  "exit_code": 101,
+  "command": "capture_callbacks-ad06e7dc17c46c7a --iterations 4096 --rate 48000 --max-deadline-fraction 1 --cpu-clock thread",
+  "cases": 2208,
+  "measured_invocations": 9043968,
+  "heap_operations": 0,
+  "deadline_miss_cases": 71,
+  "worst_wall_case": {
+    "case": {
+      "core": "sweep_input_with_meter",
+      "format": "u32",
+      "channels": 94,
+      "selected": 33,
+      "frames": 32
+    },
+    "iterations": 4096,
+    "rate": 48000,
+    "p50_ns": 2500,
+    "p99_ns": 5750,
+    "max_ns": 51413167,
+    "deadline_ns": 666666,
+    "max_deadline_fraction": 77.11982761982762,
+    "thread_cpu_p50_ns": 2625,
+    "thread_cpu_max_ns": 18541,
+    "thread_cpu_ns_at_max_wall": 15708,
+    "wall_minus_cpu_lower_bound_ns_at_max_wall": 51397459,
+    "heap_operations": 0
+  },
+  "scope": "Initial expanded PCM/error matrix. Some older healthy/overflow probes do not black-box their input buffers; timing is superseded by the subsequent barrier-consistent measurement. Heap and failed deadline evidence retained.",
+  "load": "Host not isolated. This agent completed its other builds/tests before starting the matrix."
+}

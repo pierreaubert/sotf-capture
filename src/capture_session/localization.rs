@@ -3874,6 +3874,8 @@ mod tests {
         let raw_root = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
         let mut manifest = RawCaptureManifest {
+            checkpoint: None,
+            transport_evidence: Vec::new(),
             localization_calibration: None,
             version: 1,
             plan: plan.clone(),

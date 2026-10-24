@@ -20,6 +20,60 @@ pub(crate) fn sequential_frames(
 // reference plus the playback-owned stimulus. Analysis has a separate lifetime.
 const MAX_CAPTURE_BYTES: usize = 512 * 1024 * 1024;
 
+// A float batch is one 4 KiB page; each buffered file write amortizes two batches.
+pub(crate) const FILE_CHUNK_FRAMES: usize = 1024;
+pub(crate) const FILE_WRITER_BUFFER_BYTES: usize = 8 * 1024;
+// Small captures retain at least 256 KiB of queue payload; larger captures use
+// the rate/input-scaled one-second capacity below.
+pub(crate) const FILE_QUEUE_CHUNKS: usize = 64;
+
+/// Match the input rings' one-second burst tolerance, with a small-case floor.
+pub(crate) fn file_queue_chunks(inputs: usize, rate: u32) -> Result<usize, String> {
+    inputs
+        .checked_mul((rate as usize).div_ceil(FILE_CHUNK_FRAMES))
+        .map(|chunks| chunks.max(FILE_QUEUE_CHUNKS))
+        .ok_or_else(|| "capture writer queue size overflow".into())
+}
+
+/// Bound live streaming payloads, independently of the total recording length.
+pub(crate) fn file_capture_bytes(
+    inputs: usize,
+    rate: u32,
+    stimulus: usize,
+) -> Result<usize, String> {
+    let queue_chunks = file_queue_chunks(inputs, rate)?;
+    let samples = inputs
+        .checked_mul(rate as usize)
+        .and_then(|rings| {
+            stimulus
+                .checked_mul(2)
+                .and_then(|signal| rings.checked_add(signal))
+        })
+        .and_then(|samples| {
+            inputs
+                .checked_add(queue_chunks.checked_add(2)?)
+                .and_then(|chunks| chunks.checked_mul(FILE_CHUNK_FRAMES))
+                .and_then(|chunks| samples.checked_add(chunks))
+        })
+        .ok_or("file capture storage size overflow")?;
+    // Each mono WAV has an 8 KiB buffered writer. Reserve another MiB for
+    // channels, counters, and headers, beyond the explicit f32 payloads.
+    let bytes = samples
+        .checked_mul(std::mem::size_of::<f32>())
+        .and_then(|bytes| {
+            inputs
+                .checked_mul(FILE_WRITER_BUFFER_BYTES)
+                .and_then(|writers| bytes.checked_add(writers))
+        })
+        .and_then(|bytes| bytes.checked_add(1024 * 1024))
+        .ok_or("file capture storage size overflow")?;
+    if bytes > MAX_CAPTURE_BYTES {
+        return Err("file capture exceeds the 512 MiB live acquisition budget".into());
+    }
+    Ok(bytes)
+}
+
+#[cfg(any(feature = "capture-io", test))]
 pub(crate) fn capture_bytes(
     inputs: usize,
     frames: usize,
@@ -91,5 +145,17 @@ mod tests {
         assert!(capture_bytes(33, 16_000_000, 384_000, 1000).is_err());
         assert!(capture_bytes(usize::MAX, 16_000_000, 384_000, 1000).is_err());
         assert_eq!(capture_bytes(4, 96000, 48000, 48000).unwrap(), 2_688_000);
+    }
+
+    #[test]
+    fn file_budget_supports_large_takes_with_bounded_live_storage() {
+        assert!(capture_bytes(33, 4_000_000, 48000, 3_520_000).is_err());
+        assert!(file_capture_bytes(33, 48000, 3_520_000).unwrap() < 64 * 1024 * 1024);
+        assert!(
+            file_capture_bytes(33, 384_000, MAX_CAPTURE_FRAMES - 384_000 * 10).unwrap()
+                < MAX_CAPTURE_BYTES
+        );
+        assert!(file_capture_bytes(usize::MAX, 48000, 1024).is_err());
+        assert!(file_capture_bytes(33, 48000, usize::MAX).is_err());
     }
 }

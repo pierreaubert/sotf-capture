@@ -2,7 +2,7 @@
 
 [package]
 name = "sotf-capture"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["Pierre F. Aubert pierre@spinorama.org"]
@@ -40,6 +40,10 @@ cpal = { version = "0.17", optional = true }
 # O_NOFOLLOW prevents imported session members from escaping through symlinks.
 libc = "0.2"
 
+[target.'cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", target_os = "redox"))'.dependencies]
+# Safe atomic no-replace directory publication; already used by tempfile.
+rustix = { version = "1", features = ["fs"] }
+
 # CLI-only: the binary is skipped without `capture-io`, and tvOS ships no
 # CLI (ctrlc's nix backend needs fork/exec, absent from tvOS libc).
 [target.'cfg(not(target_os = "tvos"))'.dependencies]
@@ -56,6 +60,22 @@ required-features = ["capture-io"]
 name = "emulated_capture"
 path = "tests/emulated_capture.rs"
 required-features = ["test-util"]
+
+[[bench]]
+name = "capture_callbacks"
+harness = false
+required-features = ["test-util", "capture-io"]
+
+[dev-dependencies]
+stats_alloc = "0.1.10"
+
+[target.'cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))'.dev-dependencies]
+# Optional benchmark CPU-clock diagnostics, without unsafe code in this crate.
+rustix = { version = "1", features = ["time"] }
+
+[[test]]
+name = "callback_no_log"
+required-features = ["test-util", "capture-io"]
 
 [features]
 # Default keeps the full capture path (device I/O, playback, recording).

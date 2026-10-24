@@ -151,6 +151,7 @@ pub fn probe_channel_delays(
         input_channel,
         DEFAULT_AUXILIARY_SIGNAL_LEVEL_DB,
         None,
+        None,
     )?;
     Ok(results)
 }
@@ -171,6 +172,8 @@ pub fn probe_channel_delays(
 ///   `[silence][ch0_probe][silence][ch1_probe][silence]...[tail]`
 /// so callers can re-analyze it by running `detect_delays_multi_channel`
 /// against the same `channel_offsets` the core used.
+/// Transport failures save bounded input-clock evidence in `capture-loss-*.json`
+/// beside the requested WAV. Failed acquisitions do not publish a recording.
 ///
 /// # Arguments
 /// Same as [`probe_channel_delays`], plus:
@@ -213,6 +216,7 @@ pub fn probe_channel_delays_with_recording(
         input_channel,
         signal_level_db,
         cancel.as_ref(),
+        Some(super::continuity::recording_parent(recording_wav_path)),
     )?;
 
     // Write the mono recording as an f32 WAV. Matches the spec used by
@@ -274,6 +278,7 @@ fn probe_channel_delays_core(
     input_channel: u16,
     signal_level_db: f32,
     cancel: Option<&CancelFlag>,
+    evidence_directory: Option<&std::path::Path>,
 ) -> Result<(ProbeDelayResults, Vec<f32>, u32), String> {
     crate::limits::auxiliary_frames(
         sample_rate,
@@ -321,6 +326,7 @@ fn probe_channel_delays_core(
         None,
         "probe_channel_delays",
         cancel,
+        evidence_directory,
     )?;
 
     // If the mic rate differs from the playback rate, resample the exact

@@ -1,0 +1,28 @@
+{
+  "recorded_at_utc": "2026-10-19T19:40:38.344151+00:00",
+  "os": "Darwin",
+  "os_version": "27.0.1",
+  "architecture": "arm64",
+  "cpu": "Apple M4 Pro",
+  "logical_cpus": 14,
+  "physical_memory_bytes": 68719476736,
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "capture_head": "341757e8ecb2eb8820dabbe0d79a2182e7def563",
+  "capture_source_sha256": "3a59886af2b15e40827e3770a03664ee20cfaca1e9bbaea72a15ba16a7ed6791",
+  "dependencies": {
+    "autoeq": {
+      "head": "867976de9ef0d23d2e02d6400052a12bfbeccac2",
+      "dirty": true
+    },
+    "math-audio": {
+      "head": "a32fd133311fbbf921a0c21d012d400b721f50a4",
+      "dirty": true
+    }
+  },
+  "callback_command": "cargo bench --locked --offline --features test-util --bench capture_callbacks -- --iterations 512 --rate 48000 --max-deadline-fraction 1",
+  "load": "Concurrent sibling-workspace builds and tests; machine was not isolated.",
+  "scope": "Hardware-free production cores and acquisition storage; no physical audio I/O.",
+  "storage_command": "/Volumes/home_tmp/tmp/sotf-capture-audit-20261018-target/release/deps/capture_callbacks-ad06e7dc17c46c7a --memory-only (measured by /usr/bin/time -l)",
+  "callback_benchmark_exit_code": 101,
+  "callback_gate_result": "failed: seven cases exceeded their nominal frame deadline"
+}

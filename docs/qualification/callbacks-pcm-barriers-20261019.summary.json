@@ -1,0 +1,162 @@
+{
+  "recorded_before_run_utc": "2026-10-19T21:50:48.121645+00:00",
+  "host": {
+    "cpu": "Apple M4 Pro",
+    "logical_cpus": 14,
+    "os": "Darwin",
+    "os_version": "27.0.1",
+    "architecture": "arm64",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)"
+  },
+  "capture_head": "341757e8ecb2eb8820dabbe0d79a2182e7def563",
+  "capture_dirty": true,
+  "capture_source_sha256": "cb242a1807b0c70853dc5647a84cd14ec3346797e251e6d1e00d39a96bfad24b",
+  "fingerprint_scope": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "src/**/*.rs",
+    "benches/**/*.rs",
+    "tests/**/*.rs"
+  ],
+  "fingerprint_method": "SHA-256 over sorted relative UTF-8 paths, each followed by NUL then exact file bytes",
+  "binary_sha256": "7e4c89abf3cbc15b3b5943622deb4ecd0190e71ef0f943457cbaa76bb160a6d0",
+  "dependencies_observed_before_run": {
+    "autoeq": {
+      "head": "867976de9ef0d23d2e02d6400052a12bfbeccac2",
+      "dirty": true
+    },
+    "math-audio": {
+      "head": "a32fd133311fbbf921a0c21d012d400b721f50a4",
+      "dirty": true
+    }
+  },
+  "dependency_scope": "Live sibling checkouts are not a hermetic source snapshot.",
+  "command": "/Volumes/home_tmp/tmp/sotf-capture-audit-20261018-target/release/deps/capture_callbacks-ad06e7dc17c46c7a --iterations 4096 --rate 48000 --max-deadline-fraction 1 --cpu-clock thread",
+  "build_command": "cargo bench --locked --offline --features test-util --bench capture_callbacks --no-run --target-dir /Volumes/home_tmp/tmp/sotf-capture-audit-20261018-target",
+  "load": "Host was not isolated. This agent completed its own other builds/tests before launching the measurement.",
+  "scope": "All twelve supported PCM core implementations; healthy, overflow, malformed, and float NaN cases. All input buffers and playback objects use optimizer barriers. Native driver callbacks, stream-error ownership/delivery, and scheduling are excluded.",
+  "validation": {
+    "full_suite": {
+      "passed": 492,
+      "ignored": 1,
+      "suites": 5
+    },
+    "strict_clippy": "passed, all targets with test-util, no dependency linting",
+    "matrix_coverage": "passed, all expected 2208 unique cases executed",
+    "blocking_logger_watchdog": "passed with deliberate blocking canary",
+    "release_smoke": "passed",
+    "format_and_diff": "passed",
+    "negative_control": {
+      "iterations": 32,
+      "max_deadline_fraction": 1e-09,
+      "expected_exit_code": 101,
+      "actual_exit_code": 101,
+      "stderr": "callbacks-pcm-negative-20261019.stderr.txt"
+    },
+    "cargo_benchmark_smoke": {
+      "command": "cargo test --locked --offline --features test-util --bench capture_callbacks --target-dir /Volumes/home_tmp/tmp/sotf-capture-audit-clippy",
+      "exit_code": 0
+    }
+  },
+  "unaffected_configurations": "Previous stage passed 394 DSP-only tests and tvOS DSP-only compilation; this stage changes only test-util + capture-io qualification code.",
+  "observed_complete_at_utc": "2026-10-19T21:57:56.486933+00:00",
+  "exit_code": 101,
+  "completed_cases": 2208,
+  "measured_invocations": 9043968,
+  "heap_operations": 0,
+  "deadline_miss_cases": 610,
+  "p99_deadline_miss_cases": 1,
+  "maximum_thread_cpu_deadline_fraction": 0.04418704418704419,
+  "worst_wall_case": {
+    "case": {
+      "core": "sweep_input_with_meter",
+      "format": "i8",
+      "channels": 8,
+      "selected": 8,
+      "frames": 32
+    },
+    "iterations": 4096,
+    "rate": 48000,
+    "p50_ns": 625,
+    "p99_ns": 1333,
+    "max_ns": 170559417,
+    "deadline_ns": 666666,
+    "max_deadline_fraction": 255.83938133938133,
+    "thread_cpu_p50_ns": 750,
+    "thread_cpu_max_ns": 12834,
+    "thread_cpu_ns_at_max_wall": 8750,
+    "wall_minus_cpu_lower_bound_ns_at_max_wall": 170550667,
+    "heap_operations": 0
+  },
+  "worst_thread_cpu_fraction_case": {
+    "case": {
+      "core": "sweep_input_with_meter",
+      "format": "f32",
+      "channels": 33,
+      "selected": 33,
+      "frames": 32
+    },
+    "iterations": 4096,
+    "rate": 48000,
+    "p50_ns": 2833,
+    "p99_ns": 6833,
+    "max_ns": 7735125,
+    "deadline_ns": 666666,
+    "max_deadline_fraction": 11.602699102699102,
+    "thread_cpu_p50_ns": 2959,
+    "thread_cpu_max_ns": 29458,
+    "thread_cpu_ns_at_max_wall": 15167,
+    "wall_minus_cpu_lower_bound_ns_at_max_wall": 7719958,
+    "heap_operations": 0
+  },
+  "miss_cases_with_paired_cpu_below_deadline_at_max_wall": 610,
+  "cases_by_format": {
+    "f32": 224,
+    "f64": 224,
+    "i16": 176,
+    "i24": 176,
+    "i32": 176,
+    "i64": 176,
+    "i8": 176,
+    "u16": 176,
+    "u24": 176,
+    "u32": 176,
+    "u64": 176,
+    "u8": 176
+  },
+  "cases_by_core": {
+    "auxiliary_input_malformed": 192,
+    "auxiliary_input_nonfinite": 32,
+    "auxiliary_input_overflow": 192,
+    "auxiliary_input_with_loopback": 192,
+    "auxiliary_output": 192,
+    "multidevice_input": 192,
+    "multidevice_input_malformed": 192,
+    "multidevice_input_nonfinite": 32,
+    "multidevice_input_overflow": 192,
+    "multidevice_output": 192,
+    "sweep_input_malformed": 192,
+    "sweep_input_nonfinite": 32,
+    "sweep_input_overflow": 192,
+    "sweep_input_with_meter": 192
+  },
+  "source_unchanged_after_run": true,
+  "capture_source_sha256_after_run": "cb242a1807b0c70853dc5647a84cd14ec3346797e251e6d1e00d39a96bfad24b",
+  "dependencies_observed_after_run": {
+    "autoeq": {
+      "head": "867976de9ef0d23d2e02d6400052a12bfbeccac2",
+      "dirty": true
+    },
+    "math-audio": {
+      "head": "a32fd133311fbbf921a0c21d012d400b721f50a4",
+      "dirty": true
+    }
+  },
+  "result": "All 2208 cases completed with zero measured heap operations. Wall-deadline gate failed in 610 cases; threshold unchanged. Low thread CPU during long wall intervals supports time without CPU execution, not native audio scheduling guarantees.",
+  "remaining": [
+    "Physical device input/output, driver errors, callback entry/exit and timestamp qualification",
+    "Native callback scheduling/deadline qualification; failed wall gates retained"
+  ],
+  "binary_sha256_after_run": "7e4c89abf3cbc15b3b5943622deb4ecd0190e71ef0f943457cbaa76bb160a6d0",
+  "binary_unchanged_after_run": true
+}

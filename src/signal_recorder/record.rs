@@ -30,6 +30,34 @@ const INTER_TAKE_SETTLE_MS: u64 = 300;
 /// omitted rather than fabricated from a handful of samples.
 const MIN_NOISE_FLOOR_WINDOW_SAMPLES: usize = 2048;
 
+#[allow(clippy::too_many_arguments)]
+fn sweep_failure(
+    error: &str,
+    recorder: &impl super::SweepRecorder,
+    recording: Option<&Path>,
+    output_channel: u16,
+    output_selector: Option<&str>,
+    frames: usize,
+    take_index: usize,
+) -> String {
+    super::continuity::report_error(
+        recording.map(super::continuity::recording_parent),
+        &super::continuity::FailureEvidence {
+            version: 1,
+            error,
+            timeline_origin: "frame zero is the first input callback frame; positions are not stimulus offsets",
+            output_device_id: None,
+            output_device_selector: output_selector,
+            take_index: Some(take_index),
+            capture_kind: "sweep",
+            output_channels: &[output_channel],
+            output_channel,
+            stimulus_frames: frames,
+            inputs: recorder.transport_evidence(),
+        },
+    )
+}
+
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
@@ -1235,6 +1263,7 @@ pub(super) fn analyze_sweep_takes(
 
     check_cancel()?;
     Ok(CaptureAnalysis {
+        analysis_sample_rate,
         result: analysis,
         quality,
         quality_findings,
@@ -1277,6 +1306,8 @@ pub(super) fn analyze_sweep_takes(
 /// `cancel` is a cooperative cancellation flag (see [`CancelFlag`]): when
 /// set, the capture stops the streams and returns
 /// `Err(CANCELLED_ERR)` ("cancelled") instead of analyzing.
+/// Native transport failures save `capture-loss-*.json` beside the requested
+/// recording. The error names the report; cancellation keeps its exact marker.
 ///
 /// # Errors
 /// Returns an error for invalid settings, cancellation, device failures, or recording, analysis, calibration, or output failures.
@@ -1359,7 +1390,18 @@ pub fn record_and_analyze_with_recorder(
             output_device_name,
             input_device_name,
             cancel.as_ref(),
-        )?;
+        )
+        .map_err(|error| {
+            sweep_failure(
+                &error,
+                recorder,
+                Some(recorded_wav_path),
+                output_channel,
+                output_device_name,
+                reference_signal.len(),
+                take_index,
+            )
+        })?;
         dropped_samples = dropped_samples.saturating_add(take.dropped_samples);
         // Guard against the device renegotiating its sample rate mid-set
         // (task-8 review A5): takes at mixed rates would be averaged and
@@ -1492,6 +1534,10 @@ pub fn record_and_analyze_with(
     clippy::needless_pass_by_value,
     reason = "Keep the public API accepting an owned cancellation handle for existing callers."
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the wake, repeated acquisition, and per-microphone analysis phases in order."
+)]
 pub fn record_and_analyze_with_multi_recorder(
     playback: &mut impl super::playback::SweepPlayback,
     recorder: &mut impl super::recorder::SweepRecorder,
@@ -1576,7 +1622,18 @@ pub fn record_and_analyze_with_multi_recorder(
             output_device_name,
             input_device_name,
             cancel.as_ref(),
-        )?;
+        )
+        .map_err(|error| {
+            sweep_failure(
+                &error,
+                recorder,
+                recorded_wav_paths.first().map(PathBuf::as_path),
+                output_channel,
+                output_device_name,
+                reference_signal.len(),
+                take_index,
+            )
+        })?;
         dropped_samples = dropped_samples.saturating_add(take.dropped_samples);
         // See `record_and_analyze`: guard against the device renegotiating
         // its sample rate mid-set (task-8 review A5).

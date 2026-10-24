@@ -25,7 +25,11 @@ pub(super) struct SequentialPlayback {
 
 #[cfg(feature = "capture-io")]
 impl SequentialPlayback {
-    fn fill<T: cpal::Sample + cpal::FromSample<f32>>(&self, data: &mut [T], cursor: &AtomicUsize) {
+    pub(super) fn fill<T: cpal::Sample + cpal::FromSample<f32>>(
+        &self,
+        data: &mut [T],
+        cursor: &AtomicUsize,
+    ) {
         data.fill(T::from_sample(0.0));
         let first = cursor.load(Ordering::Relaxed);
         let frames = data.len() / self.channels;
@@ -227,6 +231,7 @@ pub(super) fn build_measurement_input_stream(
     capture_count_callback: Arc<AtomicUsize>,
     capture_overruns_callback: Arc<AtomicUsize>,
     failed: Arc<AtomicBool>,
+    continuity: Arc<super::continuity::Continuity>,
     hw_ch: usize,
     input_ch_idx: usize,
     loopback_ch_idx: Option<usize>,
@@ -241,6 +246,7 @@ pub(super) fn build_measurement_input_stream(
                 capture_count_callback,
                 capture_overruns_callback,
                 failed,
+                continuity,
                 hw_ch,
                 input_ch_idx,
                 loopback_ch_idx,
@@ -276,6 +282,7 @@ pub(super) fn build_measurement_input_stream_typed<T>(
     capture_count_callback: Arc<AtomicUsize>,
     capture_overruns_callback: Arc<AtomicUsize>,
     failed: Arc<AtomicBool>,
+    continuity: Arc<super::continuity::Continuity>,
     hw_ch: usize,
     input_ch_idx: usize,
     loopback_ch_idx: Option<usize>,
@@ -288,6 +295,7 @@ where
     use cpal::traits::DeviceTrait;
 
     let callback_failed = Arc::clone(&failed);
+    let callback_continuity = Arc::clone(&continuity);
     device
         .build_input_stream(
             config,
@@ -302,10 +310,14 @@ where
                         accepted: &capture_count_callback,
                         lost: &capture_overruns_callback,
                         failed: &callback_failed,
+                        continuity: &callback_continuity,
                     },
                 );
             },
-            move |_| failed.store(true, Ordering::Release),
+            move |_| {
+                failed.store(true, Ordering::Release);
+                continuity.invalidate();
+            },
             None,
         )
         .map_err(|e| {
@@ -318,14 +330,15 @@ where
 
 #[cfg(feature = "capture-io")]
 #[derive(Debug, Clone, Copy)]
-struct InputCounters<'a> {
-    accepted: &'a AtomicUsize,
-    lost: &'a AtomicUsize,
-    failed: &'a AtomicBool,
+pub(super) struct InputCounters<'a> {
+    pub accepted: &'a AtomicUsize,
+    pub lost: &'a AtomicUsize,
+    pub failed: &'a AtomicBool,
+    pub continuity: &'a super::continuity::Continuity,
 }
 
 #[cfg(feature = "capture-io")]
-fn capture_pairs<T: cpal::Sample>(
+pub(super) fn capture_pairs<T: cpal::Sample>(
     data: &[T],
     channels: usize,
     input: usize,
@@ -345,13 +358,19 @@ fn capture_pairs<T: cpal::Sample>(
         })
     {
         counters.failed.store(true, Ordering::Release);
+        counters
+            .continuity
+            .begin(data.len().checked_div(channels).unwrap_or(0));
+        counters.continuity.invalidate();
         return;
     }
     let frames = data.len() / channels;
+    let start = counters.continuity.begin(frames);
     let written = write_capture_pairs_to_ring(producer, data, channels, input, loopback);
     counters.accepted.fetch_add(written, Ordering::Relaxed);
     if written < frames {
         counters.lost.fetch_add(frames - written, Ordering::Relaxed);
+        counters.continuity.miss(start + written, frames - written);
     }
 }
 
@@ -365,10 +384,12 @@ mod input_tests {
         let accepted = AtomicUsize::new(0);
         let lost = AtomicUsize::new(0);
         let failed = AtomicBool::new(false);
+        let continuity = super::super::continuity::Continuity::default();
         let counters = InputCounters {
             accepted: &accepted,
             lost: &lost,
             failed: &failed,
+            continuity: &continuity,
         };
         capture_pairs(
             &[1.0, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 40.0],
@@ -402,6 +423,7 @@ mod input_tests {
             let accepted = AtomicUsize::new(0);
             let lost = AtomicUsize::new(0);
             let failed = AtomicBool::new(false);
+            let continuity = super::super::continuity::Continuity::default();
             capture_pairs(
                 &samples,
                 2,
@@ -412,6 +434,7 @@ mod input_tests {
                     accepted: &accepted,
                     lost: &lost,
                     failed: &failed,
+                    continuity: &continuity,
                 },
             );
             assert!(failed.load(Ordering::Acquire));

@@ -1,0 +1,20 @@
+{
+  "callback_cases": 256,
+  "measured_callback_invocations": 131072,
+  "heap_operations": 0,
+  "callback_benchmark_exit_code": 101,
+  "deadline_miss_cases": 7,
+  "maximum_deadline_fraction": 12.022636522636523,
+  "storage_payload_budget_bytes": 489696000,
+  "storage_live_allocator_bytes": 489697216,
+  "storage_peak_rss_bytes": 497270784,
+  "negative_deadline_gate_exit_code": 101,
+  "prior_callback_run": {
+    "capture_source_sha256": "29772d6eae16c7309304c2859c2ce7fd498953a704c1d44388e4b973075f0811",
+    "maximum_deadline_fraction": 0.301964864093201,
+    "deadline_miss_cases": 0,
+    "callback_benchmark_exit_code": 0,
+    "note": "Expanded matrix before the debug-only Cargo smoke-mode fix; final results retain the subsequent failed gate."
+  },
+  "initial_run_note": "Initial 160 healthy cases had zero heap operations but observed deadline exceedances under concurrent machine load; these final measurements are not a hard realtime guarantee."
+}

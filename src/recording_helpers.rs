@@ -2631,6 +2631,7 @@ mod tests {
             issues: vec!["clipping detected".to_string()],
         };
         let capture = CaptureAnalysis {
+            analysis_sample_rate: 48_000,
             result,
             quality: report,
             quality_findings: Vec::new(),

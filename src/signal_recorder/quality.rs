@@ -39,6 +39,8 @@ use math_audio_dsp::analysis::{LagEstimate, MeasurementQualityConfig};
 /// are accepted) and a measured-spectrum/noise-floor pair.
 #[derive(Debug)]
 pub struct CaptureAnalysis {
+    /// Negotiated sample rate in Hz used for analysis and the saved capture WAV.
+    pub analysis_sample_rate: u32,
     /// Frequency-response / distortion / decay analysis of the capture. For
     /// repeat captures this is the analysis of the drift-corrected,
     /// lag-aligned, synchronously averaged accepted takes (REW-style

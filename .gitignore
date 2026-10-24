@@ -1,5 +1,6 @@
 /target
-/docs
+/docs/*
+!/docs/qualification/
 Cargo.lock
 *.log
 *.csv

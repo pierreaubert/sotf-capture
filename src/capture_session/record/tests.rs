@@ -2,6 +2,9 @@ use super::*;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+#[path = "checkpoint_tests.rs"]
+mod checkpoint_tests;
+
 fn setup() -> (tempfile::TempDir, ValidatedCaptureSession) {
     let root = tempfile::tempdir().unwrap();
     let mut plan: CaptureSessionPlan =
@@ -15,6 +18,27 @@ fn setup() -> (tempfile::TempDir, ValidatedCaptureSession) {
         .unwrap();
     }
     (root, plan.validate().unwrap())
+}
+
+#[test]
+fn session_plan_accepts_large_file_backed_takes_within_the_frame_limit() {
+    let (_, session) = setup();
+    let mut plan = session.plan().clone();
+    let microphone = plan.microphones[0].clone();
+    plan.microphones = (0_u16..32)
+        .map(|channel| {
+            let mut mic = microphone.clone();
+            mic.id = format!("mic-{channel}");
+            mic.input_channel = channel;
+            mic
+        })
+        .collect();
+    plan.loopback = Some(crate::capture_session::CaptureLoopback {
+        device: microphone.device,
+        input_channel: 63,
+    });
+    plan.sweep.duration_secs = 200.0;
+    assert!(plan.validate().is_ok());
 }
 
 #[expect(
@@ -60,6 +84,393 @@ fn fake_capture(
 
 fn journal(directory: &Path) -> RawCaptureManifest {
     serde_json::from_slice(&std::fs::read(directory.join("capture-raw.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn checkpoints_are_saved_before_wake_and_every_repeated_source() {
+    let (root, session) = setup();
+    let mut plan = session.plan().clone();
+    plan.repeat_count = 2;
+    let session = plan.validate().unwrap();
+    let output = root.path().join("recording");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut phases = Vec::new();
+    let result = record_with(
+        &session,
+        root.path(),
+        &output,
+        &cancel,
+        |_| {},
+        |request, flag| {
+            let current = journal(&output);
+            let checkpoint = current.checkpoint.as_ref().unwrap();
+            assert_eq!(current.status, RawCaptureStatus::Capturing);
+            assert_eq!(
+                checkpoint.completed_take_ids,
+                current
+                    .takes
+                    .iter()
+                    .map(|take| take.take_id.clone())
+                    .collect::<Vec<_>>()
+            );
+            if request.output_overrides.is_empty() {
+                assert_eq!(checkpoint.phase, CapturePhase::Waking);
+            } else {
+                let CapturePhase::Sweep {
+                    source_id,
+                    repeat_index,
+                } = &checkpoint.phase
+                else {
+                    panic!("expected sweep checkpoint");
+                };
+                let source = session
+                    .plan()
+                    .sources
+                    .iter()
+                    .find(|source| &source.id == source_id)
+                    .unwrap();
+                assert_eq!(source.output_channel, request.output_channel);
+                phases.push((source_id.clone(), *repeat_index));
+            }
+            fake_capture(request, flag)
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        phases,
+        [
+            ("left".into(), 0),
+            ("right".into(), 0),
+            ("left".into(), 1),
+            ("right".into(), 1)
+        ]
+    );
+    let checkpoint = result.checkpoint.as_ref().unwrap();
+    assert_eq!(checkpoint.phase, CapturePhase::Complete);
+    assert_eq!(checkpoint.completed_take_ids.len(), 8);
+    assert_eq!(journal(&output).checkpoint, result.checkpoint);
+}
+
+#[test]
+fn completed_recording_returns_the_same_frozen_reports_as_its_journal() {
+    let (root, session) = setup();
+    let output = root.path().join("recording");
+    let flag = Arc::new(AtomicBool::new(false));
+    let result = record_with(
+        &session,
+        root.path(),
+        &output,
+        &flag,
+        |_| {},
+        |request, cancel| {
+            if request.output_overrides.is_empty() {
+                crate::capture_session::loss_evidence::fixture(
+                    &output,
+                    "capture-loss-prior-wake.json",
+                );
+            }
+            fake_capture(request, cancel)
+        },
+    )
+    .unwrap();
+    let saved = journal(&output);
+    assert_eq!(result.status, RawCaptureStatus::RawComplete);
+    assert_eq!(result.transport_evidence.len(), 1);
+    assert_eq!(
+        serde_json::to_value(result.transport_evidence).unwrap(),
+        serde_json::to_value(saved.transport_evidence).unwrap()
+    );
+}
+
+#[test]
+fn recording_journals_bind_reports_even_when_cancellation_has_no_report_in_its_error() {
+    for reason in ["capture lost input frames", "cancelled"] {
+        let (root, session) = setup();
+        let output = root.path().join("recording");
+        let flag = Arc::new(AtomicBool::new(false));
+        let error = record_with(
+            &session,
+            root.path(),
+            &output,
+            &flag,
+            |_| {},
+            |request, cancel| {
+                if request.output_overrides.is_empty() {
+                    fake_capture(request, cancel)
+                } else {
+                    crate::capture_session::loss_evidence::fixture(
+                        &output,
+                        "capture-loss-acquisition.json",
+                    );
+                    Err(reason.into())
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, reason);
+        let saved = journal(&output);
+        assert_eq!(saved.transport_evidence.len(), 1);
+        let snapshot = &saved.transport_evidence[0];
+        assert_eq!(snapshot.file, "capture-loss-acquisition.json");
+        assert_eq!(
+            snapshot.sha256,
+            crate::capture_session::calibration_sha256(
+                &std::fs::read(output.join(&snapshot.file)).unwrap()
+            )
+        );
+        assert_eq!(
+            saved.status,
+            if reason == "cancelled" {
+                RawCaptureStatus::Cancelled
+            } else {
+                RawCaptureStatus::Failed
+            }
+        );
+        assert_eq!(saved.takes.len(), 0);
+    }
+}
+
+#[cfg(feature = "capture-io")]
+fn fake_file_capture(
+    root: &Path,
+    request: MultiCaptureRequest,
+    cancel: &CancelFlag,
+) -> Result<crate::signal_recorder::multi_capture::FileCaptureResult, String> {
+    let captured = fake_capture(request, cancel)?;
+    Ok(crate::signal_recorder::multi_capture::FileCaptureResult {
+        recordings: captured
+            .recordings
+            .into_iter()
+            .map(|samples| {
+                crate::signal_recorder::multi_capture::CapturedFile::fixture(
+                    root,
+                    captured.sample_rate_hz,
+                    &samples,
+                )
+            })
+            .collect(),
+        input_device_ids: captured.input_device_ids,
+        output_device_id: captured.output_device_id,
+        sample_rate_hz: captured.sample_rate_hz,
+        input_sample_formats: captured.input_sample_formats,
+        output_sample_format: captured.output_sample_format,
+    })
+}
+
+#[cfg(feature = "capture-io")]
+#[test]
+fn file_backed_session_publishes_exact_wave_metadata_without_private_temporaries() {
+    let (root, session) = setup();
+    let output = root.path().join("streamed");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let manifest = record_with(
+        &session,
+        root.path(),
+        &output,
+        &cancel,
+        |_| {},
+        |request, cancel| fake_file_capture(&output, request, cancel),
+    )
+    .unwrap();
+    assert_eq!(manifest.status, RawCaptureStatus::RawComplete);
+    assert_eq!(manifest.takes.len(), 4);
+    for take in &manifest.takes {
+        let mut reader = hound::WavReader::open(output.join(&take.wav_file)).unwrap();
+        assert_eq!(reader.spec().sample_rate, session.plan().sample_rate_hz);
+        assert_eq!(usize::try_from(reader.duration()).unwrap(), take.samples);
+        let mut peak = 0.0_f32;
+        let mut clipped = 0;
+        for sample in reader.samples::<f32>() {
+            let sample = sample.unwrap();
+            peak = peak.max(sample.abs());
+            clipped += usize::from(sample.abs() >= 1.0);
+        }
+        assert_eq!(peak, take.peak_amplitude);
+        assert_eq!(clipped, take.clipped_samples);
+    }
+    assert!(std::fs::read_dir(&output).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with('.')
+    }));
+}
+
+#[cfg(feature = "capture-io")]
+#[test]
+fn file_backed_session_keeps_completed_sources_on_later_failure_or_cancellation() {
+    for cancelled in [false, true] {
+        let (root, session) = setup();
+        let output = root.path().join("streamed");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut takes = 0;
+        let error = record_with(
+            &session,
+            root.path(),
+            &output,
+            &cancel,
+            |_| {},
+            |request, flag| {
+                let is_take = !request.output_overrides.is_empty();
+                if is_take {
+                    takes += 1;
+                }
+                if takes == 2 {
+                    return Err("injected disk write failure".into());
+                }
+                let result = fake_file_capture(&output, request, flag)?;
+                if is_take && cancelled {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                Ok(result)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            if cancelled {
+                "cancelled"
+            } else {
+                "injected disk write failure"
+            }
+        );
+        let saved = journal(&output);
+        assert_eq!(
+            saved.status,
+            if cancelled {
+                RawCaptureStatus::Cancelled
+            } else {
+                RawCaptureStatus::Failed
+            }
+        );
+        assert_eq!(saved.takes.len(), session.plan().microphones.len());
+        for take in saved.takes {
+            assert!(hound::WavReader::open(output.join(take.wav_file)).is_ok());
+        }
+        assert!(!output.join("recordings.json").exists());
+        assert!(std::fs::read_dir(&output).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with('.')
+        }));
+    }
+}
+
+#[cfg(feature = "capture-io")]
+#[test]
+fn file_backed_publication_collision_preserves_destination_and_marks_journal_failed() {
+    let (root, session) = setup();
+    let output = root.path().join("streamed");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let collision = output.join("repeat-00-source-00-mic-00-raw.wav");
+    let error = record_with(
+        &session,
+        root.path(),
+        &output,
+        &cancel,
+        |_| {},
+        |request, flag| {
+            if !request.output_overrides.is_empty() {
+                std::fs::write(&collision, b"existing sentinel").unwrap();
+            }
+            fake_file_capture(&output, request, flag)
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("cannot publish captured WAV"), "{error}");
+    assert_eq!(std::fs::read(&collision).unwrap(), b"existing sentinel");
+    let saved = journal(&output);
+    assert_eq!(saved.status, RawCaptureStatus::Failed);
+    assert!(saved.takes.is_empty());
+    assert!(std::fs::read_dir(&output).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with('.')
+    }));
+}
+
+#[cfg(feature = "capture-io")]
+#[test]
+fn file_backed_crash_before_publication_leaves_a_nonterminal_journal() {
+    const CHILD_ROOT: &str = "SOTF_STREAM_CRASH_TEST_ROOT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = std::path::PathBuf::from(root);
+        let plan: CaptureSessionPlan =
+            serde_json::from_slice(&std::fs::read(root.join("replay-plan.json")).unwrap()).unwrap();
+        let session = plan.validate().unwrap();
+        let output = root.join("crashed");
+        let cancel = Arc::new(AtomicBool::new(false));
+        record_with(
+            &session,
+            &root,
+            &output,
+            &cancel,
+            |_| {},
+            |request, flag| {
+                let is_take = !request.output_overrides.is_empty();
+                let captured = fake_file_capture(&output, request, flag)?;
+                if is_take {
+                    // Finalized WAVs exist privately, but their paths have not been
+                    // published or added to the session journal. Skip destructors.
+                    std::process::exit(73);
+                }
+                Ok(captured)
+            },
+        )
+        .unwrap();
+        panic!("crash point was not reached");
+    }
+    let (root, session) = setup();
+    std::fs::write(
+        root.path().join("replay-plan.json"),
+        serde_json::to_vec(session.plan()).unwrap(),
+    )
+    .unwrap();
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("capture_session::record::tests::file_backed_crash_before_publication_leaves_a_nonterminal_journal")
+        .env(CHILD_ROOT, root.path()).output().unwrap();
+    assert_eq!(child.status.code(), Some(73), "{child:?}");
+    let crashed = root.path().join("crashed");
+    let saved = journal(&crashed);
+    assert_eq!(saved.status, RawCaptureStatus::Capturing);
+    assert!(matches!(
+        saved.checkpoint.as_ref().unwrap().phase,
+        CapturePhase::Sweep { .. }
+    ));
+    assert!(saved.takes.is_empty());
+    assert!(std::fs::read_dir(&crashed).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("repeat-")
+    }));
+    let refused = root.path().join("refused");
+    assert!(super::super::clock::io::process_capture_session(&crashed, &refused).is_err());
+    assert!(
+        !refused
+            .join(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME)
+            .exists()
+    );
+    let retry = root.path().join("retry");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let completed = record_with(
+        &session,
+        root.path(),
+        &retry,
+        &cancel,
+        |_| {},
+        |request, flag| fake_file_capture(&retry, request, flag),
+    )
+    .unwrap();
+    assert_eq!(completed.status, RawCaptureStatus::RawComplete);
+    assert_eq!(completed.takes.len(), 4);
 }
 
 #[test]
@@ -187,6 +598,45 @@ fn bench_and_loopback_evidence_survive_source_mutation_and_bundle_moves() {
 }
 
 #[test]
+fn loss_evidence_reference_survives_in_failed_and_cancelled_journals() {
+    for (reason, status) in [
+        (
+            "capture lost input frames; acquisition evidence: capture-loss-test.json",
+            RawCaptureStatus::Failed,
+        ),
+        (
+            "cancelled; acquisition evidence: capture-loss-test.json",
+            RawCaptureStatus::Cancelled,
+        ),
+    ] {
+        let (root, session) = setup();
+        let output = root.path().join("recording");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let error = record_with(
+            &session,
+            root.path(),
+            &output,
+            &cancel,
+            |_| {},
+            |request, flag| {
+                if request.output_overrides.is_empty() {
+                    fake_capture(request, flag)
+                } else {
+                    Err(reason.into())
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, reason);
+        let saved = journal(&output);
+        assert_eq!(saved.status, status);
+        assert_eq!(saved.error.as_deref(), Some(reason));
+        assert_eq!(saved.takes.len(), 0);
+        assert!(!output.join("handoff.json").exists());
+    }
+}
+
+#[test]
 fn cancellation_retains_previous_source_and_explicit_status() {
     let (root, session) = setup();
     let output = root.path().join("recording");
@@ -254,7 +704,7 @@ fn calibration_failure_precedes_audio_and_directory_creation() {
             &output,
             &cancel,
             |_| {},
-            |_, _| panic!("audio must not start")
+            |_, _| -> Result<MultiCaptureResult, String> { panic!("audio must not start") }
         )
         .is_err()
     );
@@ -275,7 +725,7 @@ fn existing_directory_is_never_overwritten() {
             &output,
             &cancel,
             |_| {},
-            |_, _| panic!("audio must not start")
+            |_, _| -> Result<MultiCaptureResult, String> { panic!("audio must not start") }
         )
         .is_err()
     );
@@ -420,6 +870,8 @@ fn aux_session() -> (
 fn aux_manifest(session: &crate::capture_session::ValidatedCaptureSession) -> RawCaptureManifest {
     let stimulus = crate::capture_session::protocol::prepare_capture_stimulus(session).unwrap();
     RawCaptureManifest {
+        checkpoint: None,
+        transport_evidence: Vec::new(),
         localization_calibration: None,
         version: 1,
         plan: session.plan().clone(),
@@ -468,6 +920,32 @@ fn canned_anchor() -> crate::signal_recorder::BassAnchorResults {
 }
 
 #[test]
+fn auxiliary_cancellation_registers_its_report_before_saving_terminal_status() {
+    let (root, session) = aux_session();
+    let output = root.path().join("aux-session");
+    std::fs::create_dir(&output).unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let error = run_auxiliary_passes(
+        &session,
+        &output,
+        &cancel,
+        aux_manifest(&session),
+        |_, _, _, _, _, _, _, _, _, _, _| {
+            crate::capture_session::loss_evidence::fixture(&output, "capture-loss-probe.json");
+            Err("cancelled".into())
+        },
+        |_, _, _, _, _, _, _, _, _, _, _, _, _, _, _| panic!("anchor must not run"),
+    )
+    .unwrap_err();
+    assert_eq!(error, "cancelled");
+    let saved = journal(&output);
+    assert_eq!(saved.status, RawCaptureStatus::Cancelled);
+    assert_eq!(saved.transport_evidence.len(), 1);
+    assert_eq!(saved.transport_evidence[0].file, "capture-loss-probe.json");
+    assert!(saved.probe_pass.is_none());
+}
+
+#[test]
 fn auxiliary_passes_journal_results_with_plan_routing() {
     let (root, session) = aux_session();
     let output = root.path().join("aux-session");
@@ -481,6 +959,9 @@ fn auxiliary_passes_journal_results_with_plan_routing() {
         |channels, names, rate, duration, silence, _out, _input, _ch, wav, _level, _cancel| {
             let current = journal(&output);
             assert_eq!(current.status, RawCaptureStatus::Capturing);
+            let checkpoint = current.checkpoint.as_ref().unwrap();
+            assert_eq!(checkpoint.phase, CapturePhase::Probe);
+            assert!(!checkpoint.probe_completed && !checkpoint.bass_anchor_completed);
             assert!(current.probe_pass.is_none() && current.bass_anchor_pass.is_none());
             assert_eq!(channels, &[0, 1]);
             assert_eq!(names, &["left".to_string(), "right".to_string()]);
@@ -510,6 +991,9 @@ fn auxiliary_passes_journal_results_with_plan_routing() {
          _cancel| {
             let current = journal(&output);
             assert_eq!(current.status, RawCaptureStatus::Capturing);
+            let checkpoint = current.checkpoint.as_ref().unwrap();
+            assert_eq!(checkpoint.phase, CapturePhase::BassAnchor);
+            assert!(checkpoint.probe_completed && !checkpoint.bass_anchor_completed);
             assert!(current.probe_pass.is_some() && current.bass_anchor_pass.is_none());
             assert_eq!(channels, &[0, 1]);
             assert_eq!(names, &["left".to_string(), "right".to_string()]);
@@ -529,6 +1013,9 @@ fn auxiliary_passes_journal_results_with_plan_routing() {
     .unwrap();
     assert_eq!(manifest.status, RawCaptureStatus::RawComplete);
     let probe = manifest.probe_pass.as_ref().unwrap();
+    let checkpoint = manifest.checkpoint.as_ref().unwrap();
+    assert_eq!(checkpoint.phase, CapturePhase::Complete);
+    assert!(checkpoint.probe_completed && checkpoint.bass_anchor_completed);
     assert_eq!(probe.wav_file, "probe.wav");
     assert_eq!(probe.microphone_id, "seat-left");
     assert_eq!(probe.results.alignment_delays_ms, vec![0.5]);

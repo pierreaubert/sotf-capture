@@ -629,7 +629,7 @@ fn emulated_rate_mismatch_resamples_the_reference() {
     });
     let mut playback = wire.playback("record_and_analyze");
     let mut recorder = wire.recorder("record_and_analyze");
-    record_and_analyze_with_recorder(
+    let capture = record_and_analyze_with_recorder(
         &mut playback,
         &mut recorder,
         temp_wav.path(),
@@ -650,6 +650,7 @@ fn emulated_rate_mismatch_resamples_the_reference() {
 
     let reader = hound::WavReader::open(&recorded_wav).unwrap();
     assert_eq!(reader.spec().sample_rate, 44_100);
+    assert_eq!(capture.analysis_sample_rate, reader.spec().sample_rate);
 }
 
 #[test]

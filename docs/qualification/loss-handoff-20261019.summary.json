@@ -1,0 +1,78 @@
+{
+  "recorded_at_utc": "2026-10-19T21:35:13.714114+00:00",
+  "host": {
+    "cpu": "Apple M4 Pro",
+    "logical_cpus": 14,
+    "os": "Darwin",
+    "os_version": "27.0.1",
+    "architecture": "arm64",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)"
+  },
+  "capture_head": "341757e8ecb2eb8820dabbe0d79a2182e7def563",
+  "capture_dirty": true,
+  "capture_source_sha256": "84fcf3ab312939e121afd0bd3b2f4156fd75546e697e1f0a4e13b18a009f9700",
+  "fingerprint_scope": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "src/**/*.rs",
+    "benches/**/*.rs",
+    "tests/**/*.rs"
+  ],
+  "fingerprint_method": "SHA-256 over sorted relative UTF-8 paths, each followed by NUL then exact file bytes",
+  "dependencies": {
+    "autoeq": {
+      "head": "867976de9ef0d23d2e02d6400052a12bfbeccac2",
+      "dirty": true
+    },
+    "math-audio": {
+      "head": "a32fd133311fbbf921a0c21d012d400b721f50a4",
+      "dirty": true
+    }
+  },
+  "dependency_observation": "Observed after verification; live sibling checkouts are not a hermetic source snapshot.",
+  "feature": "Typed raw-journal loss-report references, verified snapshots, and portable handoff retention",
+  "limits": {
+    "reports": 512,
+    "individual_bytes": 1048576,
+    "aggregate_bytes": 8388608,
+    "intervals_per_clock": 128
+  },
+  "commands": [
+    "cargo test --locked --offline --features test-util --target-dir /Volumes/home_tmp/tmp/sotf-capture-audit-clippy",
+    "cargo test --locked --offline --no-default-features --lib --target-dir /Volumes/home_tmp/tmp/sotf-capture-stream-lint",
+    "cargo clippy --locked --offline --all-targets --features test-util --no-deps --target-dir /Volumes/home_tmp/tmp/sotf-capture-stream-lint -- -D warnings",
+    "cargo check --locked --offline --no-default-features --lib --target aarch64-apple-tvos --target-dir /Volumes/home_tmp/tmp/sotf-capture-audit-tvos",
+    "cargo fmt --check --package sotf-capture",
+    "git diff --check"
+  ],
+  "results": {
+    "full_suite": {
+      "passed": 491,
+      "ignored": 1,
+      "suites": 5
+    },
+    "dsp_only": {
+      "passed": 394,
+      "ignored": 1
+    },
+    "strict_clippy": "passed",
+    "tvos_compile": "passed, compile check only",
+    "format_and_diff": "passed"
+  },
+  "verification_scope": [
+    "Recording success/failure/cancellation registers exact report hashes; auxiliary cancellation works with the bare cancellation marker.",
+    "Explicitly selected completed takes from failed and cancelled repeated sessions process into handoffs retaining byte-exact reports and completion state.",
+    "Moved handoffs load through AutoEQ after the original raw directory is deleted.",
+    "Report mutation prevents consumer loading and producer republication; existing handoff bytes remain unchanged.",
+    "Import preflight rejects unsafe/missing/changed/malformed reports before output directory creation.",
+    "Legacy imports do not discover unrelated files, including matching report-prefix filenames.",
+    "Per-report, aggregate, and count bounds; symlink rejection; interval positions and feasible truncated totals."
+  ],
+  "compatibility": "Old serialized journals default to no reports. Rust manifest struct literals need an explicit transport_evidence initializer.",
+  "performance": "No new timing claim for this manifest/file-processing change. Previously retained callback wall-deadline failures remain unresolved.",
+  "remaining": [
+    "Expand PCM-format and callback failure-path qualification beyond the existing f32/i16 healthy/overflow matrix",
+    "Physical input/output and sustained disk throughput qualification; capture rig details requested",
+    "Native callback scheduling/deadline qualification; prior failed gates retained"
+  ]
+}

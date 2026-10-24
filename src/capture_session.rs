@@ -15,6 +15,7 @@ mod coherence;
 pub mod ctc;
 pub mod handoff;
 pub mod localization;
+mod loss_evidence;
 pub mod manifest;
 mod phase;
 pub mod protocol;
@@ -675,7 +676,8 @@ impl CaptureSessionPlan {
             ));
         }
         // Budget includes chirps, decay gaps and engine startup/drain storage.
-        // Match the engine's bounded per-microphone capture memory budget.
+        // Session takes spool to disk; retain the per-input frame limit while
+        // budgeting rings, writer batches, and stimulus ownership in memory.
         // Bass weighting extends the sweep past its nominal duration; the
         // bound prices the weighted total, not the nominal one.
         let sweep_seconds = octave_weighted_sweep_seconds(
@@ -689,9 +691,8 @@ impl CaptureSessionPlan {
                 "sweep duration exceeds bounded capture storage at this sample rate",
             ));
         }
-        crate::limits::capture_bytes(
+        crate::limits::file_capture_bytes(
             self.microphones.len() + usize::from(self.loopback.is_some()),
-            ((sweep_seconds + 14.0) * f64::from(self.sample_rate_hz)).ceil() as usize,
             self.sample_rate_hz,
             ((sweep_seconds + 4.0) * f64::from(self.sample_rate_hz)).ceil() as usize,
         )

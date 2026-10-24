@@ -1,0 +1,82 @@
+{
+  "recorded_at_utc": "2026-10-19T22:18:15.011857+00:00",
+  "capture_head": "341757e8ecb2eb8820dabbe0d79a2182e7def563",
+  "capture_dirty": true,
+  "capture_source_sha256": "3c5444612112964e6245f66ca937a9a73240c41f491048f1c841132cb72013f6",
+  "fingerprint_scope": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "src/**/*.rs",
+    "benches/**/*.rs",
+    "tests/**/*.rs"
+  ],
+  "fingerprint_method": "SHA-256 over relative paths sorted by pathlib.Path component order; each POSIX UTF-8 path followed by NUL then exact file bytes",
+  "dependencies": {
+    "autoeq": {
+      "head": "867976de9ef0d23d2e02d6400052a12bfbeccac2",
+      "dirty": true
+    },
+    "math-audio": {
+      "head": "a32fd133311fbbf921a0c21d012d400b721f50a4",
+      "dirty": true
+    }
+  },
+  "dependency_observation": "Observed after checks; live sibling checkouts are not a hermetic source snapshot.",
+  "feature": "Explicit acquisition phases and committed-result maps; validated imports and parent completion consistency.",
+  "commands": [
+    "cargo test --locked --offline --features test-util --target-dir /Volumes/home_tmp/tmp/sotf-capture-audit-clippy",
+    "cargo test --locked --offline --no-default-features --lib --target-dir /Volumes/home_tmp/tmp/sotf-capture-stream-lint",
+    "cargo clippy --locked --offline --all-targets --features test-util --no-deps --target-dir /Volumes/home_tmp/tmp/sotf-capture-stream-lint -- -D warnings",
+    "cargo check --locked --offline --no-default-features --lib --target aarch64-apple-tvos --target-dir /Volumes/home_tmp/tmp/sotf-capture-audit-tvos",
+    "cargo fmt --check --package sotf-capture",
+    "git diff --check"
+  ],
+  "results": {
+    "full_suite": {
+      "passed": 497,
+      "ignored": 1,
+      "suites": 5
+    },
+    "dsp_only": {
+      "passed": 399,
+      "ignored": 1
+    },
+    "strict_clippy": "passed",
+    "tvos_compile": "passed, compile check only",
+    "format_and_diff": "passed"
+  },
+  "regressions": [
+    "Phase saved before wake and every repeated source; completion map equals committed records.",
+    "Saved probe/bass-anchor transitions and final complete flags.",
+    "Abrupt subprocess exit during probe leaves Capturing/Probe after completed sweeps; no handoff.",
+    "Injected journal publication failure after probe result cannot commit completion; fixture restores prior saved checkpoint.",
+    "Inconsistent maps/status/phases rejected before processing output creation.",
+    "Completed captures require declared loopback passes before output creation.",
+    "Partial failed/cancelled checkpoints survive moved consumer handoffs; producer cannot upgrade parent status."
+  ],
+  "compatibility": "Legacy JSON defaults checkpoint to None; Rust struct literals require an explicit initializer. Existing completeness checks remain enforced.",
+  "scope": "Metadata/publication behavior only. No physical streams opened, no new callback timing claim.",
+  "remaining": [
+    "Physical input/output, driver errors, callback entry/exit, timestamps and sustained throughput qualification; rig details requested",
+    "Native callback scheduling/deadline qualification; prior failed wall gates retained"
+  ],
+  "implementation_invariants": [
+    "Loopback pass source/repeat identities must be known and unique."
+  ],
+  "downstream_compatibility": {
+    "repository": "sotf",
+    "head": "7c4d6dd25ff5fd40dd6f952d0c7be4fac852f540",
+    "file": "crates/sotf-player/tests/capture_frontend.rs",
+    "change": "Initialize checkpoint: None and transport_evidence: Vec::new() in the legacy-style raw manifest fixture; add rustix 1.1.5 to the sotf-capture lockfile package entry.",
+    "format_and_diff": "passed",
+    "command": "cargo test -p sotf-player --test capture_frontend --locked --offline --target-dir /Volumes/home_tmp/tmp/sotf-audit-20261018-target",
+    "result": "Golden-session workflow passed (1 test), using a temporarily resolved downstream lockfile. Final minimal lockfile still fails --locked before compilation because unrelated live workspace dependency changes need resolution.",
+    "verified_at_utc": "2026-10-19T22:28:23.871293+00:00",
+    "test_binary_sha256": "0a7d474336758b830e99f99b4d551ebe75e26adae2dc695ed53bd070f6555591",
+    "original_lockfile_sha256": "944a5a1470f6521b7f93cd9287cfecd68b5600acbee744f8c7ebbd2f310e3512",
+    "tested_resolved_lockfile_sha256": "076b8dbc57df5062209efa1288cbe6562cda6ad75af48897177806480dac721b",
+    "final_minimal_lockfile_sha256": "c0a882293a7da74ae8eb3c8dac5721d2cb9a746404c5b3cb8b5d83950c3beb11",
+    "lockfile_handling": "Temporary offline resolution included unrelated package edges and three git-package revisions. After the passing test, checked exact lockfile bytes against the temporary snapshot to avoid overwriting concurrent edits, then restored all unrelated resolver changes. Final diff contains only the capture rustix edge.",
+    "capture_source_revalidated_sha256": "3c5444612112964e6245f66ca937a9a73240c41f491048f1c841132cb72013f6"
+  }
+}

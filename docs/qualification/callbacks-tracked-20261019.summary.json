@@ -1,0 +1,62 @@
+{
+  "recorded_at_utc": "2026-10-19T21:02:45.910425+00:00",
+  "host": {
+    "cpu": "Apple M4 Pro",
+    "logical_cpus": 14,
+    "os": "Darwin",
+    "os_version": "27.0.1",
+    "architecture": "arm64",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)"
+  },
+  "capture_head": "341757e8ecb2eb8820dabbe0d79a2182e7def563",
+  "capture_source_sha256": "6f7be7f9d75bbd1092a05504874608d945202a89053dc815dc6fbfdea69f1494",
+  "fingerprint_scope": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "src/**/*.rs",
+    "benches/**/*.rs",
+    "tests/**/*.rs"
+  ],
+  "fingerprint_method": "SHA-256 over sorted relative UTF-8 paths, each followed by NUL then exact file bytes",
+  "dependencies": {
+    "autoeq": {
+      "head": "867976de9ef0d23d2e02d6400052a12bfbeccac2",
+      "dirty": true
+    },
+    "math-audio": {
+      "head": "a32fd133311fbbf921a0c21d012d400b721f50a4",
+      "dirty": true
+    }
+  },
+  "dependency_observation": "Observed after measurement; live sibling checkouts are not a hermetic build snapshot.",
+  "command": "/Volumes/home_tmp/tmp/sotf-capture-audit-20261018-target/release/deps/capture_callbacks-ad06e7dc17c46c7a --iterations 512 --rate 48000 --max-deadline-fraction 1 --cpu-clock thread",
+  "exit_code": 101,
+  "cases": 256,
+  "measured_invocations": 131072,
+  "heap_operations": 0,
+  "deadline_miss_cases": 20,
+  "worst_wall_case": {
+    "case": {
+      "core": "sweep_input_with_meter",
+      "format": "f32",
+      "channels": 94,
+      "selected": 33,
+      "frames": 32
+    },
+    "iterations": 512,
+    "rate": 48000,
+    "p50_ns": 2875,
+    "p99_ns": 18125,
+    "max_ns": 43342792,
+    "deadline_ns": 666666,
+    "max_deadline_fraction": 65.01425301425301,
+    "thread_cpu_p50_ns": 3042,
+    "thread_cpu_max_ns": 18750,
+    "thread_cpu_ns_at_max_wall": 14250,
+    "wall_minus_cpu_lower_bound_ns_at_max_wall": 43328542,
+    "heap_operations": 0
+  },
+  "load": "Concurrent file-storage probe and other workspace activity; machine was not isolated.",
+  "scope": "Production callback cores only, including newly tracked native input; excludes native driver callback entry/exit and scheduling. Wall deadline gate remains unchanged.",
+  "result": "Heap gate passed; wall-time deadline gate failed. Historical failed gates remain separate."
+}

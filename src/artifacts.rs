@@ -6,6 +6,9 @@ use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
+mod publication;
+pub(crate) use publication::StagedDirectory;
+
 // Metadata is small even for large capture matrices. Audio allows stereo
 // f32 at the existing 16-million-frame per-take limit, plus WAV headers.
 pub(crate) const MAX_METADATA_BYTES: usize = 8 * 1024 * 1024;

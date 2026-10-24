@@ -128,6 +128,8 @@ pub fn assemble_ctc_takes(
     let mut timing_plan = report.plan.clone();
     timing_plan.timing_reference = None;
     let timing_manifest = super::record::RawCaptureManifest {
+        checkpoint: None,
+        transport_evidence: Vec::new(),
         localization_calibration: None,
         version: 1,
         plan: timing_plan,
@@ -368,20 +370,9 @@ pub fn merge_ctc_fragments(directories: &[PathBuf], output: &Path) -> Result<Mer
     if directories.is_empty() || directories.len() > 128 {
         return Err("ctc merge requires 1..=128 session directories".into());
     }
-    if output.exists() {
-        return Err(format!(
-            "refusing to overwrite existing {}",
-            output.display()
-        ));
-    }
-    let parent = output
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let staging = tempfile::tempdir_in(parent).map_err(|e| e.to_string())?;
+    let staging = crate::artifacts::StagedDirectory::new(output)?;
     let merged = merge_into(directories, staging.path())?;
-    std::fs::rename(staging.path(), output).map_err(|e| e.to_string())?;
+    staging.publish()?;
     Ok(merged)
 }
 
@@ -786,6 +777,39 @@ mod tests {
             serde_json::to_vec_pretty(fragment).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn late_merge_failure_removes_staging_and_preserves_source_for_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let fragment = fragment(&source, "head", &["left"]);
+        write_fragment(&source, &fragment);
+        let ears = fragment.measurements.files[0].raw_sweep.as_ref().unwrap();
+        let original = std::fs::read(source.join(ears)).unwrap();
+        let loopback = fragment.measurements.files[0].loopback.as_ref().unwrap();
+        let saved_loopback = std::fs::read(source.join(loopback)).unwrap();
+        // The valid ear file is copied first; the next member fails decoding.
+        std::fs::write(source.join(loopback), b"truncated WAV").unwrap();
+        let output = root.path().join("bundle");
+        assert!(merge_ctc_fragments(std::slice::from_ref(&source), &output).is_err());
+        assert!(!output.exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read(source.join(ears)).unwrap(), original);
+
+        std::fs::write(source.join(loopback), saved_loopback).unwrap();
+        let merged = merge_ctc_fragments(std::slice::from_ref(&source), &output).unwrap();
+        for member in merged.files {
+            assert!(output.join(member).is_file());
+        }
+        // A second publication cannot overwrite an already usable bundle.
+        let descriptor = std::fs::read(output.join(CTC_MERGED_FILE)).unwrap();
+        assert!(merge_ctc_fragments(std::slice::from_ref(&source), &output).is_err());
+        assert_eq!(
+            std::fs::read(output.join(CTC_MERGED_FILE)).unwrap(),
+            descriptor
+        );
     }
 
     #[test]

@@ -1,0 +1,4 @@
+
+thread 'main' (322002921) panicked at benches/capture_callbacks.rs:192:5:
+callback deadline threshold exceeded; inspect JSON results
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

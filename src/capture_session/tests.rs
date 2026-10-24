@@ -448,7 +448,7 @@ fn shipped_ctc_examples_declare_a_common_input_clock() {
 }
 
 #[test]
-fn auxiliary_and_aggregate_memory_budgets_fail_during_plan_validation() {
+fn auxiliary_budgets_fail_and_file_backed_plans_retain_the_frame_limit() {
     for (duration, gap) in [(1e20, 100.0), (100.0, 1e20)] {
         let mut value = plan();
         value.probe = Some(CaptureProbe {
@@ -483,8 +483,14 @@ fn auxiliary_and_aggregate_memory_budgets_fail_during_plan_validation() {
     value.geometry = CaptureGeometry::Spread;
     value.sample_rate_hz = 384_000;
     value.sweep.duration_secs = 10.0;
+    assert!(crate::limits::capture_bytes(32, 24 * 384_000, 384_000, 14 * 384_000).is_err());
+    assert!(
+        value.clone().validate().is_ok(),
+        "file-backed sessions must not reserve the entire take in RAM"
+    );
+    value.sweep.duration_secs = 100.0;
     let error = value.validate().unwrap_err().to_string();
-    assert!(error.contains("512 MiB"), "{error}");
+    assert!(error.contains("bounded capture storage"), "{error}");
 }
 
 #[test]

@@ -16,14 +16,14 @@ use super::protocol::CaptureStimulusLayout;
 use super::protocol::prepare_capture_stimulus;
 #[cfg(any(test, feature = "capture-io"))]
 use crate::recording_helpers::save_recording_session_json;
+#[cfg(test)]
+use crate::signal_recorder::MultiCaptureResult;
 #[cfg(feature = "capture-io")]
-use crate::signal_recorder::multi_capture::capture_multidevice;
+use crate::signal_recorder::multi_capture::capture_multidevice_to_files;
 #[cfg(any(test, feature = "capture-io"))]
 use crate::signal_recorder::{CancelFlag, write_wav_file};
 #[cfg(any(test, feature = "capture-io"))]
-use crate::signal_recorder::{
-    CaptureInput, CaptureOutputSegment, MultiCaptureRequest, MultiCaptureResult,
-};
+use crate::signal_recorder::{CaptureInput, CaptureOutputSegment, MultiCaptureRequest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(any(test, feature = "capture-io"))]
@@ -32,6 +32,15 @@ use std::io::Read as _;
 use std::path::Path;
 #[cfg(any(test, feature = "capture-io"))]
 use std::sync::atomic::Ordering;
+
+#[cfg(any(test, feature = "capture-io"))]
+mod storage;
+#[cfg(any(test, feature = "capture-io"))]
+use storage::SessionResult;
+
+mod checkpoint;
+pub(crate) use checkpoint::validate as validate_acquisition_checkpoint;
+pub use checkpoint::{CaptureCheckpoint, CapturePassIdentity, CapturePhase};
 
 /// Raw acquisition state; completion does not imply coherent measurement validity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +156,12 @@ pub struct CaptureLoopbackTake {
 /// Durable acquisition journal, separate from corrected recording imports.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawCaptureManifest {
+    /// Durable active phase and committed-result bitmap; absent in legacy journals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<CaptureCheckpoint>,
+    /// Exact failed-acquisition reports retained with this journal and its handoff.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transport_evidence: Vec<CaptureFileSnapshot>,
     /// Frozen bench calibration; absent when no bench correction was declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub localization_calibration: Option<CaptureFileSnapshot>,
@@ -209,7 +224,9 @@ pub(crate) fn stable_take_id(source_id: &str, microphone_id: &str, repeat_index:
 }
 
 #[cfg(any(test, feature = "capture-io"))]
-fn save_manifest(directory: &Path, manifest: &RawCaptureManifest) -> Result<(), String> {
+fn save_manifest(directory: &Path, manifest: &mut RawCaptureManifest) -> Result<(), String> {
+    checkpoint::refresh(manifest);
+    super::loss_evidence::refresh(directory, &mut manifest.transport_evidence)?;
     let json = serde_json::to_vec_pretty(manifest)
         .map_err(|e| format!("cannot serialize capture journal: {e}"))?;
     save_recording_session_json(&directory.join("capture-raw.json"), &json)
@@ -236,8 +253,8 @@ fn save_manifest(directory: &Path, manifest: &RawCaptureManifest) -> Result<(), 
     reason = "The positive fixed wake tail is rounded up to a whole number of audio frames."
 )]
 #[cfg(any(test, feature = "capture-io"))]
-fn wake_session_chain(
-    capture: &mut impl FnMut(MultiCaptureRequest, &CancelFlag) -> Result<MultiCaptureResult, String>,
+fn wake_session_chain<R: SessionResult>(
+    capture: &mut impl FnMut(MultiCaptureRequest, &CancelFlag) -> Result<R, String>,
     session: &ValidatedCaptureSession,
     cancel: &CancelFlag,
     budget: std::time::Duration,
@@ -288,11 +305,15 @@ fn wake_session_chain(
             },
             cancel,
         );
-        match response {
+        match response.and_then(SessionResult::into_session) {
             Ok(captured) if captured.recordings.len() == inputs.len() => {
                 let awake = captured.recordings.iter().all(|recording| {
-                    math_audio_dsp::analysis::estimate_lag_with_confidence(&burst, recording)
-                        .is_ok_and(|lag| lag.confidence >= minimum)
+                    recording
+                        .wake_samples(rate as usize * 10)
+                        .is_ok_and(|samples| {
+                            math_audio_dsp::analysis::estimate_lag_with_confidence(&burst, &samples)
+                                .is_ok_and(|lag| lag.confidence >= minimum)
+                        })
                 });
                 if awake {
                     if attempts > 1 {
@@ -337,7 +358,7 @@ pub fn record_capture_session(
         output_directory,
         cancel,
         progress,
-        capture_multidevice,
+        |request, cancel| capture_multidevice_to_files(request, output_directory, cancel),
     )?;
     run_auxiliary_passes(
         session,
@@ -408,9 +429,10 @@ pub(crate) fn run_auxiliary_passes(
         return Ok(manifest);
     }
     manifest.status = RawCaptureStatus::Capturing;
-    save_manifest(output_directory, &manifest)?;
+    checkpoint::set_phase(&mut manifest, CapturePhase::AwaitingAuxiliary);
+    save_manifest(output_directory, &mut manifest)?;
     let fail = |manifest: &mut RawCaptureManifest, error: String| -> String {
-        manifest.status = if error == "cancelled" {
+        manifest.status = if error == "cancelled" || error.starts_with("cancelled; ") {
             RawCaptureStatus::Cancelled
         } else {
             RawCaptureStatus::Failed
@@ -437,6 +459,8 @@ pub(crate) fn run_auxiliary_passes(
         return Err(error);
     }
     if let Some(probe) = &plan.probe {
+        checkpoint::set_phase(&mut manifest, CapturePhase::Probe);
+        save_manifest(output_directory, &mut manifest)?;
         let wav = output_directory.join(PROBE_WAV_FILE);
         match probe_runner(
             &channels,
@@ -457,7 +481,7 @@ pub(crate) fn run_auxiliary_passes(
                     microphone_id: microphone.id.clone(),
                     results,
                 });
-                save_manifest(output_directory, &manifest)?;
+                save_manifest(output_directory, &mut manifest)?;
             }
             Err(error) => return Err(fail(&mut manifest, error)),
         }
@@ -467,6 +491,8 @@ pub(crate) fn run_auxiliary_passes(
         return Err(error);
     }
     if let Some(anchor) = &plan.bass_anchor {
+        checkpoint::set_phase(&mut manifest, CapturePhase::BassAnchor);
+        save_manifest(output_directory, &mut manifest)?;
         let loopback_channel = plan.loopback.as_ref().map(|route| route.input_channel);
         let wav = output_directory.join(BASS_ANCHOR_WAV_FILE);
         match anchor_runner(
@@ -493,7 +519,7 @@ pub(crate) fn run_auxiliary_passes(
                     loopback_channel,
                     results,
                 });
-                save_manifest(output_directory, &manifest)?;
+                save_manifest(output_directory, &mut manifest)?;
             }
             Err(error) => return Err(fail(&mut manifest, error)),
         }
@@ -502,7 +528,8 @@ pub(crate) fn run_auxiliary_passes(
         return Err(fail(&mut manifest, "cancelled".into()));
     }
     manifest.status = RawCaptureStatus::RawComplete;
-    save_manifest(output_directory, &manifest)?;
+    checkpoint::set_phase(&mut manifest, CapturePhase::Complete);
+    save_manifest(output_directory, &mut manifest)?;
     Ok(manifest)
 }
 
@@ -511,13 +538,13 @@ pub(crate) fn run_auxiliary_passes(
     reason = "Keep the ordered acquisition and artifact-processing phases together so cleanup and provenance remain explicit."
 )]
 #[cfg(any(test, feature = "capture-io"))]
-fn record_with(
+fn record_with<R: SessionResult>(
     session: &ValidatedCaptureSession,
     plan_directory: &Path,
     output_directory: &Path,
     cancel: &CancelFlag,
     mut progress: impl FnMut(CaptureProgress),
-    mut capture: impl FnMut(MultiCaptureRequest, &CancelFlag) -> Result<MultiCaptureResult, String>,
+    mut capture: impl FnMut(MultiCaptureRequest, &CancelFlag) -> Result<R, String>,
 ) -> Result<RawCaptureManifest, String> {
     if cancel.load(Ordering::Relaxed) {
         return Err("cancelled".into());
@@ -579,6 +606,8 @@ fn record_with(
     std::fs::create_dir(output_directory)
         .map_err(|e| format!("cannot create new capture directory: {e}"))?;
     let mut manifest = RawCaptureManifest {
+        checkpoint: None,
+        transport_evidence: Vec::new(),
         localization_calibration,
         version: 1,
         plan: session.plan().clone(),
@@ -600,7 +629,8 @@ fn record_with(
     if let Some(snapshot) = &manifest.localization_calibration {
         manifest.plan.localization_calibration_file = Some(snapshot.file.clone().into());
     }
-    save_manifest(output_directory, &manifest)?;
+    checkpoint::set_phase(&mut manifest, CapturePhase::Preparing);
+    save_manifest(output_directory, &mut manifest)?;
     let result = (|| -> Result<(), String> {
         if let Some(snapshot) = &manifest.localization_calibration {
             std::fs::copy(
@@ -628,6 +658,8 @@ fn record_with(
             session.plan().sample_rate_hz,
             1,
         )?;
+        checkpoint::set_phase(&mut manifest, CapturePhase::Waking);
+        save_manifest(output_directory, &mut manifest)?;
         wake_session_chain(
             &mut capture,
             session,
@@ -639,6 +671,14 @@ fn record_with(
                 if cancel.load(Ordering::Relaxed) {
                     return Err("cancelled".into());
                 }
+                checkpoint::set_phase(
+                    &mut manifest,
+                    CapturePhase::Sweep {
+                        source_id: source.id.clone(),
+                        repeat_index,
+                    },
+                );
+                save_manifest(output_directory, &mut manifest)?;
                 progress(CaptureProgress {
                     source_index,
                     source_count: session.plan().sources.len(),
@@ -668,7 +708,7 @@ fn record_with(
                 } else {
                     None
                 };
-                let captured = capture(
+                let mut captured = capture(
                     MultiCaptureRequest {
                         inputs,
                         output_device: session.plan().output_device.clone(),
@@ -690,7 +730,8 @@ fn record_with(
                         stimulus: stimulus.samples.clone(),
                     },
                     cancel,
-                )?;
+                )?
+                .into_session()?;
                 let expected_inputs =
                     session.plan().microphones.len() + usize::from(loopback_index.is_some());
                 if captured.sample_rate_hz != session.plan().sample_rate_hz
@@ -700,8 +741,8 @@ fn record_with(
                     || captured.input_device_ids.iter().any(String::is_empty)
                     || captured.output_device_id.is_empty()
                     || captured.recordings.iter().any(|samples| {
-                        samples.len() < stimulus.samples.len()
-                            || samples.iter().any(|s| !s.is_finite())
+                        samples.samples < stimulus.samples.len()
+                            || samples.samples > crate::limits::MAX_CAPTURE_FRAMES
                     })
                 {
                     return Err(
@@ -713,19 +754,14 @@ fn record_with(
                     .plan()
                     .microphones
                     .iter()
-                    .zip(&captured.recordings)
+                    .zip(&mut captured.recordings)
                     .enumerate()
                 {
                     // Numeric names avoid collisions and path traversal in user labels.
                     let wav_file = format!(
                         "repeat-{repeat_index:02}-source-{source_index:02}-mic-{mic_index:02}-raw.wav"
                     );
-                    write_wav_file(
-                        &output_directory.join(&wav_file),
-                        samples,
-                        captured.sample_rate_hz,
-                        1,
-                    )?;
+                    samples.save(&output_directory.join(&wav_file), captured.sample_rate_hz)?;
                     manifest.takes.push(RawCaptureTake {
                         take_id: stable_take_id(&source.id, &mic.id, repeat_index),
                         repeat_index,
@@ -734,36 +770,31 @@ fn record_with(
                         source_id: source.id.clone(),
                         microphone_id: mic.id.clone(),
                         wav_file,
-                        samples: samples.len(),
+                        samples: samples.samples,
                         input_sample_format: captured.input_sample_formats[mic_index].clone(),
                         output_sample_format: captured.output_sample_format.clone(),
-                        peak_amplitude: samples.iter().fold(0.0_f32, |peak, s| peak.max(s.abs())),
-                        clipped_samples: samples.iter().filter(|s| s.abs() >= 1.0).count(),
+                        peak_amplitude: samples.peak_amplitude,
+                        clipped_samples: samples.clipped_samples,
                     });
                 }
                 if let Some(loopback) = loopback_index {
-                    let samples = &captured.recordings[loopback];
+                    let samples = &mut captured.recordings[loopback];
                     let wav_file = format!(
                         "repeat-{repeat_index:02}-source-{source_index:02}-loopback-raw.wav"
                     );
-                    write_wav_file(
-                        &output_directory.join(&wav_file),
-                        samples,
-                        captured.sample_rate_hz,
-                        1,
-                    )?;
+                    samples.save(&output_directory.join(&wav_file), captured.sample_rate_hz)?;
                     manifest.loopback_files.push(CaptureLoopbackTake {
                         repeat_index,
                         source_id: source.id.clone(),
                         wav_file,
-                        samples: samples.len(),
+                        samples: samples.samples,
                         device_id: captured.input_device_ids[loopback].clone(),
                         input_sample_format: captured.input_sample_formats[loopback].clone(),
-                        peak_amplitude: samples.iter().fold(0.0_f32, |peak, s| peak.max(s.abs())),
-                        clipped_samples: samples.iter().filter(|s| s.abs() >= 1.0).count(),
+                        peak_amplitude: samples.peak_amplitude,
+                        clipped_samples: samples.clipped_samples,
                     });
                 }
-                save_manifest(output_directory, &manifest)?;
+                save_manifest(output_directory, &mut manifest)?;
             }
         }
         Ok(())
@@ -773,7 +804,7 @@ fn record_with(
             if cancel.load(Ordering::Relaxed) {
                 manifest.status = RawCaptureStatus::Cancelled;
                 manifest.error = Some("cancelled".into());
-                save_manifest(output_directory, &manifest)?;
+                save_manifest(output_directory, &mut manifest)?;
                 return Err("cancelled".into());
             }
             manifest.status =
@@ -782,17 +813,23 @@ fn record_with(
                 } else {
                     RawCaptureStatus::RawComplete
                 };
-            save_manifest(output_directory, &manifest)?;
+            let phase = if manifest.status == RawCaptureStatus::RawComplete {
+                CapturePhase::Complete
+            } else {
+                CapturePhase::AwaitingAuxiliary
+            };
+            checkpoint::set_phase(&mut manifest, phase);
+            save_manifest(output_directory, &mut manifest)?;
             Ok(manifest)
         }
         Err(error) => {
-            manifest.status = if error == "cancelled" {
+            manifest.status = if error == "cancelled" || error.starts_with("cancelled; ") {
                 RawCaptureStatus::Cancelled
             } else {
                 RawCaptureStatus::Failed
             };
             manifest.error = Some(error.clone());
-            save_manifest(output_directory, &manifest)
+            save_manifest(output_directory, &mut manifest)
                 .map_err(|save_error| format!("{error}; additionally {save_error}"))?;
             Err(error)
         }

@@ -241,12 +241,35 @@ pub fn publish_capture_handoff(
             "preserved parent inventory differs from exact acquisition journal bytes".into(),
         );
     }
+    let raw_manifest: super::record::RawCaptureManifest = serde_json::from_slice(raw_journal_bytes)
+        .map_err(|e| format!("cannot read parent acquisition evidence: {e}"))?;
+    super::record::validate_acquisition_checkpoint(&raw_manifest)?;
+    if raw_manifest.status != status {
+        return Err("handoff completion disagrees with the parent acquisition status".into());
+    }
+    for (name, _) in super::loss_evidence::read_verified(output, &raw_manifest.transport_evidence)?
+    {
+        if roles
+            .insert(name, CaptureArtifactRole::SupportingEvidence)
+            .is_some()
+        {
+            return Err("transport evidence collides with a handoff artifact".into());
+        }
+    }
     // Bind producer-owned evidence only. Finder metadata and unrelated notes
     // are not acquisition artifacts and must not invalidate a moved bundle.
     let artifacts = roles
         .into_iter()
         .map(|(file, role)| file_identity(output, &file, role))
         .collect::<Result<Vec<_>, _>>()?;
+    for snapshot in &raw_manifest.transport_evidence {
+        if !artifacts
+            .iter()
+            .any(|artifact| artifact.file == snapshot.file && artifact.sha256 == snapshot.sha256)
+        {
+            return Err("transport evidence changed while building its handoff inventory".into());
+        }
+    }
     let handoff = CaptureHandoff {
         version: 1,
         producer: "sotf-capture".into(),

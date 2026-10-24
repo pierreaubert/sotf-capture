@@ -28,6 +28,73 @@ impl Clock for SystemClock {
     }
 }
 
+/// Private lifecycle boundary shared by memory and file-backed inputs.
+pub(super) trait CaptureInput {
+    type Output;
+    fn start(
+        &mut self,
+        device: Option<&str>,
+        channels: &[u16],
+        rate: u32,
+        duration: f64,
+    ) -> Result<super::recorder::NegotiatedInput, String>;
+    fn input_frame_counts(&self, counts: &mut Vec<usize>);
+    fn check_health(&self) -> Result<(), String>;
+    fn stop(&mut self) -> Result<Self::Output, String>;
+    fn validate(&self, take: &Self::Output, rate: u32, channels: usize) -> Result<(), String>;
+}
+
+impl<R: SweepRecorder> CaptureInput for R {
+    type Output = RecordedTake;
+    fn start(
+        &mut self,
+        device: Option<&str>,
+        channels: &[u16],
+        rate: u32,
+        duration: f64,
+    ) -> Result<super::recorder::NegotiatedInput, String> {
+        SweepRecorder::start(self, device, channels, rate, duration)
+    }
+    fn input_frame_counts(&self, counts: &mut Vec<usize>) {
+        SweepRecorder::input_frame_counts(self, counts);
+    }
+    fn check_health(&self) -> Result<(), String> {
+        SweepRecorder::check_health(self)
+    }
+    fn stop(&mut self) -> Result<Self::Output, String> {
+        SweepRecorder::stop(self)
+    }
+    fn validate(&self, take: &RecordedTake, rate: u32, channels: usize) -> Result<(), String> {
+        validate_recorded_take(take, rate, channels, self.shares_input_timeline())
+    }
+}
+
+pub(super) fn validate_recorded_take(
+    take: &RecordedTake,
+    rate: u32,
+    channels: usize,
+    shared_timeline: bool,
+) -> Result<(), String> {
+    if take.dropped_samples != 0 {
+        return Err(format!(
+            "capture lost {} input samples",
+            take.dropped_samples
+        ));
+    }
+    if take.analysis_sample_rate != rate
+        || take.recorded_per_channel.len() != channels
+        || take.recorded_per_channel.iter().any(|samples| {
+            samples.is_empty()
+                || samples.len() > crate::limits::MAX_CAPTURE_FRAMES
+                || (shared_timeline && samples.len() != take.recorded_per_channel[0].len())
+                || samples.iter().any(|sample| !sample.is_finite())
+        })
+    {
+        return Err("capture backend returned inconsistent or invalid input samples".into());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CaptureRequest<'a> {
     pub wav: &'a Path,
@@ -39,12 +106,12 @@ pub(super) struct CaptureRequest<'a> {
     pub input_device: Option<&'a str>,
 }
 
-pub(super) fn capture(
+pub(super) fn capture<R: CaptureInput>(
     playback: &mut impl SweepPlayback,
-    recorder: &mut impl SweepRecorder,
+    recorder: &mut R,
     request: CaptureRequest<'_>,
     cancel: Option<&CancelFlag>,
-) -> Result<RecordedTake, String> {
+) -> Result<R::Output, String> {
     capture_with_clock(
         playback,
         recorder,
@@ -66,13 +133,13 @@ fn check_cancel(cancel: Option<&CancelFlag>) -> Result<(), String> {
     clippy::cast_precision_loss,
     reason = "The request frame count is checked against the 16-million-frame limit."
 )]
-pub(super) fn capture_with_clock(
+pub(super) fn capture_with_clock<R: CaptureInput>(
     playback: &mut impl SweepPlayback,
-    recorder: &mut impl SweepRecorder,
+    recorder: &mut R,
     request: CaptureRequest<'_>,
     cancel: Option<&CancelFlag>,
     clock: &mut impl Clock,
-) -> Result<RecordedTake, String> {
+) -> Result<R::Output, String> {
     check_cancel(cancel)?;
     if request.rate == 0
         || request.frames == 0
@@ -94,25 +161,14 @@ pub(super) fn capture_with_clock(
         if negotiated.sample_rate == 0 {
             return Err("invalid negotiated input rate".into());
         }
-        let startup_deadline = clock.now() + STARTUP;
-        loop {
-            check_cancel(cancel)?;
-            recorder.check_health()?;
-            recorder.input_frame_counts(&mut counts);
-            if counts.is_empty() || counts.len() > request.input_channels.len() {
-                return Err("capture backend returned inconsistent input clock identities".into());
-            }
-            if counts
-                .iter()
-                .all(|frames| *frames >= (negotiated.sample_rate as usize / 4).max(1))
-            {
-                break;
-            }
-            if clock.now() >= startup_deadline {
-                return Err("input readiness timed out".into());
-            }
-            clock.sleep(POLL);
-        }
+        wait_for_input(
+            recorder,
+            negotiated.sample_rate,
+            request.input_channels.len(),
+            cancel,
+            clock,
+            &mut counts,
+        )?;
         check_cancel(cancel)?;
         playback.start(
             request.wav,
@@ -156,30 +212,48 @@ pub(super) fn capture_with_clock(
     result?;
     super::record::cancel_aware_stop(playback_stop, false)?;
     let take = take?;
-    if take.dropped_samples != 0 {
-        return Err(format!(
-            "capture lost {} input samples",
-            take.dropped_samples
-        ));
-    }
-    if take.analysis_sample_rate != negotiated.sample_rate
-        || take.recorded_per_channel.len() != request.input_channels.len()
-        || take.recorded_per_channel.iter().any(|samples| {
-            samples.is_empty()
-                || samples.len() > crate::limits::MAX_CAPTURE_FRAMES
-                || (recorder.shares_input_timeline()
-                    && samples.len() != take.recorded_per_channel[0].len())
-                || samples.iter().any(|sample| !sample.is_finite())
-        })
-    {
-        return Err("capture backend returned inconsistent or invalid input samples".into());
-    }
+    recorder.validate(&take, negotiated.sample_rate, request.input_channels.len())?;
     Ok(take)
+}
+
+fn wait_for_input(
+    recorder: &impl CaptureInput,
+    sample_rate: u32,
+    max_clocks: usize,
+    cancel: Option<&CancelFlag>,
+    clock: &mut impl Clock,
+    counts: &mut Vec<usize>,
+) -> Result<(), String> {
+    let deadline = clock.now() + STARTUP;
+    let mut input_clocks = None;
+    loop {
+        check_cancel(cancel)?;
+        recorder.check_health()?;
+        recorder.input_frame_counts(counts);
+        if counts.is_empty()
+            || counts.len() > max_clocks
+            || input_clocks.is_some_and(|expected| counts.len() != expected)
+        {
+            return Err("capture backend returned inconsistent input clock identities".into());
+        }
+        // Never let a missing clock make the remaining clocks appear ready.
+        input_clocks = Some(counts.len());
+        if counts
+            .iter()
+            .all(|frames| *frames >= (sample_rate as usize / 4).max(1))
+        {
+            return Ok(());
+        }
+        if clock.now() >= deadline {
+            return Err("input readiness timed out".into());
+        }
+        clock.sleep(POLL);
+    }
 }
 
 fn capture_tail(
     playback: &impl SweepPlayback,
-    recorder: &impl SweepRecorder,
+    recorder: &impl CaptureInput,
     sample_rate: u32,
     cancel: Option<&CancelFlag>,
     clock: &mut impl Clock,
@@ -234,6 +308,12 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CancelBoundary {
+        OutputStart,
+        InputStop,
+    }
+
     #[derive(Default)]
     struct Schedule {
         now: Cell<Duration>,
@@ -244,6 +324,7 @@ mod tests {
         completion_after: Option<Duration>,
         input_failure_at: Option<Duration>,
         input_stalls_at: Option<Duration>,
+        input_disappears_at: Option<Duration>,
         output_failure_at: Option<Duration>,
         cancel_at: Option<Duration>,
         cancel: CancelFlag,
@@ -251,6 +332,9 @@ mod tests {
         output_start_fails: bool,
         output_stop_fails: bool,
         input_stop_fails: bool,
+        cancel_on: Option<CancelBoundary>,
+        polling_seed: Cell<u64>,
+        callback_frames: usize,
         lost_samples: u64,
     }
 
@@ -266,6 +350,11 @@ mod tests {
             self.0.now.get()
         }
         fn sleep(&mut self, duration: Duration) {
+            let duration = if self.0.polling_seed.get() == 0 {
+                duration
+            } else {
+                Duration::from_millis(1 + random(&self.0.polling_seed) % 31)
+            };
             self.0.now.set(self.0.now.get() + duration);
             if self
                 .0
@@ -295,7 +384,9 @@ mod tests {
                 .copied()
                 .unwrap_or(self.0.first_input_after);
             let elapsed = observed.saturating_sub(started + delay);
-            usize::try_from(elapsed.as_nanos() * 48_000 / 1_000_000_000).unwrap()
+            let frames = usize::try_from(elapsed.as_nanos() * 48_000 / 1_000_000_000).unwrap();
+            let block = self.0.callback_frames.max(1);
+            frames / block * block
         }
     }
     impl SweepRecorder for Input {
@@ -321,6 +412,13 @@ mod tests {
             counts.extend(
                 (0..self.0.independent_input_delays.len().max(1)).map(|index| self.count(index)),
             );
+            if self
+                .0
+                .input_disappears_at
+                .is_some_and(|time| self.0.now.get() >= time)
+            {
+                counts.pop();
+            }
         }
         fn shares_input_timeline(&self) -> bool {
             self.0.independent_input_delays.is_empty()
@@ -348,6 +446,10 @@ mod tests {
             if self.0.input_stop_fails {
                 return Err("injected input stop failure".into());
             }
+            if self.0.cancel_on == Some(CancelBoundary::InputStop) {
+                self.0.cancel.store(true, Ordering::Relaxed);
+            }
+            SweepRecorder::check_health(self)?;
             Ok(RecordedTake {
                 recorded_per_channel: samples,
                 analysis_sample_rate: 48000,
@@ -364,6 +466,9 @@ mod tests {
                 return Err("injected output start failure".into());
             }
             self.0.output_started.set(Some(self.0.now.get()));
+            if self.0.cancel_on == Some(CancelBoundary::OutputStart) {
+                self.0.cancel.store(true, Ordering::Relaxed);
+            }
             Ok(())
         }
         fn is_finished(&mut self) -> bool {
@@ -391,7 +496,7 @@ mod tests {
             if self.0.output_stop_fails {
                 Err("injected output stop failure".into())
             } else {
-                Ok(())
+                self.check_health()
             }
         }
     }
@@ -425,6 +530,147 @@ mod tests {
             cancel: Arc::new(AtomicBool::new(false)),
             ..Schedule::default()
         }
+    }
+
+    // A fixed xorshift generator keeps failures reproducible without a new
+    // dependency. Different seeds vary callback blocks and control wakeups.
+    fn random(state: &Cell<u64>) -> u64 {
+        let mut value = state.get();
+        value ^= value << 13;
+        value ^= value >> 7;
+        value ^= value << 17;
+        state.set(value);
+        value
+    }
+
+    fn seeded(seed: u64) -> Schedule {
+        let state = Cell::new(seed);
+        Schedule {
+            independent_input_delays: vec![
+                Duration::from_millis(random(&state) % 400),
+                Duration::from_millis(random(&state) % 900),
+            ],
+            callback_frames: usize::try_from(1 + random(&state) % 1024).unwrap(),
+            // The requested stimulus is 100 ms; add a variable presentation delay.
+            completion_after: Some(Duration::from_millis(100 + random(&state) % 400)),
+            polling_seed: state,
+            ..healthy()
+        }
+    }
+
+    fn assert_cleanup(schedule: &Schedule, seed: u64) {
+        let events = schedule.events.borrow();
+        for (start, stop) in [
+            ("input.start", "input.stop"),
+            ("output.start", "output.stop"),
+        ] {
+            let starts = events.iter().filter(|(event, _)| *event == start).count();
+            let stops = events.iter().filter(|(event, _)| *event == stop).count();
+            let failed_start = usize::from(start == "output.start" && schedule.output_start_fails);
+            assert_eq!(starts - failed_start, stops, "seed {seed}: {events:?}");
+            assert!(starts <= 1, "seed {seed}: {events:?}");
+        }
+        assert!(schedule.input_started.get().is_none(), "seed {seed}");
+        assert!(schedule.output_started.get().is_none(), "seed {seed}");
+    }
+
+    #[test]
+    fn seeded_schedules_preserve_readiness_presentation_and_failure_outcomes() {
+        for seed in 1..=256 {
+            let (result, baseline) = run(seeded(seed));
+            let take = result.unwrap_or_else(|error| panic!("healthy seed {seed}: {error}"));
+            let events = baseline.events.borrow();
+            let output_start = events
+                .iter()
+                .find(|(name, _)| *name == "output.start")
+                .unwrap()
+                .1;
+            let stopped = events
+                .iter()
+                .find(|(name, _)| *name == "input.stop")
+                .unwrap()
+                .1;
+            let presented = output_start + baseline.completion_after.unwrap();
+            for (index, delay) in baseline.independent_input_delays.iter().enumerate() {
+                assert!(
+                    output_start >= *delay + Duration::from_millis(250),
+                    "seed {seed}"
+                );
+                assert!(stopped >= presented + Duration::from_secs(1), "seed {seed}");
+                let frames_at_presentation = usize::try_from(
+                    presented.saturating_sub(*delay).as_nanos() * 48_000 / 1_000_000_000,
+                )
+                .unwrap();
+                // One incomplete callback block may still be pending at the
+                // physical presentation boundary, but a full tail must follow.
+                assert!(
+                    take.recorded_per_channel[index].len() + baseline.callback_frames
+                        >= frames_at_presentation + 48_000,
+                    "seed {seed}"
+                );
+            }
+            assert_cleanup(&baseline, seed);
+
+            for fault in 0..12 {
+                let mut schedule = seeded(seed);
+                let during_playback = output_start + baseline.completion_after.unwrap() / 2;
+                let during_tail = presented + Duration::from_millis(300);
+                match fault {
+                    0 => schedule.cancel_at = Some(output_start / 2),
+                    1 => schedule.cancel_at = Some(during_playback),
+                    2 => schedule.cancel_at = Some(during_tail),
+                    3 => schedule.input_failure_at = Some(output_start / 2),
+                    4 => schedule.input_failure_at = Some(during_tail),
+                    5 => schedule.output_failure_at = Some(during_playback),
+                    6 => schedule.output_failure_at = Some(during_tail),
+                    7 => schedule.completion_after = None,
+                    8 => schedule.input_stalls_at = Some(during_tail),
+                    9 => schedule.lost_samples = 1,
+                    10 => schedule.input_stop_fails = true,
+                    11 => schedule.output_stop_fails = true,
+                    _ => unreachable!(),
+                }
+                let (result, schedule) = run(schedule);
+                let error = result.expect_err(&format!("seed {seed}, fault {fault} accepted"));
+                if fault <= 2 {
+                    assert_eq!(error, super::super::consts::CANCELLED_ERR, "seed {seed}");
+                }
+                assert_cleanup(&schedule, seed);
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_at_start_and_cleanup_boundaries_never_accepts_a_take() {
+        for boundary in [CancelBoundary::OutputStart, CancelBoundary::InputStop] {
+            let (result, schedule) = run(Schedule {
+                cancel_on: Some(boundary),
+                ..healthy()
+            });
+            assert_eq!(result.unwrap_err(), super::super::consts::CANCELLED_ERR);
+            assert_cleanup(&schedule, 0);
+        }
+    }
+
+    #[test]
+    fn disappearing_input_during_readiness_cannot_start_output() {
+        let (result, schedule) = run(Schedule {
+            independent_input_delays: vec![Duration::ZERO, Duration::from_millis(700)],
+            input_disappears_at: Some(Duration::from_millis(100)),
+            ..healthy()
+        });
+        assert!(
+            result.is_err(),
+            "a missing input clock must invalidate capture"
+        );
+        assert!(
+            !schedule
+                .events
+                .borrow()
+                .iter()
+                .any(|(event, _)| *event == "output.start")
+        );
+        assert_cleanup(&schedule, 0);
     }
 
     #[test]

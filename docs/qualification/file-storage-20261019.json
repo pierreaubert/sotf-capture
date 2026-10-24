@@ -1,0 +1,1 @@
+{"storage":{"inputs":33,"frames":16000000,"rate":384000,"stimulus_frames":12160000,"budget_bytes":200118272,"disk_payload_bytes":2112000000},"live_allocated_bytes":148951891,"allocations":515848,"reallocations":73,"scope":"file-backed acquisition, including rings, writer, and stimuli; excludes native devices and DSP analysis"}

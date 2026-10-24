@@ -1,0 +1,108 @@
+{
+  "recorded_at_utc": "2026-10-19T19:53:06.873573+00:00",
+  "host": {
+    "cpu": "Apple M4 Pro",
+    "logical_cpus": 14,
+    "os": "Darwin",
+    "os_version": "27.0.1",
+    "architecture": "arm64",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)"
+  },
+  "capture_head": "341757e8ecb2eb8820dabbe0d79a2182e7def563",
+  "capture_source_sha256": "f38259e81f7fbead5c873c07dbc9348c9d39faad33227a8022bd60e5cae1961d",
+  "fingerprint_scope": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "src/**/*.rs",
+    "benches/**/*.rs",
+    "tests/**/*.rs"
+  ],
+  "dependencies": {
+    "autoeq": {
+      "head": "867976de9ef0d23d2e02d6400052a12bfbeccac2",
+      "dirty": true
+    },
+    "math-audio": {
+      "head": "a32fd133311fbbf921a0c21d012d400b721f50a4",
+      "dirty": true
+    }
+  },
+  "load": "Concurrent sibling-workspace builds and tests; machine was not isolated.",
+  "clock_scope": "Thread CPU interval brackets callback wall interval and includes timer overhead; wall deadlines are unchanged.",
+  "runs": [
+    {
+      "command": "cargo bench --locked --offline --features test-util --bench capture_callbacks -- --iterations 512 --rate 48000 --max-deadline-fraction 1 --cpu-clock thread",
+      "artifact": "callbacks-cpu-20261019.jsonl",
+      "exit_code": 0,
+      "cases": 256,
+      "measured_invocations": 131072,
+      "heap_operations": 0,
+      "deadline_miss_cases": 0,
+      "maximum_thread_cpu_ns": 79791,
+      "maximum_thread_cpu_deadline_fraction": 0.008938508938508938,
+      "worst_wall_case": {
+        "case": {
+          "core": "sweep_input_with_meter",
+          "format": "f32",
+          "channels": 33,
+          "selected": 33,
+          "frames": 128
+        },
+        "iterations": 512,
+        "rate": 48000,
+        "p50_ns": 8458,
+        "p99_ns": 10541,
+        "max_ns": 52208,
+        "deadline_ns": 2666666,
+        "max_deadline_fraction": 0.019578004894501223,
+        "thread_cpu_p50_ns": 8583,
+        "thread_cpu_max_ns": 20708,
+        "thread_cpu_ns_at_max_wall": 20708,
+        "wall_minus_cpu_lower_bound_ns_at_max_wall": 31500,
+        "heap_operations": 0
+      }
+    },
+    {
+      "command": "cargo bench --locked --offline --features test-util --bench capture_callbacks -- --iterations 4096 --rate 48000 --max-deadline-fraction 1 --cpu-clock thread",
+      "artifact": "callbacks-cpu-4096-20261019.jsonl",
+      "exit_code": 101,
+      "cases": 256,
+      "measured_invocations": 1048576,
+      "heap_operations": 0,
+      "deadline_miss_cases": 1,
+      "maximum_thread_cpu_ns": 233375,
+      "maximum_thread_cpu_deadline_fraction": 0.016125016125016125,
+      "worst_wall_case": {
+        "case": {
+          "core": "multidevice_input",
+          "format": "f32",
+          "channels": 94,
+          "selected": 33,
+          "frames": 1024
+        },
+        "iterations": 4096,
+        "rate": 48000,
+        "p50_ns": 32875,
+        "p99_ns": 428166,
+        "max_ns": 67502750,
+        "deadline_ns": 21333333,
+        "max_deadline_fraction": 3.1641914556904913,
+        "thread_cpu_p50_ns": 33125,
+        "thread_cpu_max_ns": 189917,
+        "thread_cpu_ns_at_max_wall": 56500,
+        "wall_minus_cpu_lower_bound_ns_at_max_wall": 67446250,
+        "heap_operations": 0
+      }
+    }
+  ],
+  "logger_watchdog": {
+    "command": "cargo test --locked --offline --features test-util --test callback_no_log",
+    "result": "passed, including blocked-logger positive control"
+  },
+  "full_suite": {
+    "passed": 456,
+    "ignored": 1,
+    "suites": 5
+  },
+  "dependency_observation": "Observed after measurement; live sibling checkouts are not a hermetic build snapshot."
+}

@@ -1,0 +1,72 @@
+{
+  "recorded_at_utc": "2026-10-19T21:02:45.910425+00:00",
+  "host": {
+    "cpu": "Apple M4 Pro",
+    "logical_cpus": 14,
+    "os": "Darwin",
+    "os_version": "27.0.1",
+    "architecture": "arm64",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)"
+  },
+  "capture_head": "341757e8ecb2eb8820dabbe0d79a2182e7def563",
+  "capture_source_sha256": "6f7be7f9d75bbd1092a05504874608d945202a89053dc815dc6fbfdea69f1494",
+  "fingerprint_scope": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "src/**/*.rs",
+    "benches/**/*.rs",
+    "tests/**/*.rs"
+  ],
+  "fingerprint_method": "SHA-256 over sorted relative UTF-8 paths, each followed by NUL then exact file bytes",
+  "capture_dirty": true,
+  "dependencies": {
+    "autoeq": {
+      "head": "867976de9ef0d23d2e02d6400052a12bfbeccac2",
+      "dirty": true
+    },
+    "math-audio": {
+      "head": "a32fd133311fbbf921a0c21d012d400b721f50a4",
+      "dirty": true
+    }
+  },
+  "dependency_observation": "Observed after measurement; live sibling checkouts are not a hermetic build snapshot.",
+  "command": "TMPDIR=/Volumes/home_tmp/tmp /usr/bin/time -l /Volumes/home_tmp/tmp/sotf-capture-audit-20261018-target/release/deps/capture_callbacks-ad06e7dc17c46c7a --memory-only --storage files",
+  "build_command": "cargo bench --locked --offline --features test-util --bench capture_callbacks --no-run --target-dir /Volumes/home_tmp/tmp/sotf-capture-audit-20261018-target",
+  "exit_code": 0,
+  "measurement": {
+    "storage": {
+      "inputs": 33,
+      "frames": 16000000,
+      "rate": 384000,
+      "stimulus_frames": 12160000,
+      "budget_bytes": 200118272,
+      "disk_payload_bytes": 2112000000
+    },
+    "live_allocated_bytes": 148951891,
+    "allocations": 515848,
+    "reallocations": 73,
+    "scope": "file-backed acquisition, including rings, writer, and stimuli; excludes native devices and DSP analysis"
+  },
+  "peak_rss_bytes": 156368896,
+  "scope": "Hardware-free bounded storage measurement with paced accelerated input; every sample read back after finalization. Includes touched rings, two stimulus buffers, and 33 independent clock diagnostics. Excludes native stream buffers, later DSP, and throughput qualification.",
+  "validation": {
+    "full_suite": {
+      "passed": 474,
+      "ignored": 1,
+      "suites": 5
+    },
+    "dsp_only": {
+      "passed": 382,
+      "ignored": 1
+    },
+    "strict_clippy": "passed, all targets with test-util and no dependency linting",
+    "tvos": "no-default-features library compile check passed",
+    "format_and_diff": "passed",
+    "failure_tests": "write/finalization errors, queue exhaustion, cancellation, no-replace collision, abrupt process exit before publication; actual missing blocks before/during/after stimulus, bounded interval overflow, invalid selected frame, device/clock/channel evidence, journal failure/cancellation references"
+  },
+  "remaining": [
+    "C7 standalone sweep/auxiliary saved interval provenance; native file-backed session reports implemented",
+    "Physical input/output and sustained disk throughput",
+    "Native callback scheduling/deadline qualification; historical failed gates retained"
+  ]
+}

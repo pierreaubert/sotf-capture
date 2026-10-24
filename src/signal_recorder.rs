@@ -8,6 +8,7 @@ mod build;
 #[cfg(feature = "capture-io")]
 mod choose;
 mod consts;
+mod continuity;
 #[cfg(any(test, feature = "test-util"))]
 pub mod fake;
 #[cfg(test)]
@@ -22,6 +23,8 @@ mod playback;
 #[cfg(feature = "capture-io")]
 mod presentation;
 mod probe;
+#[cfg(all(feature = "test-util", feature = "capture-io"))]
+pub mod qualification;
 mod quality;
 mod record;
 mod recorder;
@@ -37,6 +40,10 @@ pub(crate) mod wake;
 mod write;
 
 pub use consts::*;
+pub use continuity::{
+    ChannelRoute as CaptureInputRoute, InputEvidence as CaptureInputEvidence,
+    MissingInterval as CaptureMissingInterval, Snapshot as CaptureContinuity,
+};
 #[cfg(any(test, feature = "test-util"))]
 pub use fake::{FakeAudioConfig, FakeAudioProfile, FakePlayback, FakeRecorder, VirtualWire};
 pub use generate::*;

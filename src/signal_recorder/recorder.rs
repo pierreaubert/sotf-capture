@@ -45,6 +45,15 @@ pub struct RecordedTake {
 /// Each successful `start` must be followed by exactly one `stop`; a
 /// failed `start` needs no matching `stop`.
 pub trait SweepRecorder {
+    /// Return retained input-clock diagnostics after the stream has stopped.
+    ///
+    /// Native backends preserve them until the next start attempt. Snapshots
+    /// must identify actual devices and physical channels; unknown positions
+    /// must remain explicit. Backends without this evidence return an empty list.
+    fn transport_evidence(&self) -> Vec<super::CaptureInputEvidence> {
+        Vec::new()
+    }
+
     /// Attach a live level meter fed from the capture path.
     ///
     /// The default ignores the meter (emulated backends may still fold
@@ -119,6 +128,189 @@ pub fn check_input_channels(channels: &[u16], hardware_channels: usize) -> Resul
     Ok(())
 }
 
+#[cfg(feature = "capture-io")]
+#[derive(Debug)]
+pub(super) struct InputRings<'a> {
+    pub producers: &'a mut [rtrb::Producer<f32>],
+    pub counts: &'a [Arc<AtomicUsize>],
+    pub channels: &'a [usize],
+    pub overruns: &'a AtomicUsize,
+    pub failed: &'a AtomicBool,
+    pub meter: Option<&'a super::level_meter::CaptureLevelMeter>,
+    pub continuity: &'a [Arc<super::continuity::Continuity>],
+}
+
+#[cfg(feature = "capture-io")]
+pub(super) fn capture_channels<T>(data: &[T], hardware_channels: usize, rings: &mut InputRings<'_>)
+where
+    T: cpal::SizedSample,
+    f32: cpal::FromSample<T>,
+{
+    if hardware_channels == 0
+        || !data.len().is_multiple_of(hardware_channels)
+        || data.chunks_exact(hardware_channels).any(|frame| {
+            rings.channels.iter().any(|channel| {
+                !<f32 as cpal::FromSample<T>>::from_sample_(frame[*channel]).is_finite()
+            })
+        })
+    {
+        rings.failed.store(true, Ordering::Release);
+        for clock in rings.continuity {
+            clock.begin(data.len().checked_div(hardware_channels).unwrap_or(0));
+            clock.invalidate();
+        }
+        return;
+    }
+    let frames = data.len() / hardware_channels;
+    if let Some(meter) = rings.meter {
+        for &channel in rings.channels {
+            meter.record_converted(data, hardware_channels, channel);
+        }
+    }
+    for (index, &channel) in rings.channels.iter().enumerate() {
+        let start = rings.continuity[index].begin(frames);
+        let written = super::write::write_selected_channel_to_ring(
+            &mut rings.producers[index],
+            data,
+            hardware_channels,
+            channel,
+        );
+        rings.counts[index].fetch_add(written, Ordering::Relaxed);
+        if written < frames {
+            rings.continuity[index].miss(start + written, frames - written);
+            rings
+                .overruns
+                .fetch_add(frames - written, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "capture-io"))]
+mod callback_tests {
+    use super::*;
+
+    #[test]
+    fn native_recorder_retains_channel_provenance_and_clears_it_on_next_attempt() {
+        let mut recorder = CpalRecorder::new("loss test");
+        recorder.input_device_id = "synthetic-native-id".into();
+        recorder.input_selector = "synthetic device".into();
+        recorder.input_channels = vec![3, 1];
+        recorder.sample_rate = 48000;
+        recorder.continuity = (0..2)
+            .map(|_| Arc::new(super::super::continuity::Continuity::default()))
+            .collect();
+        let (first, mut first_read) = rtrb::RingBuffer::new(1);
+        let (second, mut second_read) = rtrb::RingBuffer::new(1);
+        let mut producers = [first, second];
+        let counts = [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))];
+        capture_channels(
+            &[0.25_f32; 12],
+            4,
+            &mut InputRings {
+                producers: &mut producers,
+                counts: &counts,
+                channels: &[3, 1],
+                overruns: &recorder.overruns,
+                failed: &recorder.failed,
+                meter: None,
+                continuity: &recorder.continuity,
+            },
+        );
+        assert_eq!(first_read.pop().unwrap(), 0.25);
+        assert_eq!(second_read.pop().unwrap(), 0.25);
+        assert!(
+            recorder
+                .check_health()
+                .unwrap_err()
+                .contains("lost 4 input samples")
+        );
+        let evidence = recorder.transport_evidence();
+        assert_eq!(evidence.len(), 2);
+        for (index, report) in evidence.iter().enumerate() {
+            assert_eq!(report.device_id, "synthetic-native-id");
+            assert_eq!(report.sample_rate_hz, 48000);
+            assert_eq!(report.clock_index, 0);
+            assert_eq!(report.routes[0].hardware_channel, [3, 1][index]);
+            assert_eq!(
+                report.continuity.intervals,
+                [super::super::CaptureMissingInterval {
+                    start_frame: 1,
+                    end_frame: 3
+                }]
+            );
+        }
+        assert!(recorder.start(None, &[], 48000, 0.1).is_err());
+        assert_eq!(recorder.transport_evidence().len(), 0);
+    }
+
+    #[test]
+    fn selected_channels_meter_and_sample_loss_survive_callback_extraction() {
+        let (first, mut first_read) = rtrb::RingBuffer::new(1);
+        let (second, mut second_read) = rtrb::RingBuffer::new(1);
+        let mut producers = [first, second];
+        let counts = [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))];
+        let overruns = AtomicUsize::new(0);
+        let failed = AtomicBool::new(false);
+        let meter = super::super::level_meter::CaptureLevelMeter::new();
+        let continuity: Vec<_> = (0..2)
+            .map(|_| Arc::new(super::super::continuity::Continuity::default()))
+            .collect();
+        capture_channels(
+            &[0.1_f32, 0.2, 0.3, -0.4, -0.5, -0.6],
+            3,
+            &mut InputRings {
+                producers: &mut producers,
+                counts: &counts,
+                channels: &[2, 0],
+                overruns: &overruns,
+                failed: &failed,
+                meter: Some(&meter),
+                continuity: &continuity,
+            },
+        );
+        assert_eq!(first_read.pop().unwrap(), 0.3);
+        assert_eq!(second_read.pop().unwrap(), 0.1);
+        assert!(
+            counts
+                .iter()
+                .all(|count| count.load(Ordering::Relaxed) == 1)
+        );
+        assert_eq!(overruns.load(Ordering::Relaxed), 2);
+        assert!(!failed.load(Ordering::Relaxed));
+        assert!((meter.snapshot().peak_hold_dbfs.unwrap() - 20.0 * 0.6_f32.log10()).abs() < 1e-4);
+    }
+
+    #[test]
+    fn invalid_blocks_fail_before_changing_any_input_ring_or_progress() {
+        for (data, channels) in [(&[f32::NAN, 0.0][..], 2), (&[0.1][..], 2), (&[][..], 0)] {
+            let (producer, mut consumer) = rtrb::RingBuffer::new(8);
+            let mut producers = [producer];
+            let counts = [Arc::new(AtomicUsize::new(0))];
+            let failed = AtomicBool::new(false);
+            let overruns = AtomicUsize::new(0);
+            let continuity = [Arc::new(super::super::continuity::Continuity::default())];
+            capture_channels(
+                data,
+                channels,
+                &mut InputRings {
+                    producers: &mut producers,
+                    counts: &counts,
+                    channels: &[0],
+                    overruns: &overruns,
+                    failed: &failed,
+                    meter: None,
+                    continuity: &continuity,
+                },
+            );
+            assert!(failed.load(Ordering::Relaxed));
+            assert!(consumer.pop().is_err());
+            assert_eq!(counts[0].load(Ordering::Relaxed), 0);
+            assert_eq!(overruns.load(Ordering::Relaxed), 0);
+            assert!(continuity[0].snapshot().invalid_block_or_stream_error);
+        }
+    }
+}
+
 /// cpal-native [`SweepRecorder`] without emulation.
 ///
 /// Opens a cpal input stream at the requested rate when the device
@@ -134,6 +326,10 @@ pub struct CpalRecorder {
     failed: Arc<AtomicBool>,
     sample_rate: u32,
     level_meter: Option<Arc<super::level_meter::CaptureLevelMeter>>,
+    continuity: Vec<Arc<super::continuity::Continuity>>,
+    input_channels: Vec<u16>,
+    input_device_id: String,
+    input_selector: String,
 }
 
 #[cfg(feature = "capture-io")]
@@ -160,12 +356,40 @@ impl CpalRecorder {
             failed: Arc::new(AtomicBool::new(false)),
             sample_rate: 0,
             level_meter: None,
+            continuity: Vec::new(),
+            input_channels: Vec::new(),
+            input_device_id: String::new(),
+            input_selector: String::new(),
         }
     }
 }
 
 #[cfg(feature = "capture-io")]
 impl SweepRecorder for CpalRecorder {
+    fn transport_evidence(&self) -> Vec<super::CaptureInputEvidence> {
+        if self.stream.is_some() {
+            return Vec::new();
+        }
+        self.continuity
+            .iter()
+            .zip(&self.input_channels)
+            .enumerate()
+            .map(
+                |(index, (clock, &hardware_channel))| super::CaptureInputEvidence {
+                    clock_index: 0,
+                    device_selector: self.input_selector.clone(),
+                    device_id: self.input_device_id.clone(),
+                    sample_rate_hz: self.sample_rate,
+                    routes: vec![super::CaptureInputRoute {
+                        input_index: index,
+                        hardware_channel,
+                    }],
+                    continuity: clock.snapshot(),
+                },
+            )
+            .collect()
+    }
+
     fn set_level_meter(&mut self, meter: Arc<super::level_meter::CaptureLevelMeter>) {
         self.level_meter = Some(meter);
     }
@@ -186,13 +410,15 @@ impl SweepRecorder for CpalRecorder {
         expected_duration_secs: f64,
     ) -> Result<NegotiatedInput, String> {
         use super::misc::{actionable_capture_error, capture_capacity};
-        use super::write::write_selected_channel_to_ring;
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
         let tag = self.log_tag.as_str();
         if self.stream.is_some() {
             return Err("capture is already active".into());
         }
+        self.continuity.clear();
+        self.input_channels.clear();
+        self.input_device_id.clear();
         if channels.is_empty() {
             return Err(format!("[{tag}] No input channels requested"));
         }
@@ -278,6 +504,22 @@ impl SweepRecorder for CpalRecorder {
             counts.push(Arc::new(AtomicUsize::new(0)));
         }
         let counts_callback: Vec<Arc<AtomicUsize>> = counts.iter().map(Arc::clone).collect();
+        let continuity: Vec<_> = channels
+            .iter()
+            .map(|_| Arc::new(super::continuity::Continuity::default()))
+            .collect();
+        let callback_continuity = continuity.clone();
+        let error_continuity = continuity.clone();
+        self.input_device_id = input_device
+            .id()
+            .map_err(|e| format!("cannot identify input device: {e}"))?
+            .to_string();
+        device
+            .unwrap_or("default input")
+            .clone_into(&mut self.input_selector);
+        self.input_channels = channels.to_vec();
+        self.continuity = continuity;
+        self.sample_rate = input_sample_rate;
         let overruns = Arc::new(AtomicUsize::new(0));
         let overruns_callback = Arc::clone(&overruns);
         let channels_vec: Vec<usize> = channels.iter().map(|&c| c as usize).collect();
@@ -291,43 +533,26 @@ impl SweepRecorder for CpalRecorder {
                 input_device.build_input_stream(
                     &input_config,
                     move |data: &[$sample_ty], _: &cpal::InputCallbackInfo| {
-                        if !data.len().is_multiple_of(hardware_input_channels)
-                            || data.chunks_exact(hardware_input_channels).any(|frame| {
-                                channels_vec.iter().any(|channel| {
-                                    !<f32 as cpal::FromSample<$sample_ty>>::from_sample_(
-                                        frame[*channel],
-                                    )
-                                    .is_finite()
-                                })
-                            })
-                        {
-                            callback_failed.store(true, Ordering::Release);
-                            return;
-                        }
-                        let frames = data.len() / hardware_input_channels;
-                        if let Some(meter) = &level_meter {
-                            // Lock-free atomic stores only; the meter reads
-                            // samples this callback already walks for the rings.
-                            for &ch_idx in &channels_vec {
-                                meter.record_converted(data, hardware_input_channels, ch_idx);
-                            }
-                        }
-                        for (mic_i, &ch_idx) in channels_vec.iter().enumerate() {
-                            let written = write_selected_channel_to_ring(
-                                &mut producers[mic_i],
-                                data,
-                                hardware_input_channels,
-                                ch_idx,
-                            );
-                            counts_callback[mic_i].fetch_add(written, Ordering::Relaxed);
-                            if written < frames {
-                                // Count the actual dropped samples, not just the
-                                // number of callbacks that saw a shortfall.
-                                overruns_callback.fetch_add(frames - written, Ordering::Relaxed);
-                            }
+                        capture_channels(
+                            data,
+                            hardware_input_channels,
+                            &mut InputRings {
+                                producers: &mut producers,
+                                counts: &counts_callback,
+                                channels: &channels_vec,
+                                overruns: &overruns_callback,
+                                failed: &callback_failed,
+                                meter: level_meter.as_deref(),
+                                continuity: &callback_continuity,
+                            },
+                        );
+                    },
+                    move |_| {
+                        error_failed.store(true, Ordering::Release);
+                        for clock in &error_continuity {
+                            clock.invalidate();
                         }
                     },
-                    move |_| error_failed.store(true, Ordering::Release),
                     None,
                 )
             };

@@ -12,6 +12,9 @@ use crate::capture_session::{CaptureGeometry, CaptureSessionPlan, CaptureTimingR
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
+#[path = "loss_tests.rs"]
+mod loss_tests;
+
 #[derive(Deserialize)]
 struct Golden {
     sample_rate_hz: u32,
@@ -50,6 +53,8 @@ fn fixture() -> (Golden, RawCaptureManifest, Vec<f32>, Vec<f32>) {
     let session = plan.validate().unwrap();
     let stimulus = prepare_capture_stimulus(&session).unwrap();
     let manifest = RawCaptureManifest {
+        checkpoint: None,
+        transport_evidence: Vec::new(),
         localization_calibration: None,
         version: 1,
         plan: session.plan().clone(),
