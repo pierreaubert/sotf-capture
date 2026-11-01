@@ -89,7 +89,7 @@ pub struct ClockProcessedManifest {
 }
 
 pub(crate) fn artifact(root: &Path, name: &str) -> Result<std::path::PathBuf, String> {
-    if !autoeq::capture_handoff::portable_capture_filename(name) {
+    if !autoeq_core::capture_handoff::portable_capture_filename(name) {
         return Err("capture artifact paths must be portable relative filenames".into());
     }
     let mut components = Path::new(name).components();

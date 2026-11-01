@@ -315,9 +315,10 @@ mod tests {
         let artifacts =
             write_phase(&recorded, &stimulus, &plan, &flat, output.path(), 4, 20.0).unwrap();
         assert!(artifacts.coherence_file.is_some());
-        let curve =
-            autoeq::read::read_curve_from_csv(&output.path().join(&artifacts.response_file))
-                .unwrap();
+        let curve = autoeq_measurements::read::read_curve_from_csv(
+            &output.path().join(&artifacts.response_file),
+        )
+        .unwrap();
         let coherence = curve.coherence.expect("autoeq joined the sidecar");
         assert_eq!(coherence.len(), curve.freq.len());
         // A clean delayed copy coheres almost perfectly on every bin.

@@ -42,7 +42,9 @@ impl PresentationClock {
         failed: &AtomicBool,
     ) {
         let timestamp = info.timestamp();
-        let latency = timestamp.playback.duration_since(&timestamp.callback);
+        let latency = timestamp
+            .playback
+            .checked_duration_since(timestamp.callback);
         let deadline = completion_time(self.origin.elapsed(), latency, frames, rate)
             .and_then(|time| u64::try_from(time.as_nanos()).ok());
         if let Some(deadline) = deadline {

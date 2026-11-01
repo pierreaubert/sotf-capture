@@ -2,11 +2,11 @@
 
 use super::clock::io::ClockProcessedManifest;
 use super::record::RawCaptureStatus;
-use autoeq::capture_handoff::{
+use autoeq_core::capture_handoff::{
     CAPTURE_HANDOFF_FILENAME, CaptureArtifactIdentity, CaptureArtifactRole, CaptureCompletion,
     CaptureHandoff, CaptureTakeIdentity,
 };
-use autoeq::roomeq::{MeasurementSource, RoomConfig, SpeakerConfig};
+use roomeq_model::{MeasurementSource, RoomConfig, SpeakerConfig};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -17,7 +17,7 @@ fn file_identity(
     name: &str,
     role: CaptureArtifactRole,
 ) -> Result<CaptureArtifactIdentity, String> {
-    if !autoeq::capture_handoff::portable_capture_filename(name) {
+    if !autoeq_core::capture_handoff::portable_capture_filename(name) {
         return Err("capture handoff inventory needs portable local filenames".into());
     }
     let path = root.join(name);

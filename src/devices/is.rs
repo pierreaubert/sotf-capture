@@ -92,7 +92,7 @@ pub fn verify_working_sample_rate(
                     let cc = callback_count.clone();
                     let ts = total_samples.clone();
                     if let Ok(s) = device.build_output_stream(
-                        &config,
+                        config,
                         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                             cc.fetch_add(1, Ordering::Relaxed);
                             ts.fetch_add(data.len() as u64, Ordering::Relaxed);
@@ -108,7 +108,7 @@ pub fn verify_working_sample_rate(
                     let cc = callback_count.clone();
                     let ts = total_samples.clone();
                     if let Ok(s) = device.build_output_stream(
-                        &config,
+                        config,
                         move |data: &mut [i32], _: &cpal::OutputCallbackInfo| {
                             cc.fetch_add(1, Ordering::Relaxed);
                             ts.fetch_add(data.len() as u64, Ordering::Relaxed);
@@ -124,7 +124,7 @@ pub fn verify_working_sample_rate(
                     let cc = callback_count.clone();
                     let ts = total_samples.clone();
                     if let Ok(s) = device.build_output_stream(
-                        &config,
+                        config,
                         move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
                             cc.fetch_add(1, Ordering::Relaxed);
                             ts.fetch_add(data.len() as u64, Ordering::Relaxed);
@@ -140,7 +140,7 @@ pub fn verify_working_sample_rate(
                     let cc = callback_count.clone();
                     let ts = total_samples.clone();
                     if let Ok(s) = device.build_output_stream(
-                        &config,
+                        config,
                         move |data: &mut [u32], _: &cpal::OutputCallbackInfo| {
                             cc.fetch_add(1, Ordering::Relaxed);
                             ts.fetch_add(data.len() as u64, Ordering::Relaxed);
@@ -156,7 +156,7 @@ pub fn verify_working_sample_rate(
                     let cc = callback_count.clone();
                     let ts = total_samples.clone();
                     if let Ok(s) = device.build_output_stream(
-                        &config,
+                        config,
                         move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
                             cc.fetch_add(1, Ordering::Relaxed);
                             ts.fetch_add(data.len() as u64, Ordering::Relaxed);

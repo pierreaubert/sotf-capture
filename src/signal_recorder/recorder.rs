@@ -531,7 +531,7 @@ impl SweepRecorder for CpalRecorder {
         macro_rules! build_typed {
             ($sample_ty:ty) => {
                 input_device.build_input_stream(
-                    &input_config,
+                    input_config,
                     move |data: &[$sample_ty], _: &cpal::InputCallbackInfo| {
                         capture_channels(
                             data,

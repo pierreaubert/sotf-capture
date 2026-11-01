@@ -455,7 +455,7 @@ fn file_backed_crash_before_publication_leaves_a_nonterminal_journal() {
     assert!(super::super::clock::io::process_capture_session(&crashed, &refused).is_err());
     assert!(
         !refused
-            .join(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME)
+            .join(autoeq_core::capture_handoff::CAPTURE_HANDOFF_FILENAME)
             .exists()
     );
     let retry = root.path().join("retry");
@@ -560,8 +560,9 @@ fn bench_and_loopback_evidence_survive_source_mutation_and_bundle_moves() {
     std::fs::rename(&raw, &moved).unwrap();
     let output = root.path().join("processed");
     let report = super::super::clock::io::process_capture_session(&moved, &output).unwrap();
-    let handoff: autoeq::capture_handoff::CaptureHandoff = serde_json::from_slice(
-        &std::fs::read(output.join(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME)).unwrap(),
+    let handoff: autoeq_core::capture_handoff::CaptureHandoff = serde_json::from_slice(
+        &std::fs::read(output.join(autoeq_core::capture_handoff::CAPTURE_HANDOFF_FILENAME))
+            .unwrap(),
     )
     .unwrap();
     for file in std::iter::once(snapshot.file.as_str()).chain(
@@ -801,14 +802,15 @@ fn cancelled_repeated_parent_processes_an_explicit_full_matrix_and_keeps_lineage
         parent_bytes
     );
 
-    let handoff: autoeq::capture_handoff::CaptureHandoff = serde_json::from_slice(
-        &std::fs::read(output.join(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME)).unwrap(),
+    let handoff: autoeq_core::capture_handoff::CaptureHandoff = serde_json::from_slice(
+        &std::fs::read(output.join(autoeq_core::capture_handoff::CAPTURE_HANDOFF_FILENAME))
+            .unwrap(),
     )
     .unwrap();
     handoff.validate().unwrap();
     assert_eq!(
         handoff.completion,
-        autoeq::capture_handoff::CaptureCompletion::Cancelled
+        autoeq_core::capture_handoff::CaptureCompletion::Cancelled
     );
     assert_eq!(handoff.repeat_count, 2);
     assert_eq!(
@@ -833,11 +835,11 @@ fn cancelled_repeated_parent_processes_an_explicit_full_matrix_and_keeps_lineage
 
     // Exercise the strict public consumer with a cancelled but explicitly
     // selected full source/microphone matrix.
-    autoeq::roomeq::load_config(&output.join("recordings.json"), None).unwrap();
+    roomeq_workflow::load_config(&output.join("recordings.json"), None).unwrap();
     let mut changed_parent = parent_bytes;
     changed_parent[0] ^= 1;
     std::fs::write(output.join("capture-raw.json"), changed_parent).unwrap();
-    assert!(autoeq::roomeq::load_config(&output.join("recordings.json"), None).is_err());
+    assert!(roomeq_workflow::load_config(&output.join("recordings.json"), None).is_err());
 }
 
 fn aux_session() -> (

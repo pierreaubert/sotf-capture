@@ -5,14 +5,18 @@
 use super::clock::CaptureClockBasis;
 use super::clock::io::ClockProcessedManifest;
 use super::{CalibrationOrientation, CaptureGeometry};
-use autoeq::capture_provenance::{CaptureCorrection, CaptureProvenance, CaptureTakeProvenance};
-use autoeq::read::{EstimatedPosition, EstimatedRangeCell, MeasurementMultiple, MeasurementRef};
-use autoeq::roomeq::{
+use autoeq_core::capture_provenance::{
+    CaptureCorrection, CaptureProvenance, CaptureTakeProvenance,
+};
+use autoeq_core::{MeasurementProvenance, ProvenanceCaptureKind};
+use autoeq_measurements::read::{
+    EstimatedPosition, EstimatedRangeCell, MeasurementMultiple, MeasurementRef,
+};
+use roomeq_model::{
     BassAnchorChannelResultLegacy, BassAnchorResultsLegacy, MeasuredIrSource, MeasurementSource,
     ProbeChannelResultLegacy, ProbeResultsLegacy, RecordingConfiguration, RoomConfig,
     RoomDimensions, SpeakerConfig, validate_measured_ir_map,
 };
-use autoeq::{MeasurementProvenance, ProvenanceCaptureKind};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -143,7 +147,7 @@ pub fn recording_configuration(report: &ClockProcessedManifest) -> Result<RoomCo
                         source.id, mic.id
                     )
                 })?;
-            if !autoeq::capture_handoff::portable_capture_filename(file) {
+            if !autoeq_core::capture_handoff::portable_capture_filename(file) {
                 return Err("measurement artifact must be a local filename".into());
             }
             measurements.push(MeasurementRef::Named {
@@ -169,9 +173,11 @@ pub fn recording_configuration(report: &ClockProcessedManifest) -> Result<RoomCo
                     .find(|reflection| reflection.source_id == source.id)
                     .cloned(),
                 geometry: match report.plan.geometry {
-                    CaptureGeometry::Spread => autoeq::capture_provenance::CaptureGeometry::Spread,
+                    CaptureGeometry::Spread => {
+                        autoeq_core::capture_provenance::CaptureGeometry::Spread
+                    }
                     CaptureGeometry::Compact => {
-                        autoeq::capture_provenance::CaptureGeometry::Compact
+                        autoeq_core::capture_provenance::CaptureGeometry::Compact
                     }
                 },
                 takes,
@@ -192,7 +198,9 @@ pub fn recording_configuration(report: &ClockProcessedManifest) -> Result<RoomCo
         speakers,
         measured_impulse_responses: measured_impulse_responses(report)?,
         recording_config: Some(RecordingConfiguration {
-            capture_handoff_file: Some(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME.into()),
+            capture_handoff_file: Some(
+                autoeq_core::capture_handoff::CAPTURE_HANDOFF_FILENAME.into(),
+            ),
             recording_sample_rate: Some(report.plan.sample_rate_hz),
             recording_channels: Some(report.plan.microphones.len()),
             signal_type: Some("Sweep".into()),
@@ -363,7 +371,7 @@ fn measured_impulse_responses(
         else {
             continue;
         };
-        if !autoeq::capture_handoff::portable_capture_filename(&csv) {
+        if !autoeq_core::capture_handoff::portable_capture_filename(&csv) {
             return Err("measured IR artifact must be a local filename".into());
         }
         declarations.insert(
@@ -681,7 +689,7 @@ mod tests {
         use super::super::localization::{
             LocalizationMode, LocalizationReport, RangeCell, SourcePosition, SourceRanges,
         };
-        use autoeq::roomeq::{MeasurementSource, RoomConfig, SpeakerConfig};
+        use roomeq_model::{MeasurementSource, RoomConfig, SpeakerConfig};
         let mut report = fabricated_report(None);
         let cell = |microphone_id: &str| RangeCell {
             microphone_id: microphone_id.into(),

@@ -288,14 +288,15 @@ fn saved_golden_session_round_trips_clock_provenance_and_magnitude_fallback() {
         "{:?}",
         report.pending_processing
     );
-    let handoff: autoeq::capture_handoff::CaptureHandoff = serde_json::from_slice(
-        &std::fs::read(output.join(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME)).unwrap(),
+    let handoff: autoeq_core::capture_handoff::CaptureHandoff = serde_json::from_slice(
+        &std::fs::read(output.join(autoeq_core::capture_handoff::CAPTURE_HANDOFF_FILENAME))
+            .unwrap(),
     )
     .unwrap();
     handoff.validate().unwrap();
     assert_eq!(
         handoff.completion,
-        autoeq::capture_handoff::CaptureCompletion::Complete
+        autoeq_core::capture_handoff::CaptureCompletion::Complete
     );
     assert_eq!(handoff.takes.len(), 2);
     for (index, take) in handoff.takes.iter().enumerate() {
@@ -327,13 +328,13 @@ fn saved_golden_session_round_trips_clock_provenance_and_magnitude_fallback() {
         assert_eq!(decoded.as_slice(), expected_bytes);
     }
     // Exercise the actual producer-to-consumer handoff.
-    autoeq::roomeq::load_config(&output.join("recordings.json"), None).unwrap();
-    let configuration: autoeq::roomeq::RoomConfig =
+    roomeq_workflow::load_config(&output.join("recordings.json"), None).unwrap();
+    let configuration: roomeq_model::RoomConfig =
         serde_json::from_slice(&std::fs::read(output.join("recordings.json")).unwrap()).unwrap();
-    let autoeq::roomeq::SpeakerConfig::Single(source) = &configuration.speakers["left"] else {
+    let roomeq_model::SpeakerConfig::Single(source) = &configuration.speakers["left"] else {
         panic!("expected captured source");
     };
-    let autoeq::roomeq::MeasurementSource::Multiple(multiple) = source else {
+    let roomeq_model::MeasurementSource::Multiple(multiple) = source else {
         panic!("expected ordered microphone measurements");
     };
     let capture = multiple.provenance.capture.as_ref().unwrap();
@@ -356,13 +357,13 @@ fn saved_golden_session_round_trips_clock_provenance_and_magnitude_fallback() {
     );
     assert_eq!(
         capture.takes[1].correction_applied,
-        autoeq::capture_provenance::CaptureCorrection::None
+        autoeq_core::capture_provenance::CaptureCorrection::None
     );
     assert!(capture.takes[1].residual_uncertainty_us.is_none());
     assert!(source.provenance().timing_reference_id.is_none());
     assert_eq!(
         source.provenance().capture_kind,
-        autoeq::ProvenanceCaptureKind::SpatialMagnitude
+        autoeq_core::ProvenanceCaptureKind::SpatialMagnitude
     );
     let mut incomplete = report.clone();
     incomplete.takes.pop();
@@ -489,7 +490,7 @@ fn auxiliary_passes_flow_into_projection_and_handoff() {
     assert!(output.join("bass-anchor.wav").is_file());
     assert!(report.probe_pass.is_some());
     assert!(report.bass_anchor_pass.is_some());
-    let configuration: autoeq::roomeq::RoomConfig =
+    let configuration: roomeq_model::RoomConfig =
         serde_json::from_slice(&std::fs::read(output.join("recordings.json")).unwrap()).unwrap();
     let recording = configuration.recording_config.as_ref().unwrap();
     assert_eq!(
@@ -502,8 +503,9 @@ fn auxiliary_passes_flow_into_projection_and_handoff() {
         12.0
     );
     assert_eq!(recording.bass_probe_freq_hz, Some(30.0));
-    let handoff: autoeq::capture_handoff::CaptureHandoff = serde_json::from_slice(
-        &std::fs::read(output.join(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME)).unwrap(),
+    let handoff: autoeq_core::capture_handoff::CaptureHandoff = serde_json::from_slice(
+        &std::fs::read(output.join(autoeq_core::capture_handoff::CAPTURE_HANDOFF_FILENAME))
+            .unwrap(),
     )
     .unwrap();
     handoff.validate().unwrap();
@@ -513,7 +515,7 @@ fn auxiliary_passes_flow_into_projection_and_handoff() {
             "handoff inventories {wav}"
         );
     }
-    autoeq::roomeq::load_config(&output.join("recordings.json"), None).unwrap();
+    roomeq_workflow::load_config(&output.join("recordings.json"), None).unwrap();
 }
 
 fn golden_sample_rate(manifest: &crate::capture_session::record::RawCaptureManifest) -> u32 {
@@ -646,8 +648,9 @@ fn ctc_assembly_crops_raw_takes_into_stereo_ears_loopback_and_reference() {
         recovered.push(lag.lag_samples as f64);
     }
     assert!((recovered[1] - recovered[0] - 24.0).abs() < 2.0);
-    let handoff: autoeq::capture_handoff::CaptureHandoff = serde_json::from_slice(
-        &std::fs::read(output.join(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME)).unwrap(),
+    let handoff: autoeq_core::capture_handoff::CaptureHandoff = serde_json::from_slice(
+        &std::fs::read(output.join(autoeq_core::capture_handoff::CAPTURE_HANDOFF_FILENAME))
+            .unwrap(),
     )
     .unwrap();
     handoff.validate().unwrap();
@@ -674,7 +677,7 @@ fn ctc_assembly_crops_raw_takes_into_stereo_ears_loopback_and_reference() {
     );
     assert!(
         !rejected
-            .join(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME)
+            .join(autoeq_core::capture_handoff::CAPTURE_HANDOFF_FILENAME)
             .exists()
     );
 
@@ -806,12 +809,12 @@ fn canonical_phase_requires_complete_quality_and_retains_frequency_gate() {
         });
     }
     let config = crate::capture_session::manifest::recording_configuration(&report).unwrap();
-    let autoeq::roomeq::SpeakerConfig::Single(source) = &config.speakers["left"] else {
+    let roomeq_model::SpeakerConfig::Single(source) = &config.speakers["left"] else {
         panic!()
     };
     assert_eq!(
         source.provenance().capture_kind,
-        autoeq::ProvenanceCaptureKind::StationaryIr
+        autoeq_core::ProvenanceCaptureKind::StationaryIr
     );
     let provenance = source.provenance();
     let capture = provenance.capture.unwrap();
@@ -822,13 +825,13 @@ fn canonical_phase_requires_complete_quality_and_retains_frequency_gate() {
     report.takes[1].analysis.as_mut().unwrap().common_reference = None;
     let magnitude_only =
         crate::capture_session::manifest::recording_configuration(&report).unwrap();
-    let autoeq::roomeq::SpeakerConfig::Single(source) = &magnitude_only.speakers["left"] else {
+    let roomeq_model::SpeakerConfig::Single(source) = &magnitude_only.speakers["left"] else {
         panic!("captured source");
     };
     let provenance = source.provenance();
     assert_eq!(
         provenance.capture_kind,
-        autoeq::ProvenanceCaptureKind::SpatialMagnitude
+        autoeq_core::ProvenanceCaptureKind::SpatialMagnitude
     );
     assert!(
         provenance
@@ -841,12 +844,12 @@ fn canonical_phase_requires_complete_quality_and_retains_frequency_gate() {
     );
     report.takes[1].analysis.as_mut().unwrap().frequency_snr[0].snr_db = None;
     let fallback = crate::capture_session::manifest::recording_configuration(&report).unwrap();
-    let autoeq::roomeq::SpeakerConfig::Single(source) = &fallback.speakers["left"] else {
+    let roomeq_model::SpeakerConfig::Single(source) = &fallback.speakers["left"] else {
         panic!()
     };
     assert_eq!(
         source.provenance().capture_kind,
-        autoeq::ProvenanceCaptureKind::SpatialMagnitude
+        autoeq_core::ProvenanceCaptureKind::SpatialMagnitude
     );
     assert!(
         !serde_json::to_string(&fallback)

@@ -197,7 +197,7 @@ where
 
     device
         .build_output_stream(
-            config,
+            *config,
             move |data: &mut [T], info| {
                 let first = cursor.load(Ordering::Relaxed);
                 if !data.len().is_multiple_of(playback.channels) {
@@ -298,7 +298,7 @@ where
     let callback_continuity = Arc::clone(&continuity);
     device
         .build_input_stream(
-            config,
+            *config,
             move |data: &[T], _: &cpal::InputCallbackInfo| {
                 capture_pairs(
                     data,

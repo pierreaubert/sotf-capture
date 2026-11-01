@@ -71,7 +71,7 @@ pub struct CaptureAnalysis {
     /// single-sweep capture, otherwise the number of takes that survived
     /// median/MAD outlier rejection during averaging. This is the truthful
     /// `num_sweeps` value callers should persist into
-    /// `autoeq::roomeq::RecordingConfiguration`.
+    /// `roomeq_model::RecordingConfiguration`.
     pub accepted_count: usize,
     /// Takes rejected as median/MAD outliers during repeat-sweep averaging
     /// (always 0 for single-sweep captures).

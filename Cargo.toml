@@ -12,7 +12,10 @@ keywords = ["audio", "dsp", "measurement"]
 categories = ["multimedia::audio"]
 
 [dependencies]
-autoeq = { version = ">=0.5.54", path = "../autoeq" }
+autoeq-core = { path = "../autoeq/crates/autoeq-core" }
+autoeq-measurements = { path = "../autoeq/crates/autoeq-measurements" }
+roomeq-model = { path = "../autoeq/crates/roomeq-model" }
+roomeq-workflow = { path = "../autoeq/crates/roomeq-workflow" }
 math-dsp = { version = "0.5", path = "../math-audio/crates/math-dsp" }
 # Private rubato 5.0.0 fork (exact variable-ratio sizing, prepared cutoff
 # tables), shared from math-audio so offline reference resampling matches the
@@ -34,7 +37,7 @@ math-rir = { version = "0.5", path = "../math-audio/crates/math-rir" }
 # must still configure AVAudioSession (category, mic permission) — see README.md §iOS.
 # Optional so tvOS (no cpal backend: mach2 refuses tvOS) builds DSP-only
 # with `--no-default-features`; see README.md §tvOS.
-cpal = { version = "0.17", optional = true }
+cpal = { version = "0.18.2", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # O_NOFOLLOW prevents imported session members from escaping through symlinks.
@@ -111,8 +114,3 @@ style = { level = "warn", priority = -1 }
 suspicious = { level = "warn", priority = -1 }
 # Transitive dependency versions are selected by upstream crates.
 multiple_crate_versions = "allow"
-
-[patch.crates-io]
-# Retained SOTF fix for the uninhabited Objective-C runtime static. Pin the
-# compatibility revision that preserves the upstream `block` package name.
-block = { git = "https://github.com/pierreaubert/sotf-3rdparties", rev = "5a4634af0916b5f53effa5ef6340efd90af32285" }

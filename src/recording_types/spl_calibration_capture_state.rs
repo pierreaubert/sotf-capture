@@ -1,6 +1,6 @@
 use super::spl_calibration_capture_status::SplCalibrationCaptureStatus;
 pub use crate::signal_recorder::SplCalibrationResult;
-pub use autoeq::roomeq::SplCalibration;
+pub use roomeq_model::SplCalibration;
 
 /// Shared business state for the `SplCalibration` step.
 ///

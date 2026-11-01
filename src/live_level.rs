@@ -240,14 +240,14 @@ fn build_stream<T>(
     received: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     failed: Arc<AtomicBool>,
-) -> Result<cpal::Stream, cpal::BuildStreamError>
+) -> Result<cpal::Stream, cpal::Error>
 where
     T: cpal::SizedSample,
     f32: cpal::FromSample<T>,
 {
     let channels = usize::from(config.channels);
     device.build_input_stream(
-        config,
+        *config,
         move |data: &[T], _| {
             enqueue_input(&mut producer, data, channels, channel, &received, &dropped);
         },

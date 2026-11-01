@@ -12,7 +12,7 @@ use std::{
     path::{Component, Path},
 };
 
-pub use autoeq::capture_provenance::{CaptureArrival, CaptureReflectionReport};
+pub use autoeq_core::capture_provenance::{CaptureArrival, CaptureReflectionReport};
 
 #[derive(Deserialize)]
 struct ImpulseArtifact {

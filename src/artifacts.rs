@@ -17,7 +17,7 @@ pub(crate) const MAX_AUDIO_BYTES: usize = 128 * 1024 * 1024;
 pub(crate) fn member_name(name: &Path) -> Result<&str, String> {
     let text = name.to_str().ok_or("artifact name must be UTF-8")?;
     let mut components = name.components();
-    if !autoeq::capture_handoff::portable_capture_filename(text)
+    if !autoeq_core::capture_handoff::portable_capture_filename(text)
         || !matches!(components.next(), Some(Component::Normal(_)))
         || components.next().is_some()
     {

@@ -260,7 +260,7 @@ where
     let data_continuity = Arc::clone(&continuity);
     device
         .build_input_stream::<T, _, _>(
-            config,
+            *config,
             move |data, _| {
                 capture_frames_tracked(
                     data,
@@ -302,7 +302,7 @@ where
     let rate = config.sample_rate;
     device
         .build_output_stream::<T, _, _>(
-            config,
+            *config,
             move |data, info| {
                 let first = cursor.load(Ordering::Relaxed);
                 playback_frames(

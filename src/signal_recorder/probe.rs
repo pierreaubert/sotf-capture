@@ -164,7 +164,7 @@ pub fn probe_channel_delays(
 /// from the requested `sample_rate` if the hardware doesn't support
 /// it). The file can then be loaded with `hound`, played back, or
 /// re-analyzed with the low-level helpers in
-/// `autoeq::roomeq::time_align` if the original detection was flagged
+/// `roomeq_analysis::time_align` if the original detection was flagged
 /// as low-confidence.
 ///
 /// The probe timing inside the recording follows the same layout as

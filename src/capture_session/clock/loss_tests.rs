@@ -65,17 +65,17 @@ fn selected_failed_or_cancelled_capture_retains_loss_in_a_moved_handoff() {
             },
         )
         .unwrap();
-        let handoff_file = autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME;
+        let handoff_file = autoeq_core::capture_handoff::CAPTURE_HANDOFF_FILENAME;
         let handoff_bytes = std::fs::read(output.join(handoff_file)).unwrap();
-        let handoff: autoeq::capture_handoff::CaptureHandoff =
+        let handoff: autoeq_core::capture_handoff::CaptureHandoff =
             serde_json::from_slice(&handoff_bytes).unwrap();
         handoff.validate().unwrap();
         assert_eq!(
             handoff.completion,
             if status == RawCaptureStatus::Failed {
-                autoeq::capture_handoff::CaptureCompletion::Failed
+                autoeq_core::capture_handoff::CaptureCompletion::Failed
             } else {
-                autoeq::capture_handoff::CaptureCompletion::Cancelled
+                autoeq_core::capture_handoff::CaptureCompletion::Cancelled
             }
         );
         let identity = handoff
@@ -85,7 +85,7 @@ fn selected_failed_or_cancelled_capture_retains_loss_in_a_moved_handoff() {
             .unwrap();
         assert_eq!(
             identity.role,
-            autoeq::capture_handoff::CaptureArtifactRole::SupportingEvidence
+            autoeq_core::capture_handoff::CaptureArtifactRole::SupportingEvidence
         );
         assert_eq!(identity.sha256, snapshot.sha256);
         assert_eq!(identity.bytes, u64::try_from(original.len()).unwrap());
@@ -98,7 +98,7 @@ fn selected_failed_or_cancelled_capture_retains_loss_in_a_moved_handoff() {
             std::fs::read(moved.join("capture-raw.json")).unwrap(),
             raw_bytes
         );
-        autoeq::roomeq::load_config(&moved.join("recordings.json"), None).unwrap();
+        roomeq_workflow::load_config(&moved.join("recordings.json"), None).unwrap();
         assert!(
             crate::capture_session::handoff::publish_capture_handoff(
                 &report,
@@ -110,7 +110,7 @@ fn selected_failed_or_cancelled_capture_retains_loss_in_a_moved_handoff() {
             .contains("parent acquisition status")
         );
         std::fs::write(moved.join(&snapshot.file), b"changed diagnostic").unwrap();
-        assert!(autoeq::roomeq::load_config(&moved.join("recordings.json"), None).is_err());
+        assert!(roomeq_workflow::load_config(&moved.join("recordings.json"), None).is_err());
         assert!(
             crate::capture_session::handoff::publish_capture_handoff(
                 &report, status, &raw_bytes, &moved
@@ -170,8 +170,9 @@ fn importing_legacy_journals_never_discovers_unreferenced_reports() {
     let output = root.path().join("processed");
     io::process_capture_session(root.path(), &output).unwrap();
     assert!(!output.join("capture-loss-unrelated.json").exists());
-    let handoff: autoeq::capture_handoff::CaptureHandoff = serde_json::from_slice(
-        &std::fs::read(output.join(autoeq::capture_handoff::CAPTURE_HANDOFF_FILENAME)).unwrap(),
+    let handoff: autoeq_core::capture_handoff::CaptureHandoff = serde_json::from_slice(
+        &std::fs::read(output.join(autoeq_core::capture_handoff::CAPTURE_HANDOFF_FILENAME))
+            .unwrap(),
     )
     .unwrap();
     assert!(

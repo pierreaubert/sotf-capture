@@ -15,7 +15,7 @@
 //! electrical-loopback clock fit maps all three onto the stimulus timeline;
 //! independent acoustic-peak alignment would erase physical ear delays.
 
-use autoeq::roomeq::{CtcHeadPositionConfig, CtcMeasurementConfig, CtcMeasurementFileConfig};
+use roomeq_model::{CtcHeadPositionConfig, CtcMeasurementConfig, CtcMeasurementFileConfig};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -106,7 +106,7 @@ pub fn assemble_ctc_takes(
     let mut files = Vec::new();
     let mut used_names = BTreeSet::new();
     let mut reserve = |name: String| -> Result<String, String> {
-        if !autoeq::capture_handoff::portable_capture_filename(&name)
+        if !autoeq_core::capture_handoff::portable_capture_filename(&name)
             || !used_names.insert(name.clone())
             || output.join(&name).exists()
         {

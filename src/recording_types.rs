@@ -4,7 +4,7 @@ pub use crate::signal_recorder::{
     BassAnchorChannelResult, BassAnchorResults, ProbeDelayChannelResult as DelayProbeChannelResult,
     ProbeDelayResults as DelayProbeResults, SplCalibrationResult,
 };
-pub use autoeq::roomeq::SplCalibration;
+pub use roomeq_model::SplCalibration;
 
 mod bass_anchor_capture_state;
 mod bass_anchor_capture_status;

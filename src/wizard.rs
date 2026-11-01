@@ -241,7 +241,7 @@ impl RecordingScreenModel {
     /// Returns an error if saved metadata contains inconsistent, invalid, or ambiguous source or microphone identities.
     pub fn restore_session_metadata(
         &mut self,
-        configuration: Option<&autoeq::roomeq::RecordingConfiguration>,
+        configuration: Option<&roomeq_model::RecordingConfiguration>,
         channel_names: &[String],
     ) -> Result<(), String> {
         let dimensions = configuration.and_then(|config| config.room_dimensions.as_ref());
@@ -281,7 +281,7 @@ impl RecordingScreenModel {
     /// Overlay only user-editable metadata, retaining capture and calibration evidence.
     pub fn apply_session_metadata(
         &self,
-        configuration: &mut autoeq::roomeq::RecordingConfiguration,
+        configuration: &mut roomeq_model::RecordingConfiguration,
         channel_names: &[String],
     ) {
         configuration.room_dimensions = self.room_dimensions_for_save();
@@ -706,12 +706,12 @@ impl RecordingScreenModel {
     /// `RecordingConfiguration`. Returns `None` when the user left any
     /// dimension blank (zero).
     #[must_use]
-    pub fn room_dimensions_for_save(&self) -> Option<autoeq::roomeq::RoomDimensions> {
+    pub fn room_dimensions_for_save(&self) -> Option<roomeq_model::RoomDimensions> {
         if !self.session_metadata_is_valid() || self.room_width_input == 0.0 {
             return None;
         }
         let unit = self.room_dimension_unit;
-        Some(autoeq::roomeq::RoomDimensions {
+        Some(roomeq_model::RoomDimensions {
             // `length` in RoomDimensions is the depth of the room
             // (front-to-back distance); the UI exposes it as "Depth".
             length: unit.to_meters(self.room_depth_input),
@@ -736,7 +736,7 @@ impl RecordingScreenModel {
         if map.is_empty() { None } else { Some(map) }
     }
 
-    /// Build the complete [`autoeq::roomeq::RecordingConfiguration`]
+    /// Build the complete [`roomeq_model::RecordingConfiguration`]
     /// persisted alongside the measurements in `recordings.json`.
     ///
     /// Single canonical builder shared by all frontends (fixes B4: the TUI
@@ -759,9 +759,9 @@ impl RecordingScreenModel {
     pub fn build_recording_configuration(
         &self,
         recording_directory: Option<&str>,
-    ) -> autoeq::roomeq::RecordingConfiguration {
+    ) -> roomeq_model::RecordingConfiguration {
         let is_sweep = self.signal_type == RecordingSignalType::Sweep;
-        autoeq::roomeq::RecordingConfiguration {
+        roomeq_model::RecordingConfiguration {
             // This capture flow does not emit a verified handoff sidecar.
             capture_handoff_file: None,
             playback_device_name: Some(self.playback_config.device_name.clone()),
@@ -813,11 +813,11 @@ impl RecordingScreenModel {
             // autoeq-local `ProbeResultsLegacy` mirror so the RoomConfig
             // JSON only depends on autoeq types.
             probe_results: self.probe_capture.results.as_ref().map(|r| {
-                autoeq::roomeq::ProbeResultsLegacy {
+                roomeq_model::ProbeResultsLegacy {
                     channels: r
                         .channels
                         .iter()
-                        .map(|c| autoeq::roomeq::ProbeChannelResultLegacy {
+                        .map(|c| roomeq_model::ProbeChannelResultLegacy {
                             channel_name: c.channel_name.clone(),
                             channel_index: c.channel_index,
                             arrival_ms: c.arrival_ms,
@@ -836,11 +836,11 @@ impl RecordingScreenModel {
                 .and_then(|p| std::path::Path::new(p).file_name())
                 .map(|f| f.to_string_lossy().to_string()),
             bass_anchor_results: self.bass_anchor_capture.results.as_ref().map(|r| {
-                autoeq::roomeq::BassAnchorResultsLegacy {
+                roomeq_model::BassAnchorResultsLegacy {
                     channels: r
                         .channels
                         .iter()
-                        .map(|c| autoeq::roomeq::BassAnchorChannelResultLegacy {
+                        .map(|c| roomeq_model::BassAnchorChannelResultLegacy {
                             channel_name: c.channel_name.clone(),
                             channel_index: c.channel_index,
                             bass_anchor_phase_deg: c.bass_anchor_phase_deg,
@@ -995,8 +995,8 @@ mod tests {
 
     #[test]
     fn imported_metadata_edits_preserve_capture_evidence() {
-        let mut configuration = autoeq::roomeq::RecordingConfiguration {
-            room_dimensions: Some(autoeq::roomeq::RoomDimensions {
+        let mut configuration = roomeq_model::RecordingConfiguration {
+            room_dimensions: Some(roomeq_model::RoomDimensions {
                 width: 3.048,
                 length: 6.096,
                 height: 2.4384,
@@ -1028,7 +1028,7 @@ mod tests {
         model.channel_speakers[0] = " New model ".into();
         model.signal_level_db = -50.0;
         model.apply_session_metadata(&mut configuration, &names);
-        let restored: autoeq::roomeq::RecordingConfiguration =
+        let restored: roomeq_model::RecordingConfiguration =
             serde_json::from_str(&serde_json::to_string(&configuration).unwrap()).unwrap();
         assert!((restored.room_dimensions.unwrap().width - 3.6576).abs() < 1e-10);
         assert_eq!(restored.setup_description.as_deref(), Some("Edited setup"));
@@ -1074,8 +1074,8 @@ mod tests {
             setup_description: "Existing".into(),
             ..Default::default()
         };
-        let configuration = autoeq::roomeq::RecordingConfiguration {
-            room_dimensions: Some(autoeq::roomeq::RoomDimensions {
+        let configuration = roomeq_model::RecordingConfiguration {
+            room_dimensions: Some(roomeq_model::RoomDimensions {
                 width: -1.0,
                 length: 5.0,
                 height: 2.5,

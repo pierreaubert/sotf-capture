@@ -19,7 +19,7 @@ check-tvos:
 alias lint := clippy
 
 clippy:
-    {{cargo}} clippy --workspace --all-targets --all-features --tests --no-deps
+    {{cargo}} clippy --workspace --all-targets --all-features --tests --no-deps -- -D warnings
 
 dev:
     {{cargo}} build --workspace
@@ -33,8 +33,10 @@ fmt:
     {{cargo}} fmt --all -- --check
 
 test:
-    {{cargo}} test --all --workspace --all-features --all-targets -- --check
+    {{cargo}} test --all --workspace --all-features --all-targets
 
 ntest:
-    {{cargo}} nextest run --workspace --all-features --all-targets
+    {{cargo}} nextest run --workspace --all-features --lib --bins --tests --examples
+    # Custom callback harness has no libtest discovery protocol; retain its smoke gate.
+    {{cargo}} test --all-features --bench capture_callbacks
     
