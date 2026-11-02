@@ -55,7 +55,7 @@ pub struct CaptureAnalysis {
     /// Estimated relative playback/capture clock drift, when the estimation
     /// itself succeeded *and* cleared the confidence bar (regardless of
     /// whether it was acted upon). Low-confidence correlator noise degrades
-    /// to `None` via [`usable_drift_estimate`]. For repeat captures this is
+    /// to `None` via `usable_drift_estimate`. For repeat captures this is
     /// the first ACCEPTED take's estimate (all takes share the same clock
     /// pair; per-take estimates are logged).
     pub drift: Option<ClockDriftEstimate>,

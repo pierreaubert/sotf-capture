@@ -10,9 +10,9 @@
 //! post-fit residual check (Q7).
 //!
 //! Arrival estimation reuses the envelope matched filter from the probe
-//! path: [`cross_correlate_envelope`](math_audio_dsp::analysis::cross_correlate_envelope)
+//! path: [`cross_correlate_envelope`]
 //! finds the strongest arrival and
-//! [`pick_direct_arrival_from_envelope`](crate::signal_recorder::pick_direct_arrival_from_envelope)
+//! `pick_direct_arrival_from_envelope`
 //! finds the first significant one. A cell whose strongest arrival is not
 //! its first is refused as `arrival_ambiguous` instead of reporting a
 //! reflection as a distance.

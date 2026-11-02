@@ -702,7 +702,7 @@ impl RecordingScreenModel {
             .resize(self.playback_config.channel_mappings.len(), String::new());
     }
 
-    /// Build the canonical-metric [`RoomDimensions`] to persist in
+    /// Build the canonical-metric [`RoomDimensions`](roomeq_model::RoomDimensions) to persist in
     /// `RecordingConfiguration`. Returns `None` when the user left any
     /// dimension blank (zero).
     #[must_use]

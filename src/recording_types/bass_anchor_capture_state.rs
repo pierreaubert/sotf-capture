@@ -3,7 +3,7 @@ pub use crate::signal_recorder::BassAnchorResults;
 
 /// Shared business state for the Recording wizard "`BassAnchor`" step.
 ///
-/// Lives alongside [`ProbeCaptureState`]. The raw results come from
+/// Lives alongside [`ProbeCaptureState`](super::ProbeCaptureState). The raw results come from
 /// the engine (`BassAnchorResults`) and flow at save time into
 /// `RecordingConfiguration.bass_anchor_results`.
 #[derive(Debug, Clone)]

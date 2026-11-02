@@ -1296,12 +1296,12 @@ pub(super) fn analyze_sweep_takes(
 /// whole set (no retry — REW abort semantics).
 ///
 /// After the capture passes the silence/clipping gates it goes through the
-/// per-take quality pipeline (see [`super::quality`]): a hard lag-lock gate,
+/// per-take quality pipeline (see `super::quality`): a hard lag-lock gate,
 /// clock-drift estimation with optional correction, and a quality report —
 /// all returned in [`CaptureAnalysis`].
 ///
-/// Before the take loop, [`super::wake::wake_audio_chain`] probes the chain
-/// awake (bounded by [`super::wake::WAKE_BUDGET_SECS`]).
+/// Before the take loop, `super::wake::wake_audio_chain` probes the chain
+/// awake (bounded by `super::wake::WAKE_BUDGET_SECS`).
 ///
 /// `cancel` is a cooperative cancellation flag (see [`CancelFlag`]): when
 /// set, the capture stops the streams and returns
@@ -1503,7 +1503,7 @@ pub fn record_and_analyze_with(
 /// emulated [`super::recorder::SweepRecorder`] for hardware-free tests.
 /// Returns one [`CaptureAnalysis`] per input channel (same order as `input_channels`):
 /// the math-dsp analysis plus a per-mic quality report (lag-confidence gate,
-/// clock-drift estimate/correction, capture diagnostics — see [`super::quality`]).
+/// clock-drift estimate/correction, capture diagnostics — see `super::quality`).
 /// Each channel's WAV and CSV are written to `recorded_wav_paths` / `csv_paths`.
 ///
 /// `num_sweeps` selects the repeat-sweep path (Task 8): each take is one
@@ -1516,9 +1516,9 @@ pub fn record_and_analyze_with(
 ///
 /// `mic_calibrations` must be the same length as `input_channels` (use `None` for uncalibrated).
 ///
-/// Before the take loop, [`super::wake::wake_audio_chain`] probes the chain
+/// Before the take loop, `super::wake::wake_audio_chain` probes the chain
 /// awake on the first input channel (bounded by
-/// [`super::wake::WAKE_BUDGET_SECS`]).
+/// `super::wake::WAKE_BUDGET_SECS`).
 ///
 /// `cancel` is a cooperative cancellation flag (see [`CancelFlag`]): when
 /// set, the capture stops the streams and returns

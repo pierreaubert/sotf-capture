@@ -1,6 +1,6 @@
 /// Status of the `BassAnchor` capture (Recording wizard Step 4).
 ///
-/// Mirrors [`ProbeCaptureStatus`] — wall-clock progress via
+/// Mirrors [`ProbeCaptureStatus`](super::ProbeCaptureStatus) — wall-clock progress via
 /// `started_at_ms`, `Failed(String)` for error reporting. Used by
 /// the GD-1e `BassAnchor` wizard step (GD-Opt v2 plan §2.6,
 /// `docs/gd_opt_v2_plan.md` in the autoeq repo).

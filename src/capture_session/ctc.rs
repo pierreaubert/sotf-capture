@@ -42,7 +42,7 @@ pub struct CtcAssembly {
 /// One head position's fragment, as written by [`assemble_ctc_takes`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CtcFragment {
-    /// Fragment schema version (always [`CTC_FRAGMENT_VERSION`]).
+    /// Fragment schema version (always `CTC_FRAGMENT_VERSION`).
     pub version: u32,
     /// Measurements block for this head position only.
     pub measurements: CtcMeasurementConfig,
