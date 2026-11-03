@@ -3,7 +3,7 @@
 Run the hardware-free callback matrix in release mode:
 
 ```sh
-cargo bench --locked --offline --features test-util --bench capture_callbacks -- --iterations 4096 --rate 48000 > callbacks.jsonl
+cargo bench --features test-util --bench capture_callbacks -- --iterations 4096 --rate 48000 > callbacks.jsonl
 ```
 
 The benchmark exercises the production sweep input core with its level meter,
@@ -45,13 +45,13 @@ option instead of substituting another clock. Reports without this option emit
 null CPU fields. For example:
 
 ```sh
-cargo bench --locked --offline --features test-util --bench capture_callbacks -- --iterations 4096 --rate 48000 --max-deadline-fraction 1 --cpu-clock thread
+cargo bench --features test-util --bench capture_callbacks -- --iterations 4096 --rate 48000 --max-deadline-fraction 1 --cpu-clock thread
 ```
 
 For memory measurement, first build the executable:
 
 ```sh
-cargo bench --locked --offline --features test-util --bench capture_callbacks --no-run
+cargo bench --features test-util --bench capture_callbacks --no-run
 ```
 
 Cargo prints the executable path. Invoke that executable directly with
@@ -150,7 +150,7 @@ control step per case as a smoke check. Debug runs do not emit performance data.
 The separate blocking-logger watchdog runs with:
 
 ```sh
-cargo test --locked --offline --features test-util --test callback_no_log
+cargo test --features test-util --test callback_no_log
 ```
 
 It enables Trace logging in an isolated child, verifies a deliberate log call

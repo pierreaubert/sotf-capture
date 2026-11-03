@@ -16,7 +16,7 @@ autoeq-core = { path = "../autoeq/crates/autoeq-core" }
 autoeq-measurements = { path = "../autoeq/crates/autoeq-measurements" }
 roomeq-model = { path = "../autoeq/crates/roomeq-model" }
 roomeq-workflow = { path = "../autoeq/crates/roomeq-workflow" }
-math-dsp = { version = "0.5", path = "../math-audio/crates/math-dsp" }
+math-dsp = { version = "0.5", git = "https://github.com/pierreaubert/math-audio" }
 # Private rubato 5.0.0 fork (exact variable-ratio sizing, prepared cutoff
 # tables), shared from math-audio so offline reference resampling matches the
 # engine's resampler parameters. A sibling math-audio checkout is required.
@@ -32,7 +32,7 @@ rustfft = "6.4"
 rtrb = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2.0.17"
-math-rir = { version = "0.5", path = "../math-audio/crates/math-rir" }
+math-rir = { version = "0.5", git = "https://github.com/pierreaubert/math-audio" }
 # Cross-platform audio I/O (CoreAudio/RemoteIO backend on iOS). The iOS app
 # must still configure AVAudioSession (category, mic permission) — see README.md §iOS.
 # Optional so tvOS (no cpal backend: mach2 refuses tvOS) builds DSP-only
