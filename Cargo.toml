@@ -39,6 +39,9 @@ math-rir = { version = "0.5", git = "https://github.com/pierreaubert/math-audio"
 # with `--no-default-features`; see README.md §tvOS.
 cpal = { version = "0.18.2", optional = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [target.'cfg(unix)'.dependencies]
 # O_NOFOLLOW prevents imported session members from escaping through symlinks.
 libc = "0.2"

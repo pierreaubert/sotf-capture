@@ -81,9 +81,32 @@ fn rename_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn rename_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
-    // Windows directory rename rejects an existing destination, including an
-    // empty directory. File replacement semantics do not apply to directories.
-    std::fs::rename(source, destination)
+    // std::fs::rename replaces an existing empty destination directory on
+    // Windows. MoveFileExW without MOVEFILE_REPLACE_EXISTING fails atomically
+    // when the destination already exists, matching NOREPLACE semantics.
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    let to_wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>()
+    };
+    let source_wide = to_wide(source);
+    let destination_wide = to_wide(destination);
+    // SAFETY: both pointers reference NUL-terminated wide strings that outlive the call.
+    let result = unsafe {
+        MoveFileExW(
+            source_wide.as_ptr(),
+            destination_wide.as_ptr(),
+            0,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(not(any(

@@ -42,8 +42,7 @@ pub fn get_host_for_device(device_identifier: Option<&str>) -> cpal::Host {
             if is_asio_device(id) {
                 let asio_name = strip_asio_prefix(id);
                 log::info!(
-                    "[AUDIO] ASIO device requested: '{}', initializing ASIO host",
-                    asio_name
+                    "[AUDIO] ASIO device requested: '{asio_name}', initializing ASIO host"
                 );
 
                 match cpal::host_from_id(cpal::HostId::Asio) {
@@ -53,8 +52,7 @@ pub fn get_host_for_device(device_identifier: Option<&str>) -> cpal::Host {
                     }
                     Err(e) => {
                         log::error!(
-                            "[AUDIO] Failed to initialize ASIO host: {}. Falling back to default host.",
-                            e
+                            "[AUDIO] Failed to initialize ASIO host: {e}. Falling back to default host."
                         );
                     }
                 }

@@ -22,10 +22,6 @@ pub fn strip_asio_prefix(identifier: &str) -> &str {
 /// the distinguishing device name.
 #[cfg(target_os = "windows")]
 pub(super) fn strip_duplicate_prefixes_windows(devices: Vec<AudioDevice>) -> Vec<AudioDevice> {
-    if devices.is_empty() {
-        return devices;
-    }
-
     fn extract_prefix(name: &str) -> Option<&str> {
         let paren_pos = name.find('(')?;
         let prefix = name[..paren_pos].trim();
@@ -42,6 +38,10 @@ pub(super) fn strip_duplicate_prefixes_windows(devices: Vec<AudioDevice>) -> Vec
             return None;
         }
         Some(name[start..end].trim())
+    }
+
+    if devices.is_empty() {
+        return devices;
     }
 
     // Count how many devices share each prefix (case-insensitive)

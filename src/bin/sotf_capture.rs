@@ -801,9 +801,11 @@ fn plan_validate(plan_path: &std::path::Path) -> Result<(), String> {
     let mut failures = Vec::new();
     for mic in &session.plan().microphones {
         let path = plan_directory.join(&mic.calibration_file);
-        let check = std::fs::File::open(&path).and_then(|file| {
-            if file.metadata()?.is_file() {
-                Ok(())
+        // Metadata first: opening a directory succeeds on Unix but fails
+        // with "Access is denied" on Windows, masking the regular-file check.
+        let check = std::fs::metadata(&path).and_then(|metadata| {
+            if metadata.is_file() {
+                std::fs::File::open(&path).map(|_| ())
             } else {
                 Err(std::io::Error::other("not a regular file"))
             }

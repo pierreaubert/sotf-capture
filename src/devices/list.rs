@@ -1,8 +1,14 @@
+#[cfg(all(target_os = "windows", feature = "asio"))]
+use super::misc::ASIO_DEVICE_PREFIX;
+#[cfg(all(target_os = "windows", feature = "asio"))]
+use cpal::traits::{DeviceTrait, HostTrait};
+
 /// List ASIO devices available on the system.
 ///
 /// Returns device names prefixed with "ASIO:" for use with `get_host_for_device`.
 /// Returns an empty Vec if ASIO is not available.
 #[cfg(all(target_os = "windows", feature = "asio"))]
+#[must_use]
 pub fn list_asio_devices() -> Vec<String> {
     match cpal::host_from_id(cpal::HostId::Asio) {
         Ok(host) => {
@@ -17,7 +23,7 @@ pub fn list_asio_devices() -> Vec<String> {
             devices
         }
         Err(e) => {
-            log::debug!("[AUDIO] ASIO not available: {}", e);
+            log::debug!("[AUDIO] ASIO not available: {e}");
             Vec::new()
         }
     }

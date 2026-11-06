@@ -35,6 +35,9 @@ fmt:
 test:
     {{cargo}} test --all --workspace --all-features --all-targets
 
+# QA (same target name as sotf-systemwide: lint + tests)
+qa: clippy test
+
 ntest:
     {{cargo}} nextest run --workspace --all-features --lib --bins --tests --examples
     # Custom callback harness has no libtest discovery protocol; retain its smoke gate.
