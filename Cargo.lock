@@ -222,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "autoeq-measurements"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "async-trait",
  "autoeq-core",
@@ -431,9 +431,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cc"
-version = "1.10.0"
+version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86e055fa6e3e40ad6187ba25b6855eeb635d5271f8e0f0e1e9a5826b8d75bea0"
+checksum = "375989decec1a0fa424442bed520fa12ede43a48475ce8c7417d2c69b32b5f6b"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -657,9 +657,9 @@ dependencies = [
 
 [[package]]
 name = "crc32fast"
-version = "1.5.3"
+version = "1.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ba106e844045ddc02c20768ac4b0b7cb45f2cc2ecbd833ac9f5dacb183c2055"
+checksum = "5f97d3416d5337d15c4b0d78c8c91df922ca143f57ec20e2d1c188333047ef04"
 dependencies = [
  "cfg-if",
 ]
@@ -821,9 +821,9 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
 name = "encoding_rs"
-version = "0.8.43"
+version = "0.8.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "844dfa6d76a4e6b9d98e03ae5ead89fbedd02cbd1206b7817d6d3dca62326967"
+checksum = "89253175e704ab869b04f9db224d38630e0211a53841a79181deae0889e169f5"
 dependencies = [
  "cfg-if",
  "core_detect",
@@ -1002,9 +1002,9 @@ dependencies = [
 
 [[package]]
 name = "glam"
-version = "0.34.1"
+version = "0.34.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc148d4ddd3930c52f9e5ae79b89805c6f07e9ff417e7b083e0348cea60a5aba"
+checksum = "54af5066834d6c2d404eb26ea036a15b15d9ff80db510b9a73ff95ab07f30831"
 
 [[package]]
 name = "glob"
@@ -1033,15 +1033,6 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
-dependencies = [
- "foldhash",
-]
-
-[[package]]
-name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
@@ -1055,7 +1046,7 @@ version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
- "hashbrown 0.17.1",
+ "hashbrown",
 ]
 
 [[package]]
@@ -1321,7 +1312,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
- "hashbrown 0.17.1",
+ "hashbrown",
 ]
 
 [[package]]
@@ -1353,9 +1344,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jiff"
-version = "0.2.38"
+version = "0.2.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2b005715dcbeb0089a3c0dab99f2ff1cc3b2525323552703d648585d342a383"
+checksum = "3ac703058abac89e5c39b0b879dce2b6b14a4ba36600c7e7e3d0c60a6883ef3c"
 dependencies = [
  "defmt",
  "jiff-core",
@@ -1368,9 +1359,9 @@ dependencies = [
 
 [[package]]
 name = "jiff-core"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e52fe76043ccecc9005d2305ebaadf7d7fc0cc89ca6baa10a94d6bc68c7128c"
+checksum = "aee43309eb53bafb8c36d35d6e444769c8f8e6206a9fbf7546f5db9d7d4a0e93"
 dependencies = [
  "defmt",
  "log",
@@ -1378,9 +1369,9 @@ dependencies = [
 
 [[package]]
 name = "jiff-static"
-version = "0.2.38"
+version = "0.2.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cc9817253cf7c7ee4684451bd327e88d6f3658014e54a29198625590650695c"
+checksum = "6dc32470c67eb7d0e9ccb74303fa925313dc04cecb1aa048beaa6f391e36a93d"
 dependencies = [
  "jiff-core",
  "proc-macro2",
@@ -1542,7 +1533,7 @@ checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 [[package]]
 name = "math-dsp"
 version = "0.5.36"
-source = "git+https://github.com/pierreaubert/math-audio#9c9c52f2ee55e0b8e58d070bf3708b007bd896c4"
+source = "git+https://github.com/pierreaubert/math-audio#65bf29a2259ab5d49fe0ffdf982f3757696bd793"
 dependencies = [
  "clap",
  "hound",
@@ -1564,7 +1555,7 @@ dependencies = [
 [[package]]
 name = "math-iir-fir"
 version = "0.5.28"
-source = "git+https://github.com/pierreaubert/math-audio#9c9c52f2ee55e0b8e58d070bf3708b007bd896c4"
+source = "git+https://github.com/pierreaubert/math-audio#65bf29a2259ab5d49fe0ffdf982f3757696bd793"
 dependencies = [
  "base64",
  "byteorder",
@@ -1581,7 +1572,7 @@ dependencies = [
 [[package]]
 name = "math-optimisation"
 version = "0.5.15"
-source = "git+https://github.com/pierreaubert/math-audio#9c9c52f2ee55e0b8e58d070bf3708b007bd896c4"
+source = "git+https://github.com/pierreaubert/math-audio#65bf29a2259ab5d49fe0ffdf982f3757696bd793"
 dependencies = [
  "chacha20",
  "clap",
@@ -1600,7 +1591,7 @@ dependencies = [
 [[package]]
 name = "math-rir"
 version = "0.5.14"
-source = "git+https://github.com/pierreaubert/math-audio#9c9c52f2ee55e0b8e58d070bf3708b007bd896c4"
+source = "git+https://github.com/pierreaubert/math-audio#65bf29a2259ab5d49fe0ffdf982f3757696bd793"
 dependencies = [
  "math-iir-fir",
  "rayon",
@@ -1609,7 +1600,7 @@ dependencies = [
 [[package]]
 name = "math-test-functions"
 version = "0.5.4"
-source = "git+https://github.com/pierreaubert/math-audio#9c9c52f2ee55e0b8e58d070bf3708b007bd896c4"
+source = "git+https://github.com/pierreaubert/math-audio#65bf29a2259ab5d49fe0ffdf982f3757696bd793"
 dependencies = [
  "clap",
  "directories",
@@ -1634,9 +1625,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mime"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+checksum = "d5848f5a9e8117cf94f2f90faac24a87ff81600ff8628c1e3deaab572e76bfa1"
 
 [[package]]
 name = "minimal-lexical"
@@ -2513,11 +2504,10 @@ dependencies = [
 
 [[package]]
 name = "rsqlite-vfs"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c51c9ae4df8a7fba42103df5c621fa3c37eccf3a3c650879e90fc48b11cc192c"
+checksum = "353b74f9810d5b085b6c42c9d86a5f0fdb795553235cdd48753b32e3809d18a7"
 dependencies = [
- "hashbrown 0.16.1",
  "thiserror 2.0.21",
 ]
 
@@ -2907,8 +2897,8 @@ dependencies = [
 
 [[package]]
 name = "sofa-reader"
-version = "0.2.1"
-source = "git+https://github.com/pierreaubert/sofa-reader#0a85f533cb7b6ab50ea5089adf5f2759a75ba853"
+version = "0.2.2"
+source = "git+https://github.com/pierreaubert/sofa-reader#a6ced3dd083918253701ebad3f12f95e5e34fd80"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2956,7 +2946,7 @@ dependencies = [
 [[package]]
 name = "sotf-metaheuristics-nature"
 version = "10.1.0"
-source = "git+https://github.com/pierreaubert/sotf-3rdparties#91522a7d1dab3e8702a215cd7519ba760f6a84b6"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#739bbe8955e1fd63127feed062b085466f8030d4"
 dependencies = [
  "getrandom 0.4.3",
  "num-traits",
@@ -2969,7 +2959,7 @@ dependencies = [
 [[package]]
 name = "sotf-nalgebra"
 version = "0.35.0"
-source = "git+https://github.com/pierreaubert/sotf-3rdparties#91522a7d1dab3e8702a215cd7519ba760f6a84b6"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#739bbe8955e1fd63127feed062b085466f8030d4"
 dependencies = [
  "approx",
  "glam",
@@ -2984,7 +2974,7 @@ dependencies = [
 [[package]]
 name = "sotf-rubato"
 version = "5.0.0"
-source = "git+https://github.com/pierreaubert/sotf-3rdparties#91522a7d1dab3e8702a215cd7519ba760f6a84b6"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#739bbe8955e1fd63127feed062b085466f8030d4"
 dependencies = [
  "audioadapter",
  "audioadapter-buffers",
@@ -2998,14 +2988,12 @@ dependencies = [
 
 [[package]]
 name = "sqlite-wasm-rs"
-version = "0.5.5"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc3efc0da82635d7e1ced0053bbbfa8c7ab9645d0bf36ceb4f7127bb85315d75"
+checksum = "36bd8e29bf08189a005b2df1df99823aa0861cabe9044e5f31ed54ca292ee618"
 dependencies = [
  "cc",
- "js-sys",
  "rsqlite-vfs",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -3232,9 +3220,9 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.25.17+spec-1.1.0"
+version = "0.25.18+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3641d5bbb5349a79e1020a242d251efbc546ad8048d133958323ce9c40a9c9c"
+checksum = "1ec6e78bd70db9420d8d212fa9dc97f116448a1ceff5d00eabb991d407e21396"
 dependencies = [
  "indexmap",
  "toml_datetime",
@@ -3765,9 +3753,9 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "winnow"
-version = "1.0.4"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
+checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
 dependencies = [
  "memchr",
 ]
@@ -3883,13 +3871,14 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.1.3"
+version = "9.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1156b39d142a34b999c2310a50455e0cb3760bf7efad0122f796d813bee26ccb"
+checksum = "23f17fbc870bfac28c6228aed7d6e6df352e26bf7015c4313727e16a7a01ce5e"
 dependencies = [
  "crc32fast",
  "getrandom 0.4.3",
  "indexmap",
+ "libc",
  "memchr",
  "nix",
  "typed-path",

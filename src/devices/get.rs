@@ -41,9 +41,7 @@ pub fn get_host_for_device(device_identifier: Option<&str>) -> cpal::Host {
         if let Some(id) = device_identifier {
             if is_asio_device(id) {
                 let asio_name = strip_asio_prefix(id);
-                log::info!(
-                    "[AUDIO] ASIO device requested: '{asio_name}', initializing ASIO host"
-                );
+                log::info!("[AUDIO] ASIO device requested: '{asio_name}', initializing ASIO host");
 
                 match cpal::host_from_id(cpal::HostId::Asio) {
                     Ok(host) => {

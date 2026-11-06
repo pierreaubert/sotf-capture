@@ -95,13 +95,7 @@ fn rename_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
     let source_wide = to_wide(source);
     let destination_wide = to_wide(destination);
     // SAFETY: both pointers reference NUL-terminated wide strings that outlive the call.
-    let result = unsafe {
-        MoveFileExW(
-            source_wide.as_ptr(),
-            destination_wide.as_ptr(),
-            0,
-        )
-    };
+    let result = unsafe { MoveFileExW(source_wide.as_ptr(), destination_wide.as_ptr(), 0) };
     if result == 0 {
         Err(std::io::Error::last_os_error())
     } else {
